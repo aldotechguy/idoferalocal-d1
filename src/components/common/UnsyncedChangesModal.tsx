@@ -231,11 +231,8 @@ export const UnsyncedChangesModal: React.FC<UnsyncedChangesModalProps> = ({ isOp
     });
   });
 
-  // Filter for UNSYNCED items only
-  const unsyncedAllItems = allItems.filter((item) => {
-    const rawDate = item.originalItem.updatedAt || item.originalItem.createdAt || item.originalItem.date;
-    return isItemUnsynced(item.category, item.id, rawDate);
-  });
+  // Filter for UNSYNCED items only: local records pending D1 sync (explicit keys).
+  const unsyncedAllItems = allItems.filter((item) => isItemUnsynced(item.category, item.id));
 
   // Calculate counts per category based on unsynced items
   const categoryCounts = {

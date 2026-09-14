@@ -557,7 +557,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     };
 
+    const handleUnsyncedDiscarded = async (e: any) => {
+      const stores = Array.isArray(e?.detail?.stores) ? e.detail.stores : [];
+      if (stores.length === 0) return;
+      try {
+        const refreshed: Record<string, any[]> = {};
+        await Promise.all(
+          stores.map(async (storeName: string) => {
+            try {
+              refreshed[storeName] = await getAllItems<any>(storeName as any);
+            } catch (err) {
+              console.warn(`Discard refresh warning on ${storeName}:`, err);
+            }
+          }),
+        );
+        if (Object.keys(refreshed).length > 0) applyCloudData(refreshed);
+      } catch (err) {
+        console.warn('Discard refresh warning:', err);
+      }
+    };
+
     window.addEventListener('idofera_db_restored', handleDbRestored);
+    window.addEventListener('idofera_unsynced_discarded', handleUnsyncedDiscarded as EventListener);
 
     const unsubTab = subscribeTabSync(async ({ storeName }) => {
       try {
@@ -569,6 +590,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     return () => {
       window.removeEventListener('idofera_db_restored', handleDbRestored);
+      window.removeEventListener('idofera_unsynced_discarded', handleUnsyncedDiscarded as EventListener);
       unsubTab();
     };
   }, [applyCloudData]);

@@ -62,10 +62,16 @@ import {
   getStorageEstimate,
   exportDatabaseJSON,
   importDatabaseJSON,
+  deleteItem,
   ALL_STORES,
+  type StoreName,
 } from '../../db/indexedDB';
-import { createD1BackupExport, clearUnsyncedLocalChanges } from '../../services/googleDriveService';
-import { clearD1PendingSync } from '../../services/d1StorageService';
+import {
+  createD1BackupExport,
+  clearUnsyncedLocalChanges,
+  getUnsyncedItemKeys,
+} from '../../services/googleDriveService';
+import { clearD1PendingSync, getD1PendingDeletions, groupPendingD1KeysByStore } from '../../services/d1StorageService';
 
 export const SettingsView: React.FC = () => {
   const { settings, updateSettings, auditLogs, logAudit, clearAuditLogs } = useApp();
@@ -187,19 +193,50 @@ export const SettingsView: React.FC = () => {
     }
     setIsClearingDB(true);
     try {
-      // Discard only the device's pending sync queue and counters; do not touch local records or D1
+      // Discard exactly the local records pending D1 sync. In-sync records stay intact,
+      // and D1 is never written: pending deletion intents are dropped so the cloud keeps them.
+      const pendingKeys = getUnsyncedItemKeys();
+      const pendingDeletions = getD1PendingDeletions();
+      const validStores = new Set<string>(ALL_STORES as readonly string[]);
+      const byStore = groupPendingD1KeysByStore(pendingKeys, pendingDeletions, validStores);
+
+      let discardedCount = 0;
+      for (const [collection, ids] of byStore) {
+        for (const id of ids) {
+          try {
+            await deleteItem(collection as StoreName, id);
+            discardedCount += 1;
+          } catch (err) {
+            console.warn(`Discard unsynced record failed for ${collection}/${id}:`, err);
+          }
+        }
+      }
+
+      // Drop the pending sync queues only. D1 is left untouched and never reloaded here;
+      // AppContext refreshes its in-memory lists from the same-tab broadcast below.
       clearUnsyncedLocalChanges();
       clearD1PendingSync();
+      try {
+        if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+          const touchedStores = [...byStore.keys()];
+          window.dispatchEvent(new CustomEvent('idofera_unsynced_discarded', { detail: { stores: touchedStores } }));
+        }
+      } catch (err) {
+        console.warn('Discard broadcast warning:', err);
+      }
 
       showToast({
-        title: 'Pending Sync Discarded',
-        message: "This device's pending sync queue has been discarded. Local records and D1 were not modified or reloaded.",
+        title: 'Unsynced Local Records Discarded',
+        message:
+          discardedCount > 0
+            ? `Discarded ${discardedCount} unsynced local record(s) pending D1 sync. In-sync local records and D1 were not modified.`
+            : 'No unsynced local records were pending D1 sync. In-sync local records and D1 were not modified.',
         type: 'success',
       });
     } catch (err: any) {
       showToast({
         title: 'Discard Failed',
-        message: err.message || 'Failed to discard pending sync.',
+        message: err.message || 'Failed to discard unsynced local records.',
         type: 'error',
       });
     } finally {
@@ -1823,7 +1860,7 @@ export const SettingsView: React.FC = () => {
                 )}
               </div>
               <p className="text-[11px] text-slate-600 dark:text-slate-300">
-                Discards only this device's pending sync queue and resets the unsynced changes counter. Existing local records and D1 records will not be modified, deleted, or reloaded.
+                Discards unsynced local records pending D1 sync and clears their pending sync queue. In-sync local records and D1 records are not modified, deleted, or reloaded.
               </p>
               {isAdmin ? (
                 <button
@@ -1877,12 +1914,12 @@ export const SettingsView: React.FC = () => {
         targetUser={targetPasswordResetUser}
       />
 
-      {/* Discard Local Records Pending Sync Confirmation Modal */}
+      {/* Discard Unsynced Local Records Confirmation Modal */}
       <ConfirmModal
         isOpen={showConfirmResetDB}
-        title="Discard Local Records Pending Sync"
-        message="This discards only this device's pending sync changes and resets the unsynced changes counter. Existing local records and D1 records will not be altered, deleted, or reloaded."
-        confirmText={isClearingDB ? 'Discarding Pending Sync...' : 'Discard Local Records'}
+        title="Discard Unsynced Local Records"
+        message="This permanently deletes local records pending D1 sync from this device and clears their pending sync queue. In-sync local records and D1 records will not be altered, deleted, or reloaded."
+        confirmText={isClearingDB ? 'Discarding Unsynced Records...' : 'Discard Local Records'}
         variant="danger"
         onClose={() => setShowConfirmResetDB(false)}
         onConfirm={handleDiscardLocalRecords}

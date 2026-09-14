@@ -238,6 +238,43 @@ function getDeletions(): D1Deletion[] {
   try { return JSON.parse(localStorage.getItem(DELETIONS_KEY) || '[]'); } catch { return []; }
 }
 
+export function getD1PendingDeletions(): D1Deletion[] {
+  return getDeletions();
+}
+
+const D1_CATEGORY_ALIASES: Record<string, string[]> = {
+  deliveries: ['deliveries', 'deliveryOrders'],
+  deliveryOrders: ['deliveries', 'deliveryOrders'],
+  whatsapp: ['whatsapp', 'whatsAppPreOrders'],
+  whatsAppPreOrders: ['whatsapp', 'whatsAppPreOrders'],
+};
+
+// Group every pending D1 key (explicit unsynced keys + deletion intents) by
+// canonical IndexedDB store so Discard deletes exactly the unsynced records.
+export function groupPendingD1KeysByStore(
+  pendingKeys: string[],
+  pendingDeletions: D1Deletion[],
+  validStores: Set<string>,
+): Map<string, Set<string>> {
+  const byStore = new Map<string, Set<string>>();
+  const queueKey = (collection: string, id: string) => {
+    const aliases = D1_CATEGORY_ALIASES[collection] || [collection];
+    const canonical = aliases.find((alias) => validStores.has(alias)) || collection;
+    if (!validStores.has(canonical) || !id) return;
+    if (!byStore.has(canonical)) byStore.set(canonical, new Set<string>());
+    byStore.get(canonical)!.add(String(id));
+  };
+  pendingKeys.forEach((rawKey) => {
+    const separator = String(rawKey).lastIndexOf(':');
+    if (separator <= 0) return;
+    queueKey(String(rawKey).slice(0, separator), String(rawKey).slice(separator + 1));
+  });
+  pendingDeletions.forEach(({ collection, documentId }) => {
+    if (documentId) queueKey(String(collection), String(documentId));
+  });
+  return byStore;
+}
+
 export function markD1RecordDeleted(collection: string, documentId: string) {
   const deletions = getDeletions().filter((item) => !(item.collection === collection && item.documentId === documentId));
   deletions.push({collection, documentId});

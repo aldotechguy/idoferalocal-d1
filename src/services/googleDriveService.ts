@@ -92,6 +92,57 @@ const UNSYNCED_ITEM_KEYS_STORAGE_KEY = 'idofera_unsynced_item_keys';
 const DISMISSED_UNSYNCED_KEYS_STORAGE_KEY = 'idofera_dismissed_unsynced_keys';
 export const REQUIRED_HEADER_SYNC_RECORDS = 1;
 
+// Inspect Changes categories use short labels while IndexedDB/D1 use store
+// names (deliveries <-> deliveryOrders, whatsapp <-> whatsAppPreOrders).
+// Both spellings refer to the same pending D1 record, so all helpers below
+// resolve every alias variant.
+const UNSYNCED_CATEGORY_ALIASES: Record<string, string[]> = {
+  sales: ['sales'],
+  products: ['products'],
+  customers: ['customers'],
+  deliveries: ['deliveries', 'deliveryOrders'],
+  deliveryOrders: ['deliveries', 'deliveryOrders'],
+  whatsapp: ['whatsapp', 'whatsAppPreOrders'],
+  whatsAppPreOrders: ['whatsapp', 'whatsAppPreOrders'],
+  expenses: ['expenses'],
+  suppliers: ['suppliers'],
+  purchases: ['purchases'],
+  heldOrders: ['heldOrders'],
+  moneyMovements: ['moneyMovements'],
+};
+
+function getUnsyncedKeyVariants(category: string, id: string): string[] {
+  const strId = String(id);
+  const aliases = UNSYNCED_CATEGORY_ALIASES[category] || [category];
+  return aliases.map((alias) => `${alias}:${strId}`);
+}
+
+// Canonical IndexedDB/D1 store name for a category alias. Writers
+// (saveDocument/removeDocument) use store names, while Inspect uses short
+// labels — both resolve to the same canonical store for sync/discard.
+function getCanonicalUnsyncedStore(category: string): string {
+  const canonical: Record<string, string> = {
+    sales: 'sales',
+    products: 'products',
+    customers: 'customers',
+    deliveries: 'deliveryOrders',
+    deliveryOrders: 'deliveryOrders',
+    whatsapp: 'whatsAppPreOrders',
+    whatsAppPreOrders: 'whatsAppPreOrders',
+    expenses: 'expenses',
+    suppliers: 'suppliers',
+    purchases: 'purchases',
+    heldOrders: 'heldOrders',
+    moneyMovements: 'moneyMovements',
+  };
+  return canonical[category] || category;
+}
+
+function getUnsyncedCategoryPrefixes(category: string): string[] {
+  const aliases = UNSYNCED_CATEGORY_ALIASES[category] || [category];
+  return aliases.map((alias) => `${alias}:`);
+}
+
 export function getUnsyncedItemKeys(): string[] {
   if (typeof localStorage === 'undefined') return [];
   try {
@@ -114,54 +165,74 @@ export function getDismissedUnsyncedKeys(): string[] {
 
 export function dismissItemFromUnsynced(category: string, id: string) {
   if (typeof localStorage === 'undefined' || !id) return;
-  const key = `${category}:${id}`;
-  
-  // 1. Remove from explicit unsynced keys if present
+  const variants = getUnsyncedKeyVariants(category, id);
+
+  // 1. Remove all alias variants from explicit unsynced keys if present
+  // Inspect Changes is D1-pending only (explicit keys), so removal hides the row
+  // while the IndexedDB record stays intact.
   const unsyncedKeys = new Set(getUnsyncedItemKeys());
-  if (unsyncedKeys.has(key)) {
-    unsyncedKeys.delete(key);
+  let removed = false;
+  variants.forEach((key) => {
+    if (unsyncedKeys.has(key)) {
+      unsyncedKeys.delete(key);
+      removed = true;
+    }
+  });
+  if (removed) {
     safeSetLocalStorage(UNSYNCED_ITEM_KEYS_STORAGE_KEY, JSON.stringify(Array.from(unsyncedKeys)));
-    decrementUnsyncedLocalChangesCount(1);
+    setUnsyncedLocalChangesCount(unsyncedKeys.size);
   }
-  
-  // 2. Add to dismissed keys so date-based check won't re-include it
+
+  // 2. Add all alias variants to dismissed keys so future checks stay hidden
+  // until the record is explicitly modified again.
   const dismissedKeys = new Set(getDismissedUnsyncedKeys());
-  if (!dismissedKeys.has(key)) {
-    dismissedKeys.add(key);
-    safeSetLocalStorage(DISMISSED_UNSYNCED_KEYS_STORAGE_KEY, JSON.stringify(Array.from(dismissedKeys)));
-  }
+  variants.forEach((key) => dismissedKeys.add(key));
+  safeSetLocalStorage(DISMISSED_UNSYNCED_KEYS_STORAGE_KEY, JSON.stringify(Array.from(dismissedKeys)));
   notifyListeners();
 }
 
 export function dismissCategoryFromUnsynced(category: string) {
   if (typeof localStorage === 'undefined') return;
-  const prefix = `${category}:`;
+  const prefixes = getUnsyncedCategoryPrefixes(category);
+  const matches = (k: string) => prefixes.some((prefix) => k.startsWith(prefix));
 
-  // 1. Filter out from unsynced keys
+  // 1. Filter out all alias variants from unsynced keys (record stays in IndexedDB)
   const unsyncedKeys = getUnsyncedItemKeys();
-  const filteredUnsynced = unsyncedKeys.filter((k) => !k.startsWith(prefix));
-  const removedCount = unsyncedKeys.length - filteredUnsynced.length;
+  const filteredUnsynced = unsyncedKeys.filter((k) => !matches(k));
   safeSetLocalStorage(UNSYNCED_ITEM_KEYS_STORAGE_KEY, JSON.stringify(filteredUnsynced));
-  if (removedCount > 0) {
-    decrementUnsyncedLocalChangesCount(removedCount);
-  }
+  setUnsyncedLocalChangesCount(filteredUnsynced.length);
+
+  // 2. Remember dismissed variants so the D1-pending-only filter stays hidden
+  // until the record is explicitly modified again.
+  const dismissedKeys = new Set(getDismissedUnsyncedKeys());
+  unsyncedKeys.filter(matches).forEach((k) => dismissedKeys.add(k));
+  safeSetLocalStorage(DISMISSED_UNSYNCED_KEYS_STORAGE_KEY, JSON.stringify(Array.from(dismissedKeys)));
   notifyListeners();
 }
 
 export function markItemUnsyncedKey(category: string, id: string) {
   if (typeof localStorage === 'undefined' || !id) return;
-  const key = `${category}:${id}`;
+  const variants = getUnsyncedKeyVariants(category, id);
 
-  // If item was previously dismissed, un-dismiss it when a new change happens
+  // If item was previously dismissed, un-dismiss all alias variants when a new change happens
   const dismissedKeys = new Set(getDismissedUnsyncedKeys());
-  if (dismissedKeys.has(key)) {
-    dismissedKeys.delete(key);
+  let dismissedChanged = false;
+  variants.forEach((key) => {
+    if (dismissedKeys.has(key)) {
+      dismissedKeys.delete(key);
+      dismissedChanged = true;
+    }
+  });
+  if (dismissedChanged) {
     safeSetLocalStorage(DISMISSED_UNSYNCED_KEYS_STORAGE_KEY, JSON.stringify(Array.from(dismissedKeys)));
   }
 
   const keys = new Set(getUnsyncedItemKeys());
-  if (!keys.has(key)) {
-    keys.add(key);
+  // Keep the canonical spelling used by D1 writers (first alias, i.e. the
+  // IndexedDB store name) so Sync Now, Inspect, and Discard resolve alike.
+  const canonicalKey = variants[0];
+  if (!variants.some((key) => keys.has(key))) {
+    keys.add(canonicalKey);
     safeSetLocalStorage(UNSYNCED_ITEM_KEYS_STORAGE_KEY, JSON.stringify(Array.from(keys)));
     setUnsyncedLocalChangesCount(keys.size);
   }
@@ -175,32 +246,19 @@ export function removeCategoryUnsyncedKeys(category: string) {
   dismissCategoryFromUnsynced(category);
 }
 
-export function isItemUnsynced(category: string, id: string, dateOrCreatedAt?: string): boolean {
+export function isItemUnsynced(category: string, id: string, _dateOrCreatedAt?: string): boolean {
   if (typeof localStorage === 'undefined') return false;
-  const key = `${category}:${id}`;
+  const variants = getUnsyncedKeyVariants(category, id);
 
-  // If user explicitly dismissed/deleted this item from local unsynced inspector
+  // If user explicitly dismissed this item from the unsynced inspector,
+  // keep it hidden until the record is modified again.
   const dismissedKeys = new Set(getDismissedUnsyncedKeys());
-  if (dismissedKeys.has(key)) return false;
+  if (variants.some((key) => dismissedKeys.has(key))) return false;
 
+  // Inspect Changes shows only local records pending D1 sync (explicit keys).
+  // Drive backup timestamps intentionally do not affect this D1-pending state.
   const keys = new Set(getUnsyncedItemKeys());
-  if (keys.has(key)) return true;
-
-  // Check if item timestamp is after last backup time
-  const lastBackupTimeStr = getLastBackupTime();
-  if (lastBackupTimeStr && dateOrCreatedAt) {
-    try {
-      const itemTime = new Date(dateOrCreatedAt).getTime();
-      const backupTime = new Date(lastBackupTimeStr).getTime();
-      if (!isNaN(itemTime) && !isNaN(backupTime) && itemTime > backupTime) {
-        return true;
-      }
-    } catch (e) {
-      // fallback
-    }
-  }
-
-  return false;
+  return variants.some((key) => keys.has(key));
 }
 
 export function markLocalChangesUnsynced(countIncrement: number = 1) {
@@ -234,6 +292,8 @@ export function setUnsyncedLocalChangesCount(newCount: number) {
 }
 
 export function clearUnsyncedLocalChanges() {
+  // Discard resets D1-pending state, so dismissed flags must reset too or
+  // they would hide records newly marked unsynced after a future edit.
   safeSetLocalStorage(UNSYNCED_COUNT_KEY, '0');
   localStorage.removeItem(LOCAL_UNSYNCED_KEY);
   localStorage.removeItem(UNSYNCED_ITEM_KEYS_STORAGE_KEY);
@@ -243,7 +303,36 @@ export function clearUnsyncedLocalChanges() {
 
 export function getUnsyncedLocalChangesCount(): number {
   if (typeof localStorage === 'undefined') return 0;
-  const count = new Set(getUnsyncedItemKeys()).size;
+  // Inspect Changes is D1-pending only: explicit keys minus dismissed keys.
+  // Drive backup time is excluded, and alias spellings (deliveries/
+  // deliveryOrders, whatsapp/whatsAppPreOrders) refer to one record.
+  const keys = new Set(getUnsyncedItemKeys());
+  try {
+    const raw = localStorage.getItem(DISMISSED_UNSYNCED_KEYS_STORAGE_KEY);
+    const dismissedList: string[] = raw ? JSON.parse(raw) : [];
+    if (dismissedList.length > 0) {
+      const dismissedIds = new Map<string, Set<string>>();
+      dismissedList.forEach((rawKey) => {
+        const separator = String(rawKey).lastIndexOf(':');
+        if (separator <= 0) return;
+        const category = String(rawKey).slice(0, separator);
+        const id = String(rawKey).slice(separator + 1);
+        const canonical = getCanonicalUnsyncedStore(category);
+        if (!dismissedIds.has(canonical)) dismissedIds.set(canonical, new Set<string>());
+        dismissedIds.get(canonical)!.add(id);
+      });
+      keys.forEach((rawKey) => {
+        const separator = String(rawKey).lastIndexOf(':');
+        if (separator <= 0) return;
+        const category = String(rawKey).slice(0, separator);
+        const id = String(rawKey).slice(separator + 1);
+        if (dismissedIds.get(getCanonicalUnsyncedStore(category))?.has(id)) keys.delete(rawKey);
+      });
+    }
+  } catch (e) {
+    // ignore malformed dismissed list
+  }
+  const count = keys.size;
   if (localStorage.getItem(UNSYNCED_COUNT_KEY) !== String(count)) {
     safeSetLocalStorage(UNSYNCED_COUNT_KEY, String(count));
   }
