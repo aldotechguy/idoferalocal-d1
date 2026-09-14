@@ -201,6 +201,7 @@ interface AppContextType {
   updateSale: (saleId: string, updates: Partial<Sale>, performedBy?: string, isSuperAdminOverride?: boolean) => void;
   deleteSale: (saleId: string, performedBy?: string) => void;
   reconcileHistoricalDeliveryExpenses: (salesList?: Sale[], expensesList?: Expense[]) => { fixedCount: number };
+  purgeHistoricalMoneyMovements: () => { purgedCount: number };
 
   // Customer actions
   addCustomer: (c: Omit<Customer, 'id' | 'createdAt' | 'purchaseHistoryCount' | 'outstandingBalance' | 'loyaltyPoints' | 'lifetimeValue'>) => Customer;
@@ -681,8 +682,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         else if (isCleared) setDeliveryOrders([]);
         else await putManyItems('deliveryOrders', deliveryOrders);
 
-        if (idbMoneyMovements && idbMoneyMovements.length > 0) setMoneyMovements(sanitizeMoneyMovements(idbMoneyMovements));
-        else if (isCleared) setMoneyMovements([]);
+        if (idbMoneyMovements && idbMoneyMovements.length > 0) {
+          const loadedSales = (idbSales && idbSales.length > 0) ? idbSales : sales;
+          const histSaleIds = new Set(
+            loadedSales
+              .filter((s: any) => Boolean(
+                s.isHistorical ||
+                (typeof s.id === 'string' && s.id.startsWith('sale-imp-')) ||
+                (typeof s.notes === 'string' &&
+                  (s.notes.includes('Historical') || s.notes.includes('Past Entry') || s.notes.includes('Import Wizard')))
+              ))
+              .map((s: any) => s.id)
+          );
+
+          const cleanedMovements = sanitizeMoneyMovements(idbMoneyMovements).filter((m) => {
+            if (typeof m.id === 'string' && m.id.startsWith('mm-hist-')) return false;
+            if (typeof m.referenceNo === 'string' && m.referenceNo.includes('Historical')) return false;
+            if (typeof m.notes === 'string' && (m.notes.includes('Historical') || m.notes.includes('Historical delivery fee'))) return false;
+            if (m.type === 'Sale Inflow' && m.referenceId && histSaleIds.has(m.referenceId)) return false;
+            return true;
+          });
+          setMoneyMovements(cleanedMovements);
+        } else if (isCleared) setMoneyMovements([]);
         else if (moneyMovements.length > 0) await putManyItems('moneyMovements', moneyMovements);
 
         // All legacy collection data is now represented in IndexedDB. Remove
@@ -1203,7 +1224,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const bulkImportSales = (imported: Partial<Sale>[]) => {
     const now = new Date().toISOString();
     const newExpenses: Expense[] = [];
-    const newMMs: MoneyMovement[] = [];
     const newItems: Sale[] = imported.map((item, idx) => {
       const saleId = 'sale-imp-' + Date.now() + '-' + idx;
       const fee = Number(item.deliveryFee) || 0;
@@ -1228,21 +1248,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           saleId,
         };
         newExpenses.push(newExp);
-
-        const isCash = newExp.paymentMethod === 'Cash';
-        newMMs.push({
-          id: generateUniqueId('mm'),
-          date: saleIso,
-          type: 'Expense Outflow',
-          subtype: 'Logistics',
-          sourceAccount: isCash ? 'Physical Cash' : 'Biz Account',
-          amount: fee,
-          referenceNo: newExp.title,
-          referenceId: expId,
-          performedBy: item.createdBy || 'Import Wizard',
-          notes: `Historical delivery fee expense: ${newExp.title}`,
-          createdAt: saleIso,
-        });
       }
 
       return {
@@ -1285,14 +1290,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       newExpenses.forEach((e) => {
         saveDocument('expenses', e);
         putItem('expenses', e).catch(() => {});
-      });
-    }
-
-    if (newMMs.length > 0) {
-      setMoneyMovements((prev) => [...newMMs, ...prev]);
-      newMMs.forEach((m) => {
-        saveDocument('moneyMovements', m);
-        putItem('moneyMovements', m).catch(() => {});
       });
     }
 
@@ -1608,25 +1605,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       saveDocument('expenses', histExpense);
       putItem('expenses', histExpense).catch((e) => console.warn('IndexedDB expense put error:', e));
 
-      // Auto-log Treasury outflow for the historical delivery fee expense so net balances remain consistent
-      const isCash = histExpense.paymentMethod === 'Cash';
-      const expMM: MoneyMovement = {
-        id: generateUniqueId('mm'),
-        date: now,
-        type: 'Expense Outflow',
-        subtype: 'Logistics',
-        sourceAccount: isCash ? 'Physical Cash' : 'Biz Account',
-        amount: deliveryFee,
-        referenceNo: expenseTitle,
-        referenceId: expId,
-        performedBy,
-        notes: `Historical delivery fee expense: ${expenseTitle}`,
-        createdAt: now,
-      };
-      setMoneyMovements((prev) => [expMM, ...prev]);
-      saveDocument('moneyMovements', expMM);
-      putItem('moneyMovements', expMM).catch(() => {});
-
       logAudit(
         'CREATE_EXPENSE',
         'Expense',
@@ -1639,8 +1617,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSales((prev) => [newSale, ...prev]);
     saveDocument('sales', newSale);
 
-    // Automatic Treasury / Money Movement logging for sale
-    if (paidAmount > 0) {
+    // Automatic Treasury / Money Movement logging for sale (Only for live real-time sales, NOT historical sales)
+    if (!isHistorical && paidAmount > 0) {
       const isCash = paymentMethod === 'Cash';
       const isBiz = paymentMethod === 'Mobile Transfer' || paymentMethod === 'Bank Transfer' || paymentMethod === 'Card';
 
@@ -1994,9 +1972,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
     }
 
-    // 7. Cascade to Money Movements
+    // 7. Cascade to Money Movements (Only for real-time live sales, not historical sales)
+    const isHistoricalSale =
+      sale.isHistorical ||
+      sale.id.startsWith('sale-imp-') ||
+      (sale.notes && (sale.notes.includes('Historical') || sale.notes.includes('Past Entry') || sale.notes.includes('Import Wizard')));
     const refundPaid = sale.paidAmount !== undefined ? sale.paidAmount : sale.totalAmount;
-    if (refundPaid > 0) {
+    if (!isHistoricalSale && refundPaid > 0) {
       const isCash = sale.paymentMethod === 'Cash';
       const refMM: MoneyMovement = {
         id: generateUniqueId('mm'),
@@ -2671,7 +2653,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const newExpensesToAdd: Expense[] = [];
       const updatedExpensesToSync: Expense[] = [];
       const updatedSalesToSync: Sale[] = [];
-      const newMMsToAdd: MoneyMovement[] = [];
 
       sorted.forEach((sale) => {
         const fee = Number(sale.deliveryFee) || 0;
@@ -2717,26 +2698,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           newExpensesToAdd.push(histExpense);
           saveDocument('expenses', histExpense);
           putItem('expenses', histExpense).catch(() => {});
-
-          // Auto-record Money Movement outflow if missing
-          const isCash = histExpense.paymentMethod === 'Cash';
-          const mmId = `mm-hist-exp-${sale.id}`;
-          const expMM: MoneyMovement = {
-            id: mmId,
-            date: saleIso,
-            type: 'Expense Outflow',
-            subtype: 'Logistics',
-            sourceAccount: isCash ? 'Physical Cash' : 'Biz Account',
-            amount: fee,
-            referenceNo: histExpense.title,
-            referenceId: expId,
-            performedBy: histExpense.paidBy,
-            notes: `Historical Delivery fee expense: ${histExpense.title}`,
-            createdAt: saleIso,
-          };
-          newMMsToAdd.push(expMM);
-          saveDocument('moneyMovements', expMM);
-          putItem('moneyMovements', expMM).catch(() => {});
 
           // Link on sale
           if (sale.expenseId !== expId) {
@@ -2790,14 +2751,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
       }
 
-      if (newMMsToAdd.length > 0) {
-        setMoneyMovements((prev) => {
-          const existingIds = new Set(prev.map((m) => m.id));
-          const fresh = newMMsToAdd.filter((m) => !existingIds.has(m.id));
-          return [...fresh, ...prev];
-        });
-      }
-
       if (updatedSalesToSync.length > 0) {
         const updateMap = new Map(updatedSalesToSync.map((s) => [s.id, s]));
         setSales((prev) => prev.map((s) => updateMap.get(s.id) || s));
@@ -2808,7 +2761,62 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [sales, expenses]
   );
 
-  // Automatically reconcile historical delivery fee expenses when storage is ready or after sales are loaded
+  // Helper to identify historical sales records
+  const isHistoricalSaleRecord = React.useCallback((s: Sale): boolean => {
+    if (!s) return false;
+    if (s.isHistorical) return true;
+    if (typeof s.id === 'string' && s.id.startsWith('sale-imp-')) return true;
+    if (typeof s.notes === 'string' && (s.notes.includes('Historical') || s.notes.includes('Past Entry') || s.notes.includes('Import Wizard'))) return true;
+    return false;
+  }, []);
+
+  // Purge any historical sales inflows or historical delivery fee expense outflows from Money Movement Tracker
+  const purgeHistoricalMoneyMovements = React.useCallback((): { purgedCount: number } => {
+    const histSaleIds = new Set(sales.filter(isHistoricalSaleRecord).map((s) => s.id));
+    let purgedCount = 0;
+
+    setMoneyMovements((prev) => {
+      const toRemove: MoneyMovement[] = [];
+      const kept: MoneyMovement[] = [];
+
+      prev.forEach((m) => {
+        const isHistDeliveryExpenseMM =
+          (typeof m.id === 'string' && m.id.startsWith('mm-hist-')) ||
+          (m.subtype === 'Logistics' && (
+            (typeof m.referenceNo === 'string' && m.referenceNo.includes('Historical')) ||
+            (typeof m.notes === 'string' && (m.notes.includes('Historical') || m.notes.includes('Historical delivery fee')))
+          ));
+
+        const isHistSaleInflow =
+          m.type === 'Sale Inflow' && (
+            (m.referenceId && histSaleIds.has(m.referenceId)) ||
+            (typeof m.notes === 'string' && (m.notes.includes('Historical') || m.notes.includes('Import Wizard')))
+          );
+
+        if (isHistDeliveryExpenseMM || isHistSaleInflow) {
+          toRemove.push(m);
+        } else {
+          kept.push(m);
+        }
+      });
+
+      if (toRemove.length > 0) {
+        purgedCount = toRemove.length;
+        toRemove.forEach((m) => {
+          removeDocument('moneyMovements', m.id);
+          deleteItem('moneyMovements', m.id).catch(() => {});
+          markIdDeleted('moneyMovements', m.id);
+        });
+        console.log(`[Treasury] Purged ${toRemove.length} historical money movement records to preserve live Bank and Till balances.`);
+      }
+
+      return kept;
+    });
+
+    return { purgedCount };
+  }, [sales, isHistoricalSaleRecord]);
+
+  // Automatically reconcile historical delivery fee expenses and purge historical movements when storage is ready
   const hasAutoReconciledRef = useRef(false);
   useEffect(() => {
     if (!isStorageReady) return;
@@ -2816,10 +2824,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!hasAutoReconciledRef.current && sales.length > 0) {
         hasAutoReconciledRef.current = true;
         reconcileHistoricalDeliveryExpenses();
+        purgeHistoricalMoneyMovements();
       }
     }, 400);
     return () => clearTimeout(timer);
-  }, [isStorageReady, sales.length, reconcileHistoricalDeliveryExpenses]);
+  }, [isStorageReady, sales.length, reconcileHistoricalDeliveryExpenses, purgeHistoricalMoneyMovements]);
 
   // Customer Management
   const addCustomer = (c: Omit<Customer, 'id' | 'createdAt' | 'purchaseHistoryCount' | 'outstandingBalance' | 'loyaltyPoints' | 'lifetimeValue'>) => {
@@ -4812,6 +4821,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateSale,
         deleteSale,
         reconcileHistoricalDeliveryExpenses,
+        purgeHistoricalMoneyMovements,
         addCustomer,
         updateCustomer,
         updateCustomerBalance,

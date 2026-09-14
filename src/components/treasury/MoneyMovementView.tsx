@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 import { LiquidAccountType, MoneyMovement, MoneyMovementType } from '../../types';
 import { TransferModal } from './TransferModal';
 import { OwnerWithdrawalModal } from './OwnerWithdrawalModal';
@@ -31,8 +32,9 @@ import { RecalibrateModal } from './RecalibrateModal';
 import { ConfirmModal } from '../common/ConfirmModal';
 
 export const MoneyMovementView: React.FC = () => {
-  const { treasuryBalances, moneyMovements, deleteMoneyMovement, settings } = useApp();
+  const { treasuryBalances, moneyMovements, deleteMoneyMovement, purgeHistoricalMoneyMovements, settings } = useApp();
   const { currentUser, isSuperAdmin } = useAuth();
+  const { showToast } = useToast();
 
   // Modals state
   const [showTransferModal, setShowTransferModal] = useState(false);
@@ -218,6 +220,23 @@ export const MoneyMovementView: React.FC = () => {
     }
   };
 
+  const handlePurgeHistorical = () => {
+    const res = purgeHistoricalMoneyMovements();
+    if (res.purgedCount > 0) {
+      showToast({
+        title: 'Historical Records Purged',
+        message: `Successfully purged ${res.purgedCount} past historical sales/delivery movements from the liquid cash ledger.`,
+        type: 'success',
+      });
+    } else {
+      showToast({
+        title: 'Ledger Clean',
+        message: 'No contaminated historical records found in Money Movement Tracker.',
+        type: 'info',
+      });
+    }
+  };
+
   return (
     <div className="space-y-6 pb-14 text-slate-900 dark:text-slate-100">
       
@@ -249,6 +268,16 @@ export const MoneyMovementView: React.FC = () => {
             >
               <Scale className="w-4 h-4 text-indigo-500" />
               <span>Calibrate Balances</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handlePurgeHistorical}
+              title="Purge any historical sales inflows or delivery fee outflows that may distort live liquid balances"
+              className="px-3.5 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 shadow-2xs"
+            >
+              <RefreshCw className="w-4 h-4 text-emerald-500" />
+              <span>Purge Past Records</span>
             </button>
 
             <button

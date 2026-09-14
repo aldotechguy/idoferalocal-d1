@@ -295,27 +295,30 @@ export function migrateSnapshot(stores: Record<string, any[]>): Record<string, a
       result.expenses.push(newExpense);
       sale.expenseId = expId;
 
-      // Ensure matching MoneyMovement outflow exists
-      const isCash = newExpense.paymentMethod === 'Cash';
-      const mmId = `mm-hist-exp-${sale.id}`;
-      const existsMM = result.moneyMovements.some((m: any) => m.referenceId === expId || m.id === mmId);
-      if (!existsMM) {
-        result.moneyMovements.push({
-          id: mmId,
-          date: saleIso,
-          type: 'Expense Outflow',
-          subtype: 'Logistics',
-          sourceAccount: isCash ? 'Physical Cash' : 'Biz Account',
-          amount: fee,
-          referenceNo: newExpense.title,
-          referenceId: expId,
-          performedBy: newExpense.paidBy,
-          notes: `Historical Delivery fee expense: ${newExpense.title}`,
-          createdAt: saleIso,
-        });
-      }
     }
   });
+
+  // Ensure Money Movements never contain historical sale inflows or historical delivery expense outflows
+  if (result.moneyMovements && Array.isArray(result.moneyMovements)) {
+    const historicalSaleIds = new Set(
+      (result.sales || [])
+        .filter((s: any) => Boolean(
+          s.isHistorical ||
+          (typeof s.id === 'string' && s.id.startsWith('sale-imp-')) ||
+          (typeof s.notes === 'string' &&
+            (s.notes.includes('Historical') || s.notes.includes('Past Entry') || s.notes.includes('Import Wizard')))
+        ))
+        .map((s: any) => s.id)
+    );
+
+    result.moneyMovements = result.moneyMovements.filter((m: any) => {
+      if (typeof m.id === 'string' && m.id.startsWith('mm-hist-')) return false;
+      if (typeof m.referenceNo === 'string' && m.referenceNo.includes('Historical')) return false;
+      if (typeof m.notes === 'string' && m.notes.includes('Historical')) return false;
+      if (m.type === 'Sale Inflow' && m.referenceId && historicalSaleIds.has(m.referenceId)) return false;
+      return true;
+    });
+  }
 
   return result;
 }
