@@ -1,0 +1,247 @@
+{
+  "app": "IdoferaLabs POS",
+  "version": "2.5",
+  "exportedAt": "2026-08-11T00:00:00.000Z",
+  "data": {
+    "users": [
+      {
+        "id": "usr_admin_001",
+        "email": "admin@idofera.com",
+        "username": "admin",
+        "displayName": "System Admin",
+        "role": "Administrator",
+        "status": "Active",
+        "createdAt": "2026-01-01T08:00:00.000Z",
+        "password": "Password123!",
+        "passwordLastChanged": "2026-01-01T08:00:00.000Z",
+        "isProtected": true,
+        "isSuperAdmin": true
+      },
+      {
+        "id": "usr_staff_001",
+        "email": "sales@idofera.com",
+        "username": "sales",
+        "displayName": "Sales Agent",
+        "role": "Sales Staff",
+        "status": "Active",
+        "createdAt": "2026-01-02T08:00:00.000Z",
+        "password": "Password123!"
+      }
+    ],
+    "products": [
+      {
+        "id": "prod_001",
+        "name": "Sample Packaging Box (Medium)",
+        "sku": "BOX-MED-001",
+        "barcode": "8901234567890",
+        "qrCode": "QR-BOX-MED-001",
+        "category": "Boxes",
+        "brand": "Idofera Pack",
+        "supplierId": "sup_001",
+        "supplierName": "Global Packaging Supplies Ltd",
+        "description": "Durable corrugated medium box for packaging.",
+        "images": [],
+        "costPrice": 150,
+        "retailPrice": 250,
+        "wholesalePrice": 200,
+        "minWholesaleQty": 50,
+        "dealerPrice": 180,
+        "minimumSellingPrice": 170,
+        "currentStock": 500,
+        "minimumStockLevel": 50,
+        "unit": "pcs",
+        "status": "Active",
+        "createdAt": "2026-01-01T09:00:00.000Z",
+        "updatedAt": "2026-01-01T09:00:00.000Z"
+      }
+    ],
+    "customers": [
+      {
+        "id": "cust_001",
+        "name": "Jane Doe Enterprises",
+        "phone": "+2348012345678",
+        "email": "jane@example.com",
+        "address": "12 Commercial Way, Victoria Island, Lagos",
+        "purchaseHistoryCount": 1,
+        "outstandingBalance": 0,
+        "loyaltyPoints": 25,
+        "lifetimeValue": 12500,
+        "createdAt": "2026-01-03T10:00:00.000Z"
+      }
+    ],
+    "suppliers": [
+      {
+        "id": "sup_001",
+        "name": "Global Packaging Supplies Ltd",
+        "contactPerson": "John Smith",
+        "email": "john@globalpack.com",
+        "phone": "+2348098765432",
+        "address": "45 Industrial Zone, Ikeja, Lagos",
+        "paymentTerms": "Net 30",
+        "productsCount": 10,
+        "outstandingBalance": 0,
+        "createdAt": "2026-01-01T08:00:00.000Z"
+      }
+    ],
+    "sales": [
+      {
+        "id": "sale_001",
+        "invoiceNo": "INV-20260105-001",
+        "customerId": "cust_001",
+        "customerName": "Jane Doe Enterprises",
+        "type": "Retail",
+        "items": [
+          {
+            "productId": "prod_001",
+            "productName": "Sample Packaging Box (Medium)",
+            "sku": "BOX-MED-001",
+            "quantity": 50,
+            "unitPrice": 250,
+            "costPrice": 150,
+            "total": 12500,
+            "isWholesale": false
+          }
+        ],
+        "subtotal": 12500,
+        "discount": 0,
+        "tax": 0,
+        "deliveryFee": 0,
+        "totalAmount": 12500,
+        "paidAmount": 12500,
+        "paymentMethod": "Cash",
+        "status": "Completed",
+        "createdBy": "System Admin",
+        "createdAt": "2026-01-05T14:30:00.000Z"
+      },
+      {
+        "id": "sale_hist_001",
+        "invoiceNo": "INV-HIST-001",
+        "customerId": "cust_001",
+        "customerName": "Jane Doe Enterprises",
+        "type": "Wholesale",
+        "items": [
+          {
+            "productId": "prod_001",
+            "productName": "Sample Packaging Box (Medium)",
+            "sku": "BOX-MED-001",
+            "quantity": 20,
+            "unitPrice": 200,
+            "costPrice": 150,
+            "total": 4000,
+            "isWholesale": true
+          }
+        ],
+        "subtotal": 4000,
+        "discount": 0,
+        "tax": 0,
+        "deliveryFee": 1000,
+        "totalAmount": 5000,
+        "paidAmount": 5000,
+        "paymentMethod": "Cash",
+        "status": "Completed",
+        "createdBy": "System Admin",
+        "createdAt": "2026-01-02T12:00:00.000Z",
+        "isHistorical": true,
+        "expenseId": "exp_hist_001"
+      }
+    ],
+    "purchases": [
+      {
+        "id": "po_001",
+        "poNumber": "PO-20260105-001",
+        "supplierId": "supp_001",
+        "supplierName": "Lagos Carton & Box Co.",
+        "items": [
+          {
+            "productId": "prod_001",
+            "productName": "Sample Packaging Box (Medium)",
+            "sku": "BOX-MED-001",
+            "quantity": 100,
+            "unitCost": 150,
+            "oldUnitCost": 140,
+            "customRetailPrice": 250,
+            "oldRetailPrice": 240,
+            "total": 15000,
+            "receivedQuantity": 0,
+            "acceptedQuantity": 0,
+            "damagedQuantity": 0,
+            "updateCatalogCost": true,
+            "updateCatalogRetailPrice": false
+          }
+        ],
+        "deliveryFee": 0,
+        "localLogisticsFee": 0,
+        "totalAmount": 15000,
+        "paidAmount": 15000,
+        "paymentStatus": "Paid",
+        "deliveryStatus": "Pending",
+        "expectedDelivery": "2026-01-15T00:00:00.000Z",
+        "inspectionStatus": "Pending",
+        "isDraft": false,
+        "quotationNotes": "Confirmed inventory batch with supplier rep",
+        "receivingHistory": [],
+        "createdBy": "System Admin",
+        "createdAt": "2026-01-05T10:00:00.000Z"
+      }
+    ],
+    "expenses": [
+      {
+        "id": "exp_hist_001",
+        "title": "Logistics Delivery Fee - Historical (INV-HIST-001)",
+        "category": "Logistics",
+        "amount": 1000,
+        "description": "Historical delivery fee expense for Jane Doe Enterprises. Sale INV-HIST-001.",
+        "paidBy": "System Admin",
+        "paymentMethod": "Cash",
+        "date": "2026-01-02",
+        "createdAt": "2026-01-02T12:00:00.000Z",
+        "isHistorical": true,
+        "saleId": "sale_hist_001"
+      }
+    ],
+    "notifications": [],
+    "auditLogs": [],
+    "stockMovements": [],
+    "pricingHistory": [],
+    "settings": [
+      {
+        "id": "company_settings",
+        "companyName": "Idofera Packaging & POS",
+        "address": "Lagos, Nigeria",
+        "phone": "+2348000000000",
+        "email": "info@idofera.com",
+        "currency": "₦",
+        "taxRate": 0
+      }
+    ],
+    "heldOrders": [],
+    "whatsAppPreOrders": [],
+    "deliveryOrders": [],
+    "moneyMovements": [
+      {
+        "id": "mm_001",
+        "date": "2026-01-01T08:00:00.000Z",
+        "type": "Opening Balance",
+        "sourceAccount": "Biz Account",
+        "destinationAccount": "Biz Account",
+        "amount": 500000,
+        "performedBy": "System Admin",
+        "notes": "Initial business capitalization",
+        "createdAt": "2026-01-01T08:00:00.000Z"
+      },
+      {
+        "id": "mm_hist_001",
+        "date": "2026-01-02T12:00:00.000Z",
+        "type": "Expense Outflow",
+        "subtype": "Logistics",
+        "sourceAccount": "Physical Cash",
+        "amount": 1000,
+        "referenceNo": "Logistics Delivery Fee - Historical (INV-HIST-001)",
+        "referenceId": "exp_hist_001",
+        "performedBy": "System Admin",
+        "notes": "Historical Delivery fee expense: Logistics Delivery Fee - Historical (INV-HIST-001)",
+        "createdAt": "2026-01-02T12:00:00.000Z"
+      }
+    ]
+  }
+}

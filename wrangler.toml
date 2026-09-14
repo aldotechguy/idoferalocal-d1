@@ -1,0 +1,12 @@
+name = "idofera-packaging"
+main = "sites-worker.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[site]
+bucket = "./dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "idofera-d1"
+database_id = "3e95a550-a091-490b-819d-f0acb7ea8dd8"

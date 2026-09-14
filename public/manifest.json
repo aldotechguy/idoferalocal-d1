@@ -1,0 +1,60 @@
+{
+  "id": "idofera-pos-pwa",
+  "short_name": "Idofera POS",
+  "name": "Idofera Packaging POS & Business System",
+  "description": "Offline-first Point of Sale, Inventory & Packaging Management Platform for Idofera Packaging",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#0f172a",
+  "theme_color": "#2563eb",
+  "display": "standalone",
+  "display_override": ["standalone", "window-controls-overlay", "minimal-ui"],
+  "orientation": "portrait",
+  "scope": "/",
+  "categories": ["business", "shopping", "productivity", "utilities", "finance"],
+  "launch_handler": {
+    "client_mode": "focus-existing"
+  },
+  "shortcuts": [
+    {
+      "name": "New Sale Point of Sale",
+      "short_name": "New Sale",
+      "description": "Open POS cash register for sales",
+      "url": "/",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Inventory & Stock Catalog",
+      "short_name": "Stock",
+      "description": "View and manage packaging inventory",
+      "url": "/?tab=inventory",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "System Settings & Cloud Sync",
+      "short_name": "Settings",
+      "description": "Access system configuration & sync",
+      "url": "/?tab=settings",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}
