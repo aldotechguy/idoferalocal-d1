@@ -1868,7 +1868,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const isHistoricalSale =
       sale.isHistorical ||
       sale.id.startsWith('sale-imp-') ||
-      (sale.notes && (sale.notes.includes('Historical') || sale.notes.includes('Past Entry')));
+      (sale.notes &&
+        (sale.notes.includes('Historical') ||
+          sale.notes.includes('Past Entry') ||
+          sale.notes.includes('Import Wizard')));
 
     if (!isHistoricalSale) {
       sale.items.forEach((item) => {
@@ -1973,10 +1976,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // 7. Cascade to Money Movements (Only for real-time live sales, not historical sales)
-    const isHistoricalSale =
-      sale.isHistorical ||
-      sale.id.startsWith('sale-imp-') ||
-      (sale.notes && (sale.notes.includes('Historical') || sale.notes.includes('Past Entry') || sale.notes.includes('Import Wizard')));
     const refundPaid = sale.paidAmount !== undefined ? sale.paidAmount : sale.totalAmount;
     if (!isHistoricalSale && refundPaid > 0) {
       const isCash = sale.paymentMethod === 'Cash';
