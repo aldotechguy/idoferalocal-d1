@@ -9,7 +9,7 @@ interface AddSupplierModalProps {
 }
 
 export const AddSupplierModal: React.FC<AddSupplierModalProps> = ({ isOpen, onClose }) => {
-  const { addSupplier } = useApp();
+  const { addSupplier, settings } = useApp();
   const { currentUser } = useAuth();
 
   const [formData, setFormData] = useState({
@@ -19,6 +19,7 @@ export const AddSupplierModal: React.FC<AddSupplierModalProps> = ({ isOpen, onCl
     phone: '',
     address: '',
     paymentTerms: 'Net 30',
+    openingBalance: '',
   });
 
   if (!isOpen || currentUser?.role === 'Sales Staff') return null;
@@ -28,7 +29,13 @@ export const AddSupplierModal: React.FC<AddSupplierModalProps> = ({ isOpen, onCl
     if (!formData.name.trim()) return;
 
     addSupplier({
-      ...formData,
+      name: formData.name.trim(),
+      contactPerson: formData.contactPerson.trim(),
+      email: formData.email.trim(),
+      phone: formData.phone.trim(),
+      address: formData.address.trim(),
+      paymentTerms: formData.paymentTerms,
+      outstandingBalance: formData.openingBalance ? Math.max(0, parseFloat(formData.openingBalance) || 0) : 0,
     });
 
     onClose();
@@ -143,6 +150,21 @@ export const AddSupplierModal: React.FC<AddSupplierModalProps> = ({ isOpen, onCl
               placeholder="Supplier physical office address..."
               value={formData.address}
               onChange={(e) => setFormData({ ...formData, address: e.target.value })}
+              className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white border border-transparent focus:border-amber-500"
+            />
+          </div>
+
+          <div>
+            <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+              Opening Payable Debt / Balance ({settings.currencySymbol}) <span className="text-[10px] font-normal text-slate-400">(Optional pre-existing debt)</span>
+            </label>
+            <input
+              type="number"
+              min="0"
+              step="any"
+              placeholder="0.00"
+              value={formData.openingBalance}
+              onChange={(e) => setFormData({ ...formData, openingBalance: e.target.value })}
               className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white border border-transparent focus:border-amber-500"
             />
           </div>

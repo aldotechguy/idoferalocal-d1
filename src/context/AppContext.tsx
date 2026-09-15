@@ -214,7 +214,7 @@ interface AppContextType {
   deleteCustomer: (id: string) => void;
 
   // Supplier actions
-  addSupplier: (s: Omit<Supplier, 'id' | 'createdAt' | 'productsCount' | 'outstandingBalance'>) => void;
+  addSupplier: (s: Omit<Supplier, 'id' | 'createdAt' | 'productsCount'> & { outstandingBalance?: number }) => void;
   updateSupplier: (id: string, updates: Partial<Supplier>) => void;
   deleteSupplier: (id: string) => void;
 
@@ -3067,12 +3067,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Supplier Management
-  const addSupplier = (s: Omit<Supplier, 'id' | 'createdAt' | 'productsCount' | 'outstandingBalance'>) => {
+  const addSupplier = (s: Omit<Supplier, 'id' | 'createdAt' | 'productsCount'> & { outstandingBalance?: number }) => {
     const newSup: Supplier = {
       ...s,
       id: generateUniqueId('sup'),
       productsCount: 0,
-      outstandingBalance: 0,
+      outstandingBalance: Number(s.outstandingBalance) || 0,
       createdAt: new Date().toISOString(),
     };
     setSuppliers((prev) => [newSup, ...prev]);
@@ -4777,22 +4777,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast({ title: 'Settings Saved', message: 'Store preferences updated successfully.', type: 'success' });
   };
 
-  const orderedLists = useMemo(() => ({
-    products: sortRecordsLifo(products),
-    customers: sortRecordsLifo(customers),
-    suppliers: sortRecordsLifo(suppliers),
-    sales: sortRecordsLifo(sales),
-    purchases: sortRecordsLifo(purchases),
-    expenses: sortRecordsLifo(expenses),
-    notifications: sortRecordsLifo(notifications),
-    auditLogs: sortRecordsLifo(auditLogs),
-    stockMovements: sortRecordsLifo(stockMovements),
-    pricingHistory: sortRecordsLifo(pricingHistory),
-    heldOrders: sortRecordsLifo(heldOrders),
-    whatsAppPreOrders: sortRecordsLifo(whatsAppPreOrders),
-    deliveryOrders: sortRecordsLifo(deliveryOrders),
-    moneyMovements: sortRecordsLifo(moneyMovements),
-  }), [products, customers, suppliers, sales, purchases, expenses, notifications, auditLogs, stockMovements, pricingHistory, heldOrders, whatsAppPreOrders, deliveryOrders, moneyMovements]);
+  const orderedLists = useMemo(() => {
+    const augmentedSuppliers = suppliers.map((sup) => {
+      // Find all official (non-draft, non-cancelled) purchase orders for this supplier
+      const supplierPOs = purchases.filter(
+        (p) =>
+          (p.supplierId === sup.id || (p.supplierName && sup.name && p.supplierName.trim().toLowerCase() === sup.name.trim().toLowerCase())) &&
+          !p.isDraft &&
+          p.deliveryStatus !== 'Cancelled'
+      );
+      const calculatedPayable = supplierPOs.reduce(
+        (sum, po) => sum + Math.max(0, (Number(po.totalAmount) || 0) - (Number(po.paidAmount) || 0)),
+        0
+      );
+      const linkedProducts = products.filter(
+        (prod) =>
+          prod.supplierId === sup.id ||
+          (prod.supplierName && sup.name && prod.supplierName.trim().toLowerCase() === sup.name.trim().toLowerCase())
+      );
+      const hasPOs = supplierPOs.length > 0;
+      const outstandingBalance = hasPOs ? calculatedPayable : (Number(sup.outstandingBalance) || 0);
+
+      return {
+        ...sup,
+        productsCount: linkedProducts.length,
+        outstandingBalance,
+      };
+    });
+
+    return {
+      products: sortRecordsLifo(products),
+      customers: sortRecordsLifo(customers),
+      suppliers: sortRecordsLifo(augmentedSuppliers),
+      sales: sortRecordsLifo(sales),
+      purchases: sortRecordsLifo(purchases),
+      expenses: sortRecordsLifo(expenses),
+      notifications: sortRecordsLifo(notifications),
+      auditLogs: sortRecordsLifo(auditLogs),
+      stockMovements: sortRecordsLifo(stockMovements),
+      pricingHistory: sortRecordsLifo(pricingHistory),
+      heldOrders: sortRecordsLifo(heldOrders),
+      whatsAppPreOrders: sortRecordsLifo(whatsAppPreOrders),
+      deliveryOrders: sortRecordsLifo(deliveryOrders),
+      moneyMovements: sortRecordsLifo(moneyMovements),
+    };
+  }, [products, customers, suppliers, sales, purchases, expenses, notifications, auditLogs, stockMovements, pricingHistory, heldOrders, whatsAppPreOrders, deliveryOrders, moneyMovements]);
 
   return (
     <AppContext.Provider
