@@ -10,3 +10,15 @@ bucket = "./dist"
 binding = "DB"
 database_name = "idofera-d1"
 database_id = "3e95a550-a091-490b-819d-f0acb7ea8dd8"
+
+# Unified Mall branch preview env -> new proper relational D1 `idofera`.
+# Usage: `npx wrangler dev --env mall` / `npx wrangler deploy --env mall`
+# NOTE: replace database_id with the real id after `npx wrangler d1 create idofera`.
+[env.mall]
+name = "idofera-mall-preview"
+
+[[env.mall.d1_databases]]
+binding = "DB"
+database_name = "idofera"
+database_id = "3a3eb157-5aa5-419a-a8ce-2eade2afc436"
+
