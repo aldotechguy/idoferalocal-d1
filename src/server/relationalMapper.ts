@@ -65,6 +65,8 @@ export function productRow(r: any) {
     minimumSellingPrice: KoboToNaira(r.min_selling_price_kobo),
     currentStock: n(r.stock_qty), minimumStockLevel: n(r.low_stock_threshold, 5),
     unit: r.unit || 'pcs', expiryDate: r.expiry_date || undefined, status: r.status || 'Active',
+    isMallListed: n(r.is_mall_listed) === 1,
+    mallPrice: r.mall_price_kobo != null ? KoboToNaira(r.mall_price_kobo) : undefined,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
@@ -176,7 +178,9 @@ export function productToRow(p: any, now: string) {
     min_selling_price_kobo: NairaToKobo(p.minimumSellingPrice),
     stock_qty: n(p.currentStock), low_stock_threshold: n(p.minimumStockLevel, 5),
     unit: s(p.unit, 'pcs'), expiry_date: p.expiryDate ? s(p.expiryDate) : null,
-    status: s(p.status, 'Active'), created_at: s(p.createdAt, now), updated_at: s(p.updatedAt, now),
+    status: s(p.status, 'Active'), is_mall_listed: b01(p.isMallListed),
+    mall_price_kobo: p.mallPrice != null ? NairaToKobo(p.mallPrice) : null,
+    created_at: s(p.createdAt, now), updated_at: s(p.updatedAt, now),
   };
 }
 export function customerToRow(c: any, now: string) {

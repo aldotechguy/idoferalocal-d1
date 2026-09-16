@@ -14,6 +14,7 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: "50mb" }));
+app.use("/mall", express.json({ limit: "50mb" }));
 
 // Initialize Local SQLite Database simulating Cloudflare D1
 const DB_DIR = path.join(process.cwd(), "data");
@@ -46,12 +47,13 @@ function createDatabaseInstance(): DatabaseSync {
 
 let db = createDatabaseInstance();
 
-// Phase 4 — relational backend. Local node:sqlite now carries the SAME 30
+// Phase 4 â€” relational backend. Local node:sqlite now carries the SAME 30
 // tables as D1 `idofera` (DDL single-sourced from drizzle/0000_unified-relational.sql).
 // The mapper translates rows <-> the unchanged frontend snapshot shape, so the
 // UI needs zero changes. Legacy app_documents tables are kept for rollback reads.
-import { makeNodeAdapter } from "./src/server/nodeAdapter.js";
-import { ensureRelationalSchemaNode } from "./src/server/nodeAdapter.js";
+import { makeNodeAdapter } from "./src/server/nodeAdapter";
+import { ensureRelationalSchemaNode, makeNodeMallExecutor } from "./src/server/nodeAdapter";
+import { handleMallApi } from "./src/server/mallApi";
 import { buildSnapshot } from "./src/server/relationalSnapshot.js";
 import {
   upsertToStatements,
@@ -69,7 +71,7 @@ try {
 }
 
 /**
- * Phase 4 bridge — if the relational store is still empty but legacy documents
+ * Phase 4 bridge â€” if the relational store is still empty but legacy documents
  * exist (first boot on a fresh machine, or a pull from the old D1), project the
  * documents into relational tables once. Idempotent: no-op once rows exist.
  */
@@ -671,6 +673,31 @@ async function syncFromCloudflareD1WithLock(): Promise<{ success: boolean; count
   return ongoingD1SyncPromise;
 }
 
+// =================== MALL STOREFRONT API (Phase 5) ===================
+// Same shared handler the edge worker uses; serves the public storefront from
+// local dev so `npm run dev` + /mall behaves exactly like production.
+app.all("/api/mall/*", async (req, res) => {
+  try {
+    const url = new URL(req.originalUrl || req.url, "http://localhost:3000");
+    const headers = new Headers({ "content-type": "application/json" });
+    const session = req.headers["x-mall-session"];
+    if (typeof session === "string" && session) headers.set("x-mall-session", session);
+    const request = new Request(url, {
+      method: req.method,
+      headers,
+      body: ["GET", "HEAD"].includes(req.method) ? undefined : JSON.stringify(req.body ?? {}),
+    });
+    const response = await handleMallApi(request, makeNodeMallExecutor(db));
+    if (!response) return res.status(404).json({ error: "Not found" });
+    return res.status(response.status).set("content-type", "application/json").send(await response.text());
+  } catch (error: any) {
+    const status = error?.mallStatus ?? 500;
+    const body: any = { error: error?.message || "Mall API error" };
+    if (error?.mallPayload) body.payload = error.mallPayload;
+    return res.status(status).json(body);
+  }
+});
+
 app.get("/api/storage/snapshot", async (req, res) => {
   try {
     const ownerId = BUSINESS_OWNER_ID;
@@ -682,7 +709,7 @@ app.get("/api/storage/snapshot", async (req, res) => {
       console.warn("Pre-snapshot D1 sync fallback:", e?.message || e);
     }
 
-    // Phase 4: relational read path — rows -> frontend snapshot (same contract).
+    // Phase 4: relational read path â€” rows -> frontend snapshot (same contract).
     if (USE_RELATIONAL) {
       try {
         const backfill = await ensureRelationalBackfill();
@@ -832,7 +859,7 @@ async function executeRemoteD1Statements(statements: { sql: string; params: any[
 }
 
 /**
- * Phase 4 — merge identical INSERT statements into multi-row inserts so a full
+ * Phase 4 â€” merge identical INSERT statements into multi-row inserts so a full
  * relational snapshot push costs hundreds of queries instead of thousands.
  * D1/SQLite caps bound variables, so rows-per-query is derived from arity.
  */
@@ -1265,7 +1292,7 @@ async function syncFromCloudflareD1() {
         insertStmt.run(doc.owner_id, doc.collection, doc.document_id, normalized, doc.updated_at);
       }
       db.exec("COMMIT;");
-      console.log(`✓ Synced ${docs.length} documents from Cloudflare D1 into local SQLite store.`);
+      console.log(`âœ“ Synced ${docs.length} documents from Cloudflare D1 into local SQLite store.`);
     }
 
     const revRes = await fetch(url, {
@@ -1555,7 +1582,7 @@ async function runHistoricalDeliveryDataMigration() {
     });
 
     const d1Res = await executeRemoteD1Statements(remoteStatements);
-    console.log(`✓ Executed historical delivery data migration. Migrated ${migratedCount} operations, synced to Cloudflare D1:`, d1Res);
+    console.log(`âœ“ Executed historical delivery data migration. Migrated ${migratedCount} operations, synced to Cloudflare D1:`, d1Res);
     return { ok: true, migratedCount, d1Res, newRev };
   }
 
@@ -1704,7 +1731,7 @@ app.post("/api/ai/business-assistant", async (req, res) => {
 
     if (!ai) {
       return res.json({
-        answer: `[IdoferaLabs AI Analysis]\n\nBased on your recent business data:\n- Today's Total Sales: ₦${businessContext?.todaySales || 0}\n- Active Low Stock Items: ${businessContext?.lowStockCount || 0}\n- Monthly Revenue: ₦${businessContext?.monthlyRevenue || 0}\n\n**Key Takeaway**: ${prompt.toLowerCase().includes("reorder") ? "We recommend immediate replenishment for items below minimum stock threshold to prevent lost revenue." : "Sales trends show consistent activity. Monitor top-performing categories to optimize inventory turnover."}`,
+        answer: `[IdoferaLabs AI Analysis]\n\nBased on your recent business data:\n- Today's Total Sales: â‚¦${businessContext?.todaySales || 0}\n- Active Low Stock Items: ${businessContext?.lowStockCount || 0}\n- Monthly Revenue: â‚¦${businessContext?.monthlyRevenue || 0}\n\n**Key Takeaway**: ${prompt.toLowerCase().includes("reorder") ? "We recommend immediate replenishment for items below minimum stock threshold to prevent lost revenue." : "Sales trends show consistent activity. Monitor top-performing categories to optimize inventory turnover."}`,
         source: "fallback",
       });
     }
@@ -1746,7 +1773,7 @@ app.post("/api/ai/pricing-assistant", async (req, res) => {
         suggestedDiscountPct: 5,
         projectedProfitMargin: margin,
         riskLevel: "Low",
-        explanation: `Based on a cost price of ₦${cost}, the suggested retail price (₦${suggestedRetail}) maintains a healthy ${margin}% margin while remaining competitive in the current category market. The wholesale price (₦${suggestedWholesale}) yields a stable 20% margin for volume orders.`,
+        explanation: `Based on a cost price of â‚¦${cost}, the suggested retail price (â‚¦${suggestedRetail}) maintains a healthy ${margin}% margin while remaining competitive in the current category market. The wholesale price (â‚¦${suggestedWholesale}) yields a stable 20% margin for volume orders.`,
         source: "fallback",
       });
     }
@@ -1798,7 +1825,7 @@ app.post("/api/ai/sales-forecasting", async (req, res) => {
         insights: [
           "Demand for packaging products is projected to rise 18% over the next 2 weeks.",
           "Stock levels for high-velocity SKUs require immediate purchase order dispatch.",
-          "Expected net cash inflow is projected at ₦142,000 after pending supplier commitments.",
+          "Expected net cash inflow is projected at â‚¦142,000 after pending supplier commitments.",
         ],
         source: "fallback",
       });
@@ -1837,6 +1864,54 @@ Sample Products: ${JSON.stringify((products || []).slice(0, 5), null, 2)}`;
     res.status(500).json({ error: error.message || "Failed to generate forecasting" });
   }
 });
+const MALL_HERO_IDS = [
+  { id: 'prod-imp-1785576583554-82', name: 'Large Travel Nylon Bag', mallPrice: 300000 },
+  { id: 'prod-imp-1785576583547-0', name: 'Translucent 1L Bucket', mallPrice: 40000 },
+  { id: 'prod-imp-1785576583550-11', name: 'Cream Jar 200g', mallPrice: 20000 },
+  { id: 'prod-imp-1785576583551-36', name: 'Small Foil Plate', mallPrice: 10000 },
+  { id: 'prod-imp-1785576583551-25', name: 'Long Plain Bottle 25cl', mallPrice: 11000 },
+  { id: 'prod-1785999491663', name: 'Clear TPouch 2kg', mallPrice: 20000 },
+  { id: 'prod-imp-1785576583553-73', name: 'Small Chops Pouch', mallPrice: 10000 },
+];
+
+const LISTING_STEP_PCT = 0.85;
+
+function seedMallHeroes(db: DatabaseSync): { updated: number; warnings: string[]; existingCount: number; afterCount: number } {
+  const warnings: string[] = [];
+  const heroRows = MALL_HERO_IDS.map((h) => {
+    const row = db.prepare('SELECT id, status, stock_qty, retail_price_kobo, is_mall_listed FROM products WHERE id = ?').get(h.id) as any;
+    return { hero: h, row };
+  });
+
+  const missingIds = heroRows
+    .filter(({ row }) => !row || row.status !== 'Active' || row.stock_qty <= 0)
+    .map(({ hero }) => hero.id);
+
+  if (missingIds.length) {
+    warnings.push(`Mall hero products missing or not sellable: ${missingIds.join(', ')}`);
+  }
+
+  const existingCount = (db.prepare('SELECT COUNT(*) AS n FROM products WHERE is_mall_listed = 1').get() as any)?.n ?? 0;
+  const now = new Date().toISOString();
+  let updated = 0;
+
+  for (const { hero, row } of heroRows) {
+    if (!row) continue;
+    const mallPrice = (hero.mallPrice ?? Math.round(Number(row.retail_price_kobo) * LISTING_STEP_PCT)) as number;
+    db.prepare(`
+      UPDATE products
+      SET is_mall_listed = 1,
+          mall_price_kobo = ?,
+          mall_description = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(mallPrice, 'Featured item on the storefront, shown with the mall price.', now, hero.id);
+    updated++;
+  }
+
+  const afterCount = (db.prepare('SELECT COUNT(*) AS n FROM products WHERE is_mall_listed = 1').get() as any)?.n ?? 0;
+  return { updated, warnings, existingCount, afterCount };
+}
 
 async function startServer() {
   try {
@@ -1848,6 +1923,12 @@ async function startServer() {
   } catch (syncErr: any) {
     console.warn("Startup hydration warning:", syncErr.message);
   }
+
+  const heroSeed = seedMallHeroes(db);
+  if (heroSeed.warnings.length) {
+    for (const w of heroSeed.warnings) console.warn('[mall-init] ' + w);
+  }
+  console.log(`[mall-init] mall-listed rows: ${heroSeed.existingCount} -> ${heroSeed.afterCount}; heroes updated: ${heroSeed.updated}`);
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

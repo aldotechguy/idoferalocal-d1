@@ -10,6 +10,7 @@ import {
   BarChart3,
   Settings,
   X,
+
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
@@ -167,6 +168,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Settings,
       roles: ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
     },
+
   ];
 
   return (

@@ -42,6 +42,9 @@ export interface Product {
   unit: string; // e.g. 'pcs', 'kg', 'box', 'pack', 'set'
   expiryDate?: string;
   status: ProductStatus;
+  /** Phase 5 — mall listing. */
+  isMallListed?: boolean;
+  mallPrice?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -454,3 +457,5 @@ export interface TreasuryBalances {
   totalOwnerDrawings: number;
   totalOwnerLoans: number;
 }
+
+export * from './mall';

@@ -1,5 +1,5 @@
 /** ETL 2b: products + customers. */
-import { toKobo, str, num, nowIso, cleanImages } from './lib.js';
+import { toKobo, str, num, nowIso, cleanImages, bool01 } from './lib.js';
 import type { DocRow, Stmt } from './lib.js';
 import type { Ctx } from './ctx.js';
 import { parsePayload } from './ctx.js';
@@ -20,8 +20,8 @@ export function loadProducts(byCol: Map<string, DocRow[]>, stmts: Stmt[], ctx: C
     const images = cleanImages(p.images);
     if (Array.isArray(p.images) && p.images.length > images.length) ctx.strippedImages += p.images.length - images.length;
     stmts.push({
-      sql: `INSERT INTO products (id, sku, barcode, qr_code, name, description, category_id, category_name, brand, supplier_id, supplier_name, images_json, cost_price_kobo, retail_price_kobo, wholesale_price_kobo, min_wholesale_qty, dealer_price_kobo, promo_price_kobo, min_selling_price_kobo, stock_qty, low_stock_threshold, unit, expiry_date, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET stock_qty=excluded.stock_qty, retail_price_kobo=excluded.retail_price_kobo;`,
-      params: [id, str(p.sku || id), str(p.barcode), p.qrCode ? str(p.qrCode) : null, str(p.name, 'Unnamed'), str(p.description), ctx.categoryByName.get(catName) || null, catName, str(p.brand, 'Unbranded'), p.supplierId ? str(p.supplierId) : null, str(p.supplierName, 'General Supplier'), JSON.stringify(images), toKobo(p.costPrice), toKobo(p.retailPrice), toKobo(p.wholesalePrice), num(p.minWholesaleQty, 1), p.dealerPrice != null ? toKobo(p.dealerPrice) : null, p.promotionalPrice != null ? toKobo(p.promotionalPrice) : null, toKobo(p.minimumSellingPrice), num(p.currentStock), num(p.minimumStockLevel, 5), str(p.unit, 'pcs'), p.expiryDate ? str(p.expiryDate) : null, str(p.status, 'Active'), str(p.createdAt, nowIso()), str(p.updatedAt || p.createdAt, nowIso())],
+      sql: `INSERT INTO products (id, sku, barcode, qr_code, name, description, category_id, category_name, brand, supplier_id, supplier_name, images_json, cost_price_kobo, retail_price_kobo, wholesale_price_kobo, min_wholesale_qty, dealer_price_kobo, promo_price_kobo, min_selling_price_kobo, stock_qty, low_stock_threshold, unit, expiry_date, status, is_mall_listed, mall_price_kobo, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET stock_qty=excluded.stock_qty, retail_price_kobo=excluded.retail_price_kobo;`,
+      params: [id, str(p.sku || id), str(p.barcode), p.qrCode ? str(p.qrCode) : null, str(p.name, 'Unnamed'), str(p.description), ctx.categoryByName.get(catName) || null, catName, str(p.brand, 'Unbranded'), p.supplierId ? str(p.supplierId) : null, str(p.supplierName, 'General Supplier'), JSON.stringify(images), toKobo(p.costPrice), toKobo(p.retailPrice), toKobo(p.wholesalePrice), num(p.minWholesaleQty, 1), p.dealerPrice != null ? toKobo(p.dealerPrice) : null, p.promotionalPrice != null ? toKobo(p.promotionalPrice) : null, toKobo(p.minimumSellingPrice), num(p.currentStock), num(p.minimumStockLevel, 5), str(p.unit, 'pcs'), p.expiryDate ? str(p.expiryDate) : null, str(p.status, 'Active'), bool01(p.isMallListed), p.mallPrice != null ? toKobo(p.mallPrice) : null, str(p.createdAt, nowIso()), str(p.updatedAt || p.createdAt, nowIso())],
     });
   }
 }

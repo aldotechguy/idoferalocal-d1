@@ -27,6 +27,7 @@ import {
   replaceCollectionStatements,
   backfillStatementsFromDocumentRows,
 } from './src/server/relationalWrites.js';
+import { handleMallApi, MALL_OVERSELL_TRIGGER_SQL } from './src/server/mallApi.js';
 import type { QueryAll } from './src/server/relationalMapper.js';
 
 /** Rows out of D1 -> the QueryAll shape the shared mapper expects. */
@@ -173,6 +174,8 @@ async function ensureSchema(env: Env) {
     // Phase 4: the 30 relational tables + 23 indexes, same DDL as drizzle/0000.
     ...RELATIONAL_DDL.map((ddl) => env.DB.prepare(ddl.endsWith(';') ? ddl.slice(0, -1) : ddl)),
     ...RELATIONAL_INDEXES.map((sql) => env.DB.prepare(sql.endsWith(';') ? sql.slice(0, -1) : sql)),
+    // Phase 5: oversell is impossible store-wide once this trigger exists.
+    env.DB.prepare(MALL_OVERSELL_TRIGGER_SQL.endsWith(';') ? MALL_OVERSELL_TRIGGER_SQL.slice(0, -1) : MALL_OVERSELL_TRIGGER_SQL),
   ];
   for (let offset = 0; offset < statements.length; offset += 50) {
     await env.DB.batch(statements.slice(offset, offset + 50));
@@ -451,7 +454,7 @@ async function saveSnapshot(request: Request, env: Env) {
 }
 
 /** Convert shared mapper SqlStmt[] into D1 prepared statements. */
-function toD1Statements(env: Env, stmts: { sql: string; params: any[] }[]): D1PreparedStatement[] {
+function toD1Statements(env: Env, stmts: { sql: string; params?: any[] }[]): D1PreparedStatement[] {
   return stmts.map((st) => env.DB.prepare(st.sql).bind(...(Array.isArray(st.params) ? st.params : [])));
 }
 
@@ -730,6 +733,15 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/ai/business-assistant') return await businessAssistant(request, env);
       if (request.method === 'POST' && url.pathname === '/api/ai/pricing-assistant') return await pricingAssistant(request, env);
       if (request.method === 'POST' && url.pathname === '/api/ai/sales-forecasting') return await salesForecast(request, env);
+      // Phase 5: mall storefront API (public catalog/cart/checkout/track).
+      const mallResponse = await handleMallApi(request, {
+        queryAll: makeD1QueryAll(env),
+        runBatch: async (stmts) => {
+          const results = await env.DB.batch(toD1Statements(env, stmts));
+          return results.map((r: any) => Number(r?.meta?.changes ?? 0));
+        },
+      });
+      if (mallResponse) return mallResponse;
       if (url.pathname.startsWith('/api/')) return json({error: 'Not found'}, 404);
       return await serveAsset(request, env);
     } catch (error) {

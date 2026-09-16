@@ -1,0 +1,112 @@
+/* Public storefront: the staff Liquid Glass light tokens, independently scoped. */
+.mall-shell.mall-shell {
+  color-scheme: light;
+  --glass-bg: rgba(222, 244, 241, 0.84);
+  --glass-bg-elevated: rgba(235, 249, 247, 0.94);
+  --glass-pill-bg: rgba(208, 239, 235, 0.82);
+  --glass-border: rgba(153, 218, 210, 0.86);
+  --glass-border-subtle: rgba(166, 216, 210, 0.78);
+  --glass-border-hover: rgba(105, 196, 186, 0.98);
+  --glass-bevel-highlight: inset 0 1px 1.5px 0 rgba(255, 255, 255, 0.92), inset 0 -1px 1px 0 rgba(13, 148, 136, 0.035);
+  --glass-bevel-highlight-hover: inset 0 1.5px 2px 0 rgba(255, 255, 255, 0.98), inset 0 -1px 1px 0 rgba(13, 148, 136, 0.055);
+  --glass-shadow: 0 8px 24px -4px rgba(13, 148, 136, 0.12);
+  --glass-shadow-elevated: 0 18px 44px -8px rgba(13, 148, 136, 0.19);
+  background: radial-gradient(circle at 5% -5%, rgba(245,158,11,.14), transparent 32rem),
+    radial-gradient(circle at 95% 15%, rgba(13,148,136,.24), transparent 30rem),
+    radial-gradient(circle at 50% 90%, rgba(45,212,191,.20), transparent 36rem), #e3f4f1;
+  background-attachment: fixed;
+}
+
+.mall-shell :is(header, nav, .mall-top-strip, .mall-footer, .mall-help, .mall-hero, .mall-flash, .bg-white) {
+  background-color: var(--glass-bg);
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-bevel-highlight), var(--glass-shadow);
+}
+
+.mall-shell :is(header, nav, .mall-top-strip, .mall-footer, .mall-help, .mall-hero, .mall-flash) {
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+
+.mall-shell :is(.mall-hero, .mall-flash, .mall-help) {
+  border: 1px solid var(--glass-border);
+}
+
+.mall-shell .mall-hero {
+  background-image: linear-gradient(115deg, rgba(235,250,247,.96), rgba(204,244,237,.86), rgba(207,250,254,.76));
+}
+
+.mall-shell .mall-hero .text-white,
+.mall-shell .mall-footer .text-white { color: #0f172a; }
+.mall-shell .mall-hero .text-white\/85 { color: #475569; }
+.mall-shell .mall-hero .bg-white\/20,
+.mall-shell .mall-flash .bg-white\/20 { background: #fef3c7; color: #92400e; }
+.mall-shell .mall-hero .bg-black\/25 { background: var(--glass-bg-elevated); color: #475569; }
+.mall-shell .mall-hero .bg-black\/25:hover { background: #fef3c7; }
+.mall-shell .mall-hero .h-1\.5.bg-white { background: #b45309; }
+.mall-shell .mall-hero .h-1\.5.bg-white\/40 { background: #cbd5e1; }
+.mall-shell .mall-flash .bg-black\/30 { background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; }
+.mall-shell :is(.mall-footer, .mall-top-strip) .text-amber-300 { color: #b45309; }
+.mall-shell .mall-top-strip .text-slate-300 { color: #475569; }
+.mall-shell :is(.mall-footer, .mall-top-strip) .hover\:text-white:hover { color: #b45309; }
+.mall-shell .mall-footer .bg-white\/10 { background: var(--glass-pill-bg); border: 1px solid var(--glass-border-subtle); }
+.mall-shell .mall-footer .border-white\/10 { border-color: var(--glass-border-subtle); }
+
+/* Amber brand accents; product photography and status/error colours stay intact. */
+.mall-shell :is(.text-blue-500, .text-blue-600, .text-blue-700) { color: #b45309; }
+.mall-shell :is(.hover\:text-blue-600, .hover\:text-blue-700):hover { color: #92400e; }
+.mall-shell :is(.bg-blue-50, .bg-blue-100) { background-color: #fffbeb; }
+.mall-shell .hover\:bg-blue-50:hover { background-color: #fef3c7; }
+.mall-shell :is(.border-blue-500, .hover\:border-blue-400:hover, .hover\:border-blue-300:hover) { border-color: #d97706; }
+.mall-shell :is(.from-blue-600, .bg-blue-600) {
+  background: linear-gradient(135deg, #f59e0b, #d97706 55%, #b45309);
+  color: white;
+  border: 1px solid rgba(255,255,255,.35);
+  box-shadow: inset 0 1px 1.5px rgba(255,255,255,.55), 0 6px 18px rgba(217,119,6,.18);
+}
+.mall-shell button.bg-blue-600:not(:disabled):hover { background: linear-gradient(135deg, #d97706, #b45309); }
+.mall-shell button.bg-blue-600:disabled {
+  background: #e2e8f0;
+  color: #64748b;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.mall-shell :is(input, select, textarea) {
+  min-width: 0;
+  background: rgba(255,255,255,.7);
+  border-color: var(--glass-border-subtle);
+  box-shadow: inset 0 1px 1px rgba(15,23,42,.04);
+  accent-color: #b45309;
+}
+.mall-shell :is(input, select, textarea):focus {
+  background: rgba(255,255,255,.95);
+  border-color: var(--app-accent);
+  --tw-ring-color: rgba(245,158,11,.2);
+  box-shadow: 0 0 0 3px rgba(245,158,11,.2);
+}
+.mall-shell .text-slate-400 { color: #64748b; }
+.mall-shell :is(h1, h2, h3) { text-wrap: balance; letter-spacing: -.025em; }
+.mall-shell button { -webkit-tap-highlight-color: transparent; }
+.mall-shell #mall-categories { scroll-margin-top: 8rem; }
+
+/* Avoid the staff modal heuristic styling the mobile menu scrim as a panel. */
+body .mall-shell .fixed.inset-0 > .absolute.inset-0 {
+  max-width: none;
+  background: rgba(15,23,42,.35) !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  backdrop-filter: blur(4px) !important;
+  -webkit-backdrop-filter: blur(4px) !important;
+}
+@media (max-width: 767px) {
+  .mall-shell input { font-size: 16px; }
+  .mall-shell nav.fixed.bottom-0 { padding-bottom: env(safe-area-inset-bottom); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mall-shell *, .mall-shell *::before, .mall-shell *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
