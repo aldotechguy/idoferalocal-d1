@@ -12,3 +12,9 @@ coverage/
 *.db-shm
 *.sqlite
 *.sqlite3
+# Local D1 exports/backups + extracted base64 product photos (rebuildable, never source)
+/backups/
+# Scratch build output used only to smoke-test the edge worker bundle
+tmp_worker_build/
+tmp_*.txt
+*.err

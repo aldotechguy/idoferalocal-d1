@@ -1,7 +1,7 @@
 /** ETL SQL dump writer: same transforms as run.ts, emits wrangler-importable SQL. */
 import fs from 'node:fs';
 import path from 'node:path';
-import { SOURCE_FILE, parseDump } from './lib.js';
+import { SOURCE_FILE, parseDump, bindParams } from './lib.js';
 import type { Stmt } from './lib.js';
 import { newCtx } from './ctx.js';
 import { loadCategories, loadSuppliers } from './part2a.js';
@@ -9,36 +9,6 @@ import { loadProducts, loadCustomers } from './part2b.js';
 import { loadSales, loadPurchases } from './part2c.js';
 import { loadFinance } from './part2d1.js';
 import { loadOps } from './part2d2.js';
-
-const esc = (v: any): string => {
-  if (v === null || v === undefined) return 'NULL';
-  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : 'NULL';
-  return `'${String(v).replace(/'/g, "''")}'`;
-};
-
-// Consume params left-to-right, but only for placeholders OUTSIDE quoted literals.
-function bindParams(sql: string, params: any[]): string {
-  let out = '';
-  let pi = 0;
-  let inStr = false;
-  for (let i = 0; i < sql.length; i++) {
-    const ch = sql[i];
-    if (ch === "'") {
-      if (inStr && sql[i + 1] === "'") { out += "''"; i++; continue; }
-      inStr = !inStr;
-      out += ch;
-      continue;
-    }
-    if (ch === '?' && !inStr) {
-      if (pi >= params.length) throw new Error('Not enough params for: ' + sql.slice(0, 120));
-      out += esc(params[pi++]);
-      continue;
-    }
-    out += ch;
-  }
-  if (pi !== params.length) throw new Error(`Param count mismatch (${pi}/${params.length}): ` + sql.slice(0, 120));
-  return out;
-}
 
 async function main() {
   const { docs, userInserts } = parseDump(fs.readFileSync(SOURCE_FILE, 'utf8'));
@@ -51,6 +21,21 @@ async function main() {
   const stmts: Stmt[] = [];
   // app_users (legacy name) -> users (new relational name). Column shapes match.
   const out: string[] = ['PRAGMA defer_foreign_keys=TRUE;'];
+  // --full-refresh: wipe child tables first so re-running the ETL on an existing
+  // D1 (e.g. after a mapping fix) is deterministic instead of PK-conflicting.
+  if (process.argv.includes('--full-refresh')) {
+    const wipeOrder = [
+      'receiving_history', 'purchase_items', 'purchases', 'sale_items', 'sales',
+      'mall_cart_items', 'mall_carts', 'mall_order_items', 'mall_orders', 'reviews',
+      'payments', 'stock_movements', 'pricing_history', 'money_movements',
+      'delivery_orders', 'held_orders', 'whatsapp_preorders', 'notifications',
+      'audit_logs', 'expenses', 'product_variants', 'products', 'categories',
+      'customers', 'suppliers', 'settings',
+    ];
+    for (const table of wipeOrder) out.push(`DELETE FROM "${table}";`);
+    // users/sessions keep their rows so the app stays authenticated.
+    out.push('-- full refresh: users + app_sessions preserved');
+  }
   for (const sql of userInserts)
     out.push(sql.replace('"app_users"', '"users"').replace('INSERT INTO "users"', 'INSERT OR IGNORE INTO "users"'));
   loadCategories(byCol, stmts, ctx);

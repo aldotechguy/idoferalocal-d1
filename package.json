@@ -9,7 +9,13 @@
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.cjs",
     "lint": "tsc --noEmit",
-    "d1:push": "tsx scripts/push-to-d1.ts"
+    "d1:push": "tsx scripts/push-to-d1.ts",
+    "ddl:gen": "tsx scripts/etl/gen-ddl.ts",
+    "etl:dump": "tsx scripts/etl/dump.ts",
+    "etl:run": "tsx scripts/etl/run.ts",
+    "verify:relational": "tsx scripts/verify-relational.ts",
+    "verify:writes": "tsx scripts/verify-relational-writes.ts",
+    "verify": "tsx scripts/verify-relational.ts && tsx scripts/verify-relational-writes.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
