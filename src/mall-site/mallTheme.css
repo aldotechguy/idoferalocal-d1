@@ -36,9 +36,7 @@
   background-image: linear-gradient(115deg, rgba(235,250,247,.96), rgba(204,244,237,.86), rgba(207,250,254,.76));
 }
 
-.mall-shell .mall-hero .text-white,
 .mall-shell .mall-footer .text-white { color: #0f172a; }
-.mall-shell .mall-hero .text-white\/85 { color: #475569; }
 .mall-shell .mall-hero .bg-white\/20,
 .mall-shell .mall-flash .bg-white\/20 { background: #fef3c7; color: #92400e; }
 .mall-shell .mall-hero .bg-black\/25 { background: var(--glass-bg-elevated); color: #475569; }

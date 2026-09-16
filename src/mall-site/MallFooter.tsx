@@ -48,8 +48,8 @@ export const MallFooter: React.FC = () => {
       <div className="max-w-7xl mx-auto px-4 py-10 grid grid-cols-2 md:grid-cols-4 gap-6 text-[13px]">
         <div className="col-span-2 md:col-span-1">
           <div className="flex items-center gap-2">
-            <span className="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-violet-600 text-white font-black flex items-center justify-center">I</span>
-            <span className="font-black text-white">IdoferaMall</span>
+            <img src="/images/mall/logo/logo.png" alt="" width="1254" height="1254" className="w-10 h-10 object-contain shrink-0" />
+            <img src="/images/mall/logo/wordmark.png" alt="IdoferaMall" width="2172" height="724" className="w-32 h-auto object-contain" />
           </div>
           <p className="mt-2 text-xs text-slate-400 leading-relaxed">Packaging and everyday goods. Order online, pay on pickup at 16 Atakpo Street, off Nwaniba Road, Uyo.</p>
           <p className="mt-2 text-xs font-bold text-amber-300">+234 806 376 6861</p>

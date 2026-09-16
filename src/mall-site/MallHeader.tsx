@@ -29,9 +29,21 @@ export const MallHeader: React.FC<{ query: string; setQuery: (q: string) => void
           <Menu className="w-5 h-5" />
         </button>
         <button type="button" onClick={() => go('/')} className="flex items-center gap-2 shrink-0" aria-label="Idofera Mall home">
-          <span className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-violet-600 text-white font-black text-lg flex items-center justify-center shadow-md shadow-blue-500/30">I</span>
+          <img
+            src="/images/mall/logo/logo.png"
+            alt=""
+            width="1254"
+            height="1254"
+            className="w-10 h-10 sm:w-11 sm:h-11 object-contain shrink-0"
+          />
           <span className="hidden sm:block text-left leading-none">
-            <span className="block text-base font-black text-slate-900 dark:text-white tracking-tight">Idofera<span className="text-blue-600">Mall</span></span>
+            <img
+              src="/images/mall/logo/wordmark.png"
+              alt=""
+              width="2172"
+              height="724"
+              className="block w-[126px] h-auto object-contain"
+            />
             <span className="block text-[10px] font-semibold text-slate-400">Packaging and Everyday Goods</span>
           </span>
         </button>
