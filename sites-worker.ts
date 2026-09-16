@@ -15,6 +15,34 @@ interface D1Database {
   batch(statements: D1PreparedStatement[]): Promise<unknown[]>;
 }
 
+// Phase 4 — relational backend for the edge worker. Wrangler bundles this entry
+// with esbuild, which follows imports, so the mapper/DDL/write builders are the
+// SAME modules server.ts uses (no more duplicated inline logic).
+// Money is INTEGER kobo in D1, naira floats on the wire; frontend contract unchanged.
+import { RELATIONAL_DDL, RELATIONAL_INDEXES } from './src/server/relationalDdl.js';
+import { buildSnapshot } from './src/server/relationalSnapshot.js';
+import {
+  upsertToStatements,
+  deleteToStatements,
+  replaceCollectionStatements,
+  backfillStatementsFromDocumentRows,
+} from './src/server/relationalWrites.js';
+import type { QueryAll } from './src/server/relationalMapper.js';
+
+/** Rows out of D1 -> the QueryAll shape the shared mapper expects. */
+function makeD1QueryAll(env: Env): QueryAll {
+  return async (sql: string, params: any[] = []) => {
+    const res = await env.DB.prepare(sql).bind(...params).all<any>();
+    return res.results || [];
+  };
+}
+
+/** One row out of D1. */
+async function d1Get(env: Env, sql: string, params: any[] = []): Promise<any> {
+  const res = await env.DB.prepare(sql).bind(...params).all<any>();
+  return res.results?.[0] || null;
+}
+
 const ALLOWED_STORES = new Set([
   'products', 'customers', 'suppliers', 'sales', 'purchases', 'expenses',
   'notifications', 'auditLogs', 'stockMovements', 'pricingHistory', 'settings',
@@ -97,8 +125,12 @@ function publicUser(user: AppUserRow) {
   };
 }
 
+let schemaReady = false;
+let relationalBackfilled = false;
+
 async function ensureSchema(env: Env) {
-  await env.DB.batch([
+  if (schemaReady) return;
+  const statements: D1PreparedStatement[] = [
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS app_documents (
       owner_id TEXT NOT NULL,
       collection TEXT NOT NULL,
@@ -138,7 +170,43 @@ async function ensureSchema(env: Env) {
       expires_at INTEGER NOT NULL
     )`),
     env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_app_sessions_user_expiry ON app_sessions (user_id, expires_at)`),
-  ]);
+    // Phase 4: the 30 relational tables + 23 indexes, same DDL as drizzle/0000.
+    ...RELATIONAL_DDL.map((ddl) => env.DB.prepare(ddl.endsWith(';') ? ddl.slice(0, -1) : ddl)),
+    ...RELATIONAL_INDEXES.map((sql) => env.DB.prepare(sql.endsWith(';') ? sql.slice(0, -1) : sql)),
+  ];
+  for (let offset = 0; offset < statements.length; offset += 50) {
+    await env.DB.batch(statements.slice(offset, offset + 50));
+  }
+  schemaReady = true;
+}
+
+/** D1 only reports on tables it has; empty relational store + documents means we backfill once. */
+async function emptyRelational(env: Env): Promise<boolean> {
+  const row = await d1Get(env, 'SELECT (SELECT COUNT(*) FROM products) AS p, (SELECT COUNT(*) FROM sales) AS s');
+  return Number(row?.p || 0) === 0 && Number(row?.s || 0) === 0;
+}
+
+/**
+ * Phase 4 bridge (edge) — when the relational tables are empty but legacy
+ * app_documents rows exist (fresh database, or the pre-ETL prod D1), project the
+ * documents once. Chunked so it stays inside D1 limits; idempotent per isolate.
+ */
+async function ensureRelationalBackfill(env: Env): Promise<{ documents: number; statements: number; skipped: number }> {
+  const none = { documents: 0, statements: 0, skipped: 0 };
+  if (relationalBackfilled) return none;
+  if (!(await emptyRelational(env))) {
+    relationalBackfilled = true;
+    return none;
+  }
+  const rows = await env.DB.prepare(
+    'SELECT owner_id, collection, payload, updated_at FROM app_documents ORDER BY updated_at',
+  ).bind().all<{collection: string; payload: string; owner_id?: string; updated_at?: number}>();
+  const list = rows.results || [];
+  if (!list.length) return none;
+  const { stmts, skipped } = backfillStatementsFromDocumentRows(list, new Date().toISOString());
+  await runStatements(env, toD1Statements(env, stmts));
+  relationalBackfilled = true;
+  return { documents: list.length, statements: stmts.length, skipped };
 }
 
 async function seedUser(env: Env, user: {id: string; email: string; username: string; displayName: string; password: string; superAdmin: boolean}) {
@@ -335,10 +403,14 @@ async function saveSnapshot(request: Request, env: Env) {
 
   const now = Date.now();
   const revision = Math.max(now, currentRevision + 1);
+  const nowIso = new Date(now).toISOString();
   const statements: D1PreparedStatement[] = [];
+  const relationalStmts: { sql: string; params: any[] }[] = [];
   for (const [collection, documents] of Object.entries(body.stores)) {
     if (!ALLOWED_STORES.has(collection) || !Array.isArray(documents)) continue;
     statements.push(env.DB.prepare('DELETE FROM app_documents WHERE owner_id = ? AND collection = ?').bind(ownerId, collection));
+    // Phase 4: mirror the same full-replace into relational tables.
+    relationalStmts.push(...replaceCollectionStatements(collection, documents, nowIso));
     for (const document of documents) {
       if (!document || typeof document !== 'object') continue;
       const documentId = String((document as Record<string, unknown>).id || 'singleton');
@@ -355,15 +427,65 @@ async function saveSnapshot(request: Request, env: Env) {
     ).bind(ownerId, revision, now),
   );
 
-  for (let offset = 0; offset < statements.length; offset += 75) {
-    await env.DB.batch(statements.slice(offset, offset + 75));
+  await runStatements(env, statements);
+  // Document mirror is authoritative for the revision; a relational failure is reported, not fatal.
+  let relationalSynced = true;
+  let relationalError: string | undefined;
+  try {
+    await runStatements(env, toD1Statements(env, relationalStmts));
+    relationalBackfilled = true;
+  } catch (error) {
+    relationalSynced = false;
+    relationalError = error instanceof Error ? error.message : String(error);
+    console.warn('Relational snapshot mirror failed:', relationalError);
   }
-  return json({ok: true, revision, collections: Object.keys(body.stores).filter((name) => ALLOWED_STORES.has(name))});
+  return json({
+    ok: true,
+    revision,
+    collections: Object.keys(body.stores).filter((name) => ALLOWED_STORES.has(name)),
+    backend: 'relational',
+    relationalStatements: relationalStmts.length,
+    relationalSynced,
+    relationalError,
+  });
+}
+
+/** Convert shared mapper SqlStmt[] into D1 prepared statements. */
+function toD1Statements(env: Env, stmts: { sql: string; params: any[] }[]): D1PreparedStatement[] {
+  return stmts.map((st) => env.DB.prepare(st.sql).bind(...(Array.isArray(st.params) ? st.params : [])));
+}
+
+/** D1 batch caps statement counts, so chunk the relational mirrors. */
+async function runStatements(env: Env, statements: D1PreparedStatement[]) {
+  for (let offset = 0; offset < statements.length; offset += 50) {
+    await env.DB.batch(statements.slice(offset, offset + 50));
+  }
 }
 
 async function readSnapshot(request: Request, env: Env) {
   await ensureSchema(env);
   const ownerId = BUSINESS_OWNER_ID;
+
+  // Phase 4: relational read path. Falls back to the document store when the
+  // relational tables are still empty (pre-ETL / fresh database).
+  try {
+    const backfill = await ensureRelationalBackfill(env);
+    if (relationalBackfilled) {
+      const stores = await buildSnapshot(makeD1QueryAll(env));
+      const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
+        .bind(ownerId).all<{revision: number}>();
+      return json({
+        stores,
+        hasData: Object.keys(stores).length > 0,
+        revision: Number(revisions.results?.[0]?.revision || 0),
+        backend: 'relational',
+        backfill: backfill.statements ? backfill : undefined,
+      });
+    }
+  } catch (error) {
+    console.warn('Relational snapshot failed, serving documents:', error instanceof Error ? error.message : error);
+  }
+
   const rows = await env.DB.prepare(
     'SELECT collection, document_id, payload, updated_at FROM app_documents WHERE owner_id = ? ORDER BY collection, document_id',
   ).bind(ownerId).all<{collection: string; document_id: string; payload: string; updated_at: number}>();
@@ -377,7 +499,12 @@ async function readSnapshot(request: Request, env: Env) {
   }
   const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
     .bind(ownerId).all<{revision: number}>();
-  return json({stores, hasData: Object.keys(stores).length > 0, revision: Number(revisions.results?.[0]?.revision || 0)});
+  return json({
+    stores,
+    hasData: Object.keys(stores).length > 0,
+    revision: Number(revisions.results?.[0]?.revision || 0),
+    backend: 'documents',
+  });
 }
 
 async function patchRecords(request: Request, env: Env) {
@@ -389,7 +516,9 @@ async function patchRecords(request: Request, env: Env) {
   if (upserts.length + deletes.length > 5000) return json({error: 'Too many records in one sync.'}, 413);
 
   const now = Date.now();
+  const nowIso = new Date(now).toISOString();
   const statements: D1PreparedStatement[] = [];
+  const relationalStmts: { sql: string; params: any[] }[] = [];
   for (const item of upserts) {
     const collection = String(item?.collection || '');
     const document = item?.document;
@@ -398,6 +527,8 @@ async function patchRecords(request: Request, env: Env) {
     statements.push(env.DB.prepare(
       'INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at',
     ).bind(ownerId, collection, documentId, JSON.stringify(document), now));
+    // Phase 4: relational projection of the same document.
+    relationalStmts.push(...upsertToStatements(collection, document, nowIso));
   }
   for (const item of deletes) {
     const collection = String(item?.collection || '');
@@ -406,6 +537,7 @@ async function patchRecords(request: Request, env: Env) {
     statements.push(env.DB.prepare(
       'DELETE FROM app_documents WHERE owner_id = ? AND collection = ? AND document_id = ?',
     ).bind(ownerId, collection, documentId));
+    relationalStmts.push(...deleteToStatements(collection, documentId));
   }
 
   const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
@@ -415,10 +547,26 @@ async function patchRecords(request: Request, env: Env) {
     'INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?) ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at',
   ).bind(ownerId, revision, now));
 
-  for (let offset = 0; offset < statements.length; offset += 75) {
-    await env.DB.batch(statements.slice(offset, offset + 75));
+  await runStatements(env, statements);
+  let relationalSynced = true;
+  let relationalError: string | undefined;
+  try {
+    await runStatements(env, toD1Statements(env, relationalStmts));
+  } catch (error) {
+    relationalSynced = false;
+    relationalError = error instanceof Error ? error.message : String(error);
+    console.warn('Relational record mirror failed:', relationalError);
   }
-  return json({ok: true, revision, upserted: upserts.length, deleted: deletes.length});
+  return json({
+    ok: true,
+    revision,
+    upserted: upserts.length,
+    deleted: deletes.length,
+    backend: 'relational',
+    relationalStatements: relationalStmts.length,
+    relationalSynced,
+    relationalError,
+  });
 }
 
 async function askGemini(apiKey: string, prompt: string) {
@@ -538,12 +686,32 @@ export default {
         const ownerId = BUSINESS_OWNER_ID;
         const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?').bind(ownerId).all<{revision: number}>();
         const docCount = await env.DB.prepare('SELECT count(*) as count FROM app_documents WHERE owner_id = ?').bind(ownerId).all<{count: number}>();
+        let relational: Record<string, unknown> | null = null;
+        try {
+          const row = await d1Get(env, `SELECT
+            (SELECT COUNT(*) FROM products) as products,
+            (SELECT COUNT(*) FROM sales) as sales,
+            (SELECT COUNT(*) FROM customers) as customers,
+            (SELECT COUNT(*) FROM suppliers) as suppliers,
+            (SELECT COUNT(*) FROM sale_items) as sale_items`);
+          relational = {
+            products: Number(row?.products || 0),
+            sales: Number(row?.sales || 0),
+            customers: Number(row?.customers || 0),
+            suppliers: Number(row?.suppliers || 0),
+            saleItems: Number(row?.sale_items || 0),
+          };
+        } catch (error) {
+          relational = { error: error instanceof Error ? error.message : String(error) };
+        }
         return json({
           status: 'healthy',
           connected: true,
+          backend: 'relational',
           databaseId: '3e95a550-a091-490b-819d-f0acb7ea8dd8',
           revision: Number(revisions.results?.[0]?.revision || 0),
           totalDocuments: Number(docCount.results?.[0]?.count || 0),
+          relational,
           endpoint: 'Cloudflare D1 Edge Worker',
           timestamp: new Date().toISOString(),
         });

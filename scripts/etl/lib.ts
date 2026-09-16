@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import dotenv from 'dotenv';
+import { unwrapSettings as mapperUnwrapSettings } from '../../src/server/relationalMapper.js';
 dotenv.config();
 export const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || '35b307711376954341708cbea8080dcc';
 export const DATABASE_ID = process.env.CLOUDFLARE_D1_DATABASE_ID_TARGET || '3a3eb157-5aa5-419a-a8ce-2eade2afc436';
@@ -19,21 +20,54 @@ export const num = (v: unknown, fb = 0): number => {
   return Number.isFinite(n) ? n : fb;
 };
 export const bool01 = (v: unknown): number => (v === true || v === 1 || v === 'true' ? 1 : 0);
-export const nowIso = (): string => new Date().toISOString();
+export const nowIso = (): string => new Date(Date.now()).toISOString();
 export const slugify = (s: string): string =>
   s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'uncategorized';
+/** Keep product image URLs in original order; base64 (`data:`) photos are EXCLUDED.
+ *  Must match src/server/relationalMapper.ts -> cleanImageList: base64 photos exceed
+ *  D1 statement limits (SQLITE_TOOBIG) and are preserved separately by
+ *  scripts/etl/extract-images.ts for the Phase 4.5 R2 migration. */
 export function cleanImages(images: unknown): string[] {
   if (!Array.isArray(images)) return [];
-  return (images as unknown[]).filter((u) => typeof u === 'string' && !u.startsWith('data:')).slice(0, 8) as string[];
+  return (images as unknown[])
+    .filter((u) => typeof u === 'string' && String(u).trim().length > 0)
+    .filter((u) => !String(u).startsWith('data:'))
+    .slice(0, 8) as string[];
 }
-export function unwrapSettings(payload: any): any {
-  let cur = payload;
-  for (let i = 0; i < 25 && cur && typeof cur === 'object'; i++) {
-    if (typeof cur.storeName === 'string') return cur;
-    if (cur['0'] && typeof cur['0'] === 'object') { cur = cur['0']; continue; }
-    break;
+/** Phase 4 — shared SQL literal binder for the ETL/refresh dump writers. */
+export const esc = (v: any): string => {
+  if (v === null || v === undefined) return 'NULL';
+  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : 'NULL';
+  if (typeof v === 'boolean') return v ? '1' : '0';
+  return `'${String(v).replace(/'/g, "''")}'`;
+};
+
+/** Consume params left-to-right, but only for placeholders OUTSIDE quoted literals. */
+export function bindParams(sql: string, params: any[]): string {
+  let out = '';
+  let pi = 0;
+  let inStr = false;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (ch === "'") {
+      if (inStr && sql[i + 1] === "'") { out += "''"; i++; continue; }
+      inStr = !inStr;
+      out += ch;
+      continue;
+    }
+    if (ch === '?' && !inStr) {
+      if (pi >= params.length) throw new Error('Not enough params for: ' + sql.slice(0, 120));
+      out += esc(params[pi++]);
+      continue;
+    }
+    out += ch;
   }
-  return null;
+  if (pi !== params.length) throw new Error(`Param count mismatch (${pi}/${params.length}): ` + sql.slice(0, 120));
+  return out;
+}
+
+export function unwrapSettings(payload: any): any {
+  return mapperUnwrapSettings(payload);
 }
 export type DocRow = { owner: string; collection: string; docId: string; payload: string; updatedAt: number };
 export type Stmt = { sql: string; params?: any[] };

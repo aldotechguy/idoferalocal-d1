@@ -46,6 +46,60 @@ function createDatabaseInstance(): DatabaseSync {
 
 let db = createDatabaseInstance();
 
+// Phase 4 — relational backend. Local node:sqlite now carries the SAME 30
+// tables as D1 `idofera` (DDL single-sourced from drizzle/0000_unified-relational.sql).
+// The mapper translates rows <-> the unchanged frontend snapshot shape, so the
+// UI needs zero changes. Legacy app_documents tables are kept for rollback reads.
+import { makeNodeAdapter } from "./src/server/nodeAdapter.js";
+import { ensureRelationalSchemaNode } from "./src/server/nodeAdapter.js";
+import { buildSnapshot } from "./src/server/relationalSnapshot.js";
+import {
+  upsertToStatements,
+  deleteToStatements,
+  replaceCollectionStatements,
+  relationalHasData,
+  backfillStatementsFromDocumentRows,
+} from "./src/server/relationalWrites.js";
+const USE_RELATIONAL = process.env.VITE_USE_RELATIONAL !== "false";
+try {
+  const created = ensureRelationalSchemaNode(db);
+  console.log(`Relational schema ready (${created} tables, backend=relational).`);
+} catch (e) {
+  console.warn("Relational schema init:", (e as Error)?.message || e);
+}
+
+/**
+ * Phase 4 bridge — if the relational store is still empty but legacy documents
+ * exist (first boot on a fresh machine, or a pull from the old D1), project the
+ * documents into relational tables once. Idempotent: no-op once rows exist.
+ */
+async function ensureRelationalBackfill(): Promise<{ statements: number; documents: number; skipped: number }> {
+  const empty = { statements: 0, documents: 0, skipped: 0 };
+  if (!USE_RELATIONAL) return empty;
+  const tx = makeNodeAdapter(db);
+  if (await relationalHasData(tx.queryAll)) return empty;
+  let rows: any[] = [];
+  try {
+    rows = db
+      .prepare("SELECT owner_id, collection, payload, updated_at FROM app_documents ORDER BY updated_at")
+      .all() as any[];
+  } catch {
+    return empty;
+  }
+  if (!rows.length) return empty;
+  const { stmts, skipped } = backfillStatementsFromDocumentRows(rows, new Date().toISOString());
+  db.exec("BEGIN TRANSACTION;");
+  try {
+    for (const st of stmts) tx.run(st.sql, st.params);
+    db.exec("COMMIT;");
+  } catch (e) {
+    try { db.exec("ROLLBACK;"); } catch {}
+    throw e;
+  }
+  console.log(`Relational backfill: ${stmts.length} statements from ${rows.length} documents (${skipped} skipped).`);
+  return { statements: stmts.length, documents: rows.length, skipped };
+}
+
 // Initialize schema with corruption protection
 function initSchema() {
   try {
@@ -628,6 +682,28 @@ app.get("/api/storage/snapshot", async (req, res) => {
       console.warn("Pre-snapshot D1 sync fallback:", e?.message || e);
     }
 
+    // Phase 4: relational read path — rows -> frontend snapshot (same contract).
+    if (USE_RELATIONAL) {
+      try {
+        const backfill = await ensureRelationalBackfill();
+        const tx = makeNodeAdapter(db);
+        const stores = await buildSnapshot(tx.queryAll);
+        const revRow = db.prepare("SELECT revision FROM sync_revisions WHERE owner_id = ?").get(ownerId) as any;
+        const revision = Number(revRow?.revision || 0);
+        return res.json({
+          stores,
+          hasData: Object.keys(stores).length > 0,
+          revision,
+          lastCloudflareSync: lastCloudflareSyncTime,
+          timestamp: new Date().toISOString(),
+          backend: "relational",
+          backfill: backfill.statements ? backfill : undefined,
+        });
+      } catch (relErr: any) {
+        console.warn("Relational snapshot failed, falling back to documents:", relErr?.message || relErr);
+      }
+    }
+
     const rows = db.prepare(`
       SELECT collection, document_id, payload, updated_at FROM app_documents
       WHERE owner_id = ? ORDER BY collection, document_id
@@ -698,8 +774,8 @@ async function executeRemoteD1Statements(statements: { sql: string; params: any[
       }
     }
 
-    // 1. Execute other statements (deletions, sync_revisions, etc.)
-    for (const stmt of otherStatements) {
+    // 1. Execute other statements (deletions, sync_revisions, relational upserts)
+    for (const stmt of mergeInsertStatements(otherStatements)) {
       const res = await fetch(url, {
         method: "POST",
         headers: {
@@ -755,6 +831,61 @@ async function executeRemoteD1Statements(statements: { sql: string; params: any[
   }
 }
 
+/**
+ * Phase 4 — merge identical INSERT statements into multi-row inserts so a full
+ * relational snapshot push costs hundreds of queries instead of thousands.
+ * D1/SQLite caps bound variables, so rows-per-query is derived from arity.
+ */
+function mergeInsertStatements(statements: { sql: string; params: any[] }[], maxVars = 75) {
+  const merged: { sql: string; params: any[]; groups: number }[] = [];
+  let current: { sql: string; params: any[]; groups: number; maxGroups: number; arity: number } | null = null;
+  const flush = () => {
+    if (current) merged.push({ sql: current.sql, params: current.params, groups: current.groups });
+    current = null;
+  };
+  for (const stmt of statements) {
+    const params = Array.isArray(stmt.params) ? stmt.params : [];
+    const valuesMatch = stmt.sql.match(/VALUES\s*\(([^()]*)\)/i);
+    const arity = valuesMatch ? valuesMatch[1].split(",").length : 0;
+    const mergeable = /^INSERT INTO/i.test(stmt.sql) && valuesMatch && arity > 0 && arity === params.length;
+    if (!mergeable) {
+      flush();
+      merged.push({ sql: stmt.sql, params, groups: 1 });
+      continue;
+    }
+    const maxGroups = Math.max(1, Math.floor(maxVars / arity));
+    if (current && current.sql === stmt.sql && current.groups < current.maxGroups) {
+      current.params.push(...params);
+      current.groups += 1;
+      continue;
+    }
+    flush();
+    current = { sql: stmt.sql, params: [...params], groups: 1, maxGroups, arity };
+  }
+  flush();
+  return merged.map((m) => {
+    if (m.groups <= 1) return { sql: m.sql, params: m.params };
+    const valuesMatch = m.sql.match(/VALUES\s*\(([^()]*)\)/i);
+    if (!valuesMatch) return { sql: m.sql, params: m.params };
+    const row = `(${valuesMatch[1]})`;
+    const expanded = m.sql.replace(valuesMatch[0], `VALUES ${Array.from({ length: m.groups }, () => row).join(", ")}`);
+    return { sql: expanded, params: m.params };
+  });
+}
+
+/** Push relational statements to D1 `idofera`; a failure never breaks the local write. */
+async function pushRelationalD1Statements(statements: { sql: string; params: any[] }[]) {
+  if (!statements.length) return { success: true, skipped: true };
+  try {
+    await executeRemoteD1Statements(statements);
+    return { success: true, skipped: false };
+  } catch (relErr: any) {
+    const message = relErr?.message || String(relErr);
+    console.warn("Relational D1 push failed (legacy document mirror already pushed):", message);
+    return { success: false, skipped: false, error: message };
+  }
+}
+
 app.put("/api/storage/snapshot", async (req, res) => {
   try {
     const ownerId = BUSINESS_OWNER_ID;
@@ -784,6 +915,10 @@ app.put("/api/storage/snapshot", async (req, res) => {
     `);
 
     const remoteStatements: { sql: string; params: any[] }[] = [];
+    // Phase 4: mirror the full-replace snapshot into relational tables (idofera).
+    const relStatements: { sql: string; params: any[] }[] = [];
+    const nowIso = new Date(now).toISOString();
+    const tx = makeNodeAdapter(db);
 
     db.exec("BEGIN TRANSACTION;");
     try {
@@ -794,6 +929,12 @@ app.put("/api/storage/snapshot", async (req, res) => {
           sql: "DELETE FROM app_documents WHERE owner_id = ? AND collection = ?",
           params: [ownerId, collection],
         });
+        if (USE_RELATIONAL) {
+          for (const st of replaceCollectionStatements(collection, documents, nowIso)) {
+            tx.run(st.sql, st.params);
+            relStatements.push(st);
+          }
+        }
 
         for (const doc of documents) {
           if (!doc || typeof doc !== "object") continue;
@@ -829,12 +970,18 @@ app.put("/api/storage/snapshot", async (req, res) => {
 
     await executeRemoteD1Statements(remoteStatements);
 
+    const relational = await pushRelationalD1Statements(relStatements);
+
     return res.json({
       ok: true,
       revision,
       d1Synced: true,
       d1DatabaseId: CLOUDFLARE_D1_DATABASE_ID,
       collections: Object.keys(body.stores).filter((name) => ALLOWED_STORES.has(name)),
+      backend: USE_RELATIONAL ? "relational" : "documents",
+      relationalStatements: relStatements.length,
+      relationalSynced: relational.success,
+      relationalError: (relational as any).error,
     });
   } catch (error: any) {
     return res.status(500).json({ error: error.message || "Failed to save snapshot" });
@@ -852,6 +999,12 @@ app.patch("/api/storage/records", async (req, res) => {
     }
 
     const now = Date.now();
+    const nowIso = new Date().toISOString();
+    const tx = makeNodeAdapter(db);
+    // Phase 4: relational projections are collected here and pushed alongside the
+    // legacy document mirror, so D1 `idofera` (relational) stays in lockstep.
+    const relStatements: { sql: string; params: any[] }[] = [];
+
     const insertStmt = db.prepare(`
       INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
       VALUES (?, ?, ?, ?, ?)
@@ -878,6 +1031,12 @@ app.patch("/api/storage/records", async (req, res) => {
               payload = excluded.payload, updated_at = excluded.updated_at`,
         params: [ownerId, collection, documentId, payloadStr, now],
       });
+      if (USE_RELATIONAL) {
+        for (const st of upsertToStatements(collection, document, nowIso)) {
+          tx.run(st.sql, st.params);
+          relStatements.push(st);
+        }
+      }
     }
 
     for (const item of deletes) {
@@ -889,6 +1048,12 @@ app.patch("/api/storage/records", async (req, res) => {
         sql: "DELETE FROM app_documents WHERE owner_id = ? AND collection = ? AND document_id = ?",
         params: [ownerId, collection, documentId],
       });
+      if (USE_RELATIONAL) {
+        for (const st of deleteToStatements(collection, documentId)) {
+          tx.run(st.sql, st.params);
+          relStatements.push(st);
+        }
+      }
     }
 
     const revRow = db.prepare("SELECT revision FROM sync_revisions WHERE owner_id = ?").get(ownerId) as any;
@@ -907,6 +1072,8 @@ app.patch("/api/storage/records", async (req, res) => {
 
     await executeRemoteD1Statements(remoteStatements);
 
+    const relational = await pushRelationalD1Statements(relStatements);
+
     return res.json({
       ok: true,
       revision,
@@ -914,6 +1081,10 @@ app.patch("/api/storage/records", async (req, res) => {
       d1DatabaseId: CLOUDFLARE_D1_DATABASE_ID,
       upserted: upserts.length,
       deleted: deletes.length,
+      backend: USE_RELATIONAL ? "relational" : "documents",
+      relationalStatements: relStatements.length,
+      relationalSynced: relational.success,
+      relationalError: (relational as any).error,
     });
   } catch (error: any) {
     return res.status(500).json({ error: error.message || "Failed to patch records" });
@@ -926,15 +1097,42 @@ app.get("/api/storage/d1/health", async (req, res) => {
     const ownerId = BUSINESS_OWNER_ID;
     const revRow = db.prepare("SELECT revision, updated_at FROM sync_revisions WHERE owner_id = ?").get(ownerId) as any;
     const countRow = db.prepare("SELECT count(*) as total FROM app_documents WHERE owner_id = ?").get(ownerId) as any;
+
+    let relational: any = null;
+    if (USE_RELATIONAL) {
+      try {
+        const tx = makeNodeAdapter(db);
+        const rows = await tx.queryAll(`SELECT
+          (SELECT COUNT(*) FROM products) as products,
+          (SELECT COUNT(*) FROM sales) as sales,
+          (SELECT COUNT(*) FROM customers) as customers,
+          (SELECT COUNT(*) FROM suppliers) as suppliers,
+          (SELECT COUNT(*) FROM sale_items) as sale_items`);
+        const row: any = rows?.[0] || {};
+        relational = {
+          tables: (await tx.queryAll("SELECT COUNT(*) as n FROM sqlite_master WHERE type='table'"))?.[0]?.n ?? null,
+          products: Number(row.products || 0),
+          sales: Number(row.sales || 0),
+          customers: Number(row.customers || 0),
+          suppliers: Number(row.suppliers || 0),
+          saleItems: Number(row.sale_items || 0),
+        };
+      } catch (e: any) {
+        relational = { error: e?.message || String(e) };
+      }
+    }
+
     const latencyMs = Date.now() - start;
 
     return res.json({
       status: "healthy",
       connected: true,
+      backend: USE_RELATIONAL ? "relational" : "documents",
       databaseId: CLOUDFLARE_D1_DATABASE_ID,
       accountId: CLOUDFLARE_ACCOUNT_ID,
       revision: Number(revRow?.revision || 0),
       totalDocuments: Number(countRow?.total || 0),
+      relational,
       latencyMs,
       endpoint: "Cloudflare D1 Primary Edge",
       timestamp: new Date().toISOString(),
