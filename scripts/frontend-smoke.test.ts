@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 import { parseRoute } from '../src/hooks/useRoute.ts';
 import { validateBuyer } from '../src/mall-site/useBuyerForm.ts';
@@ -34,4 +35,17 @@ test('fixed delivery zones expose canonical fees', () => {
   assert.equal(mallDeliveryFeeKobo('uyo_outer'), 250000);
   assert.equal(mallDeliveryFeeKobo('other'), null);
   assert.equal(mallDeliveryZone('invalid'), 'pickup');
+});
+
+test('development bootstrap prevents stale service workers from mixing React modules', () => {
+  const html = fs.readFileSync('index.html', 'utf8');
+  const bootstrap = fs.readFileSync('src/bootstrap.ts', 'utf8');
+  const pwaHook = fs.readFileSync('src/hooks/usePWAInstall.ts', 'utf8');
+  const worker = fs.readFileSync('public/sw.js', 'utf8');
+  assert.match(html, /src\/bootstrap\.ts/);
+  assert.match(bootstrap, /getRegistrations\(\)/);
+  assert.match(bootstrap, /registration\.unregister\(\)/);
+  assert.match(pwaHook, /import\.meta\.env\.PROD/);
+  assert.match(worker, /node_modules\/\.vite/);
+  assert.match(worker, /cached \|\| new Response/);
 });

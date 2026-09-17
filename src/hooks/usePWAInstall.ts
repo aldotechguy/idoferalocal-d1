@@ -82,8 +82,10 @@ export function usePWAInstall() {
         .catch(() => {});
     }
 
-    // 3. Register Service Worker from /sw.js
-    if ('serviceWorker' in navigator) {
+    // 3. Register the offline worker only for production. A service worker must
+    // never cache Vite's versioned development modules because that can mix two
+    // React module graphs after dependency re-optimization.
+    if (import.meta.env.PROD && 'serviceWorker' in navigator) {
       navigator.serviceWorker
         .register('/sw.js')
         .then((reg) => {

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'idofera-pos-v2';
+const CACHE_NAME = 'idofera-pos-v3';
 const STATIC_ASSETS = [
   '/manifest.json',
   '/icon.svg',
@@ -46,6 +46,15 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // Never intercept Vite's development graph. Caching these versioned modules
+  // can pair ReactDOM with a stale React dispatcher and trigger invalid hooks.
+  const isDevelopmentHost = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+  const isViteModule = url.pathname.startsWith('/src/')
+    || url.pathname.startsWith('/@vite/')
+    || url.pathname.startsWith('/@react-refresh')
+    || url.pathname.startsWith('/node_modules/.vite/');
+  if (isDevelopmentHost || isViteModule) return;
+
   // Handle API requests with Network First
   if (url.pathname.startsWith('/api/')) {
     event.respondWith(
@@ -70,28 +79,59 @@ self.addEventListener('fetch', (event) => {
   // index page that points at an expired hashed JavaScript bundle.
   if (request.mode === 'navigate') {
     event.respondWith(
-      fetch(request).catch(() => caches.match('/index.html'))
+      fetch(request)
+        .then((networkResponse) => {
+          if (networkResponse.status === 200 && networkResponse.type === 'basic') {
+            const responseToCache = networkResponse.clone();
+            event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put('/index.html', responseToCache)));
+          }
+          return networkResponse;
+        })
+        .catch(async () => {
+          const cached = await caches.match('/index.html');
+          return cached || new Response('Idofera is offline. Reconnect and try again.', {
+            status: 503,
+            headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+          });
+        })
     );
     return;
   }
 
-  // Handle Static Assets (Stale-While-Revalidate / Cache First with background revalidation)
+  // Executable assets are network-first so a deployment can never combine an
+  // old module with a new runtime. Other static assets remain stale-while-revalidate.
+  const isExecutableAsset = request.destination === 'script' || request.destination === 'style';
+  if (isExecutableAsset) {
+    event.respondWith(
+      fetch(request)
+        .then((networkResponse) => {
+          const contentType = networkResponse.headers.get('content-type') || '';
+          if (networkResponse.status === 200 && networkResponse.type === 'basic' && !contentType.includes('text/html')) {
+            const responseToCache = networkResponse.clone();
+            event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(request, responseToCache)));
+          }
+          return networkResponse;
+        })
+        .catch(async () => {
+          const cached = await caches.match(request);
+          return cached || new Response('Asset unavailable while offline.', { status: 503 });
+        })
+    );
+    return;
+  }
+
+  // Handle non-executable static assets with stale-while-revalidate.
   event.respondWith(
     caches.match(request).then((cachedResponse) => {
       const fetchPromise = fetch(request)
         .then((networkResponse) => {
-          const contentType = networkResponse.headers.get('content-type') || '';
-          const isExecutableAsset = request.destination === 'script' || request.destination === 'style';
-          const validAsset = !isExecutableAsset || !contentType.includes('text/html');
-          if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic' && validAsset) {
+          if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
             const responseToCache = networkResponse.clone();
-            caches.open(CACHE_NAME).then((cache) => {
-              cache.put(request, responseToCache);
-            });
+            event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(request, responseToCache)));
           }
           return networkResponse;
         })
-        .catch(() => cachedResponse);
+        .catch(() => cachedResponse || new Response('Resource unavailable while offline.', { status: 503 }));
 
       return cachedResponse || fetchPromise;
     })
