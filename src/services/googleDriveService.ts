@@ -90,6 +90,8 @@ export function getGoogleDriveAuthStatus(): {
 const UNSYNCED_COUNT_KEY = 'idofera_unsynced_local_changes_count';
 const UNSYNCED_ITEM_KEYS_STORAGE_KEY = 'idofera_unsynced_item_keys';
 const DISMISSED_UNSYNCED_KEYS_STORAGE_KEY = 'idofera_dismissed_unsynced_keys';
+const UNSYNCED_ITEM_VERSIONS_STORAGE_KEY = 'idofera_unsynced_item_versions';
+const D1_DIRTY_STORAGE_KEY = 'idofera_d1_dirty';
 export const REQUIRED_HEADER_SYNC_RECORDS = 1;
 
 // Inspect Changes categories use short labels while IndexedDB/D1 use store
@@ -100,10 +102,10 @@ const UNSYNCED_CATEGORY_ALIASES: Record<string, string[]> = {
   sales: ['sales'],
   products: ['products'],
   customers: ['customers'],
-  deliveries: ['deliveries', 'deliveryOrders'],
-  deliveryOrders: ['deliveries', 'deliveryOrders'],
-  whatsapp: ['whatsapp', 'whatsAppPreOrders'],
-  whatsAppPreOrders: ['whatsapp', 'whatsAppPreOrders'],
+  deliveries: ['deliveryOrders', 'deliveries'],
+  deliveryOrders: ['deliveryOrders', 'deliveries'],
+  whatsapp: ['whatsAppPreOrders', 'whatsapp'],
+  whatsAppPreOrders: ['whatsAppPreOrders', 'whatsapp'],
   expenses: ['expenses'],
   suppliers: ['suppliers'],
   purchases: ['purchases'],
@@ -147,10 +149,54 @@ export function getUnsyncedItemKeys(): string[] {
   if (typeof localStorage === 'undefined') return [];
   try {
     const raw = localStorage.getItem(UNSYNCED_ITEM_KEYS_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
+    const keys: string[] = raw ? JSON.parse(raw) : [];
+    const legacyAliases: Record<string, string> = {
+      deliveries: 'deliveryOrders',
+      whatsapp: 'whatsAppPreOrders',
+    };
+    return [...new Set(keys.map((rawKey) => {
+      const separator = String(rawKey).lastIndexOf(':');
+      if (separator <= 0) return rawKey;
+      const category = String(rawKey).slice(0, separator);
+      return `${legacyAliases[category] || category}:${String(rawKey).slice(separator + 1)}`;
+    }))];
   } catch (e) {
     return [];
   }
+}
+
+function getUnsyncedItemVersions(): Record<string, number> {
+  if (typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(UNSYNCED_ITEM_VERSIONS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function captureUnsyncedItemVersions(keys: Iterable<string>): Record<string, number> {
+  const versions = getUnsyncedItemVersions();
+  return Object.fromEntries(Array.from(keys, (key) => [key, Number(versions[key] || 0)]));
+}
+
+// Remove only changes acknowledged by D1. If the same record was edited while
+// the request was in flight its version will differ and it remains pending.
+export function acknowledgeUnsyncedItemKeys(submittedVersions: Record<string, number>) {
+  if (typeof localStorage === 'undefined') return;
+  const currentVersions = getUnsyncedItemVersions();
+  const remainingKeys = getUnsyncedItemKeys().filter((key) => {
+    const submittedVersion = submittedVersions[key];
+    return submittedVersion === undefined || Number(currentVersions[key] || 0) !== submittedVersion;
+  });
+  const remaining = new Set(remainingKeys);
+  const nextVersions = Object.fromEntries(
+    Object.entries(currentVersions).filter(([key]) => remaining.has(key)),
+  );
+  safeSetLocalStorage(UNSYNCED_ITEM_KEYS_STORAGE_KEY, JSON.stringify(remainingKeys));
+  safeSetLocalStorage(UNSYNCED_ITEM_VERSIONS_STORAGE_KEY, JSON.stringify(nextVersions));
+  safeSetLocalStorage(D1_DIRTY_STORAGE_KEY, remainingKeys.length > 0 ? 'true' : 'false');
+  setUnsyncedLocalChangesCount(remainingKeys.length);
 }
 
 export function getDismissedUnsyncedKeys(): string[] {
@@ -231,6 +277,9 @@ export function markItemUnsyncedKey(category: string, id: string) {
   // Keep the canonical spelling used by D1 writers (first alias, i.e. the
   // IndexedDB store name) so Sync Now, Inspect, and Discard resolve alike.
   const canonicalKey = variants[0];
+  const versions = getUnsyncedItemVersions();
+  versions[canonicalKey] = Number(versions[canonicalKey] || 0) + 1;
+  safeSetLocalStorage(UNSYNCED_ITEM_VERSIONS_STORAGE_KEY, JSON.stringify(versions));
   if (!variants.some((key) => keys.has(key))) {
     keys.add(canonicalKey);
     safeSetLocalStorage(UNSYNCED_ITEM_KEYS_STORAGE_KEY, JSON.stringify(Array.from(keys)));
@@ -297,6 +346,7 @@ export function clearUnsyncedLocalChanges() {
   safeSetLocalStorage(UNSYNCED_COUNT_KEY, '0');
   localStorage.removeItem(LOCAL_UNSYNCED_KEY);
   localStorage.removeItem(UNSYNCED_ITEM_KEYS_STORAGE_KEY);
+  localStorage.removeItem(UNSYNCED_ITEM_VERSIONS_STORAGE_KEY);
   localStorage.removeItem(DISMISSED_UNSYNCED_KEYS_STORAGE_KEY);
   notifyListeners();
 }

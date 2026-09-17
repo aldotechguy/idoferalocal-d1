@@ -12,6 +12,8 @@ import {
   REQUIRED_HEADER_SYNC_RECORDS,
   clearUnsyncedLocalChanges,
   getUnsyncedItemKeys,
+  captureUnsyncedItemVersions,
+  acknowledgeUnsyncedItemKeys,
   previewLatestDriveBackup,
   type DriveRestorePreview,
   getGoogleDriveAccessToken,
@@ -164,6 +166,7 @@ export function useCloudSync() {
     try {
       const d1Stores = ALL_STORES.filter((store) => store !== 'users');
       const changedKeys = new Set(getUnsyncedItemKeys());
+      const submittedVersions = captureUnsyncedItemVersions(changedKeys);
       const hasLocalChanges = changedKeys.size > 0;
 
       // Step 1: If there are pending local changes (or full sync requested), push to D1
@@ -176,7 +179,11 @@ export function useCloudSync() {
           return [store, records.filter((record) => changedKeys.has(`${store}:${record.id}`))] as const;
         }));
         await syncLocalRecordsToD1(Object.fromEntries(entries) as D1Snapshot);
-        clearUnsyncedLocalChanges();
+        if (forceFull && changedKeys.size === 0) {
+          clearUnsyncedLocalChanges();
+        } else {
+          acknowledgeUnsyncedItemKeys(submittedVersions);
+        }
       }
 
       // Step 2: Pull latest authoritative records from D1 into the app state & IndexedDB

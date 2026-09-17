@@ -45,7 +45,17 @@ export function mergeSnapshots(local: D1Snapshot, remote: D1Snapshot): D1Snapsho
 
 function getUnsyncedKeys(): Set<string> {
   try {
-    return new Set<string>(JSON.parse(localStorage.getItem(UNSYNCED_KEYS_KEY) || '[]'));
+    const aliases: Record<string, string> = {
+      deliveries: 'deliveryOrders',
+      whatsapp: 'whatsAppPreOrders',
+    };
+    const keys: string[] = JSON.parse(localStorage.getItem(UNSYNCED_KEYS_KEY) || '[]');
+    return new Set<string>(keys.map((rawKey) => {
+      const separator = String(rawKey).lastIndexOf(':');
+      if (separator <= 0) return rawKey;
+      const collection = String(rawKey).slice(0, separator);
+      return `${aliases[collection] || collection}:${String(rawKey).slice(separator + 1)}`;
+    }));
   } catch {
     return new Set<string>();
   }
@@ -55,7 +65,6 @@ export function mergeRemoteWithPendingLocal(local: D1Snapshot, remote: D1Snapsho
   const unsyncedKeys = getUnsyncedKeys();
   const pendingDeletions = new Set(getDeletions().map(({collection, documentId}) => `${collection}:${documentId}`));
   const merged: D1Snapshot = {};
-  let hasPendingLocalChanges = false;
 
   const allStores = new Set([...Object.keys(remote || {}), ...Object.keys(local || {})]);
 
@@ -87,22 +96,17 @@ export function mergeRemoteWithPendingLocal(local: D1Snapshot, remote: D1Snapsho
 
       const remoteRecord = records.get(id);
 
-      if (!remoteRecord) {
-        // NEW LOCAL RECORD! D1 does not have this record yet.
-        // Must be preserved so it is not wiped off during refresh / pre-snapshot sync.
+      if (!remoteRecord && unsyncedKeys.has(itemKey)) {
+        // Preserve records explicitly queued by saveDocument. A missing local
+        // record must not be inferred as pending after D1 has acknowledged it.
         records.set(id, record);
-        unsyncedKeys.add(itemKey);
-        hasPendingLocalChanges = true;
       } else {
-        // Record exists in both remote D1 and local.
-        // Keep local if it was modified locally or is newer than the remote version.
+        // D1 is authoritative unless this exact record is explicitly pending.
+        // Timestamp-only inference caused acknowledged records to reappear as
+        // unsynced when clients had incomplete/legacy timestamps.
         const isLocallyModified = unsyncedKeys.has(itemKey);
-        const isLocalNewer = recordTime(record) > recordTime(remoteRecord);
-
-        if (isLocallyModified || isLocalNewer) {
+        if (isLocallyModified) {
           records.set(id, record);
-          unsyncedKeys.add(itemKey);
-          hasPendingLocalChanges = true;
         }
       }
     }
@@ -110,8 +114,8 @@ export function mergeRemoteWithPendingLocal(local: D1Snapshot, remote: D1Snapsho
     merged[store] = [...records.values()];
   }
 
-  // Ensure unsynced changes metadata reflects any retained local records
-  if (hasPendingLocalChanges || unsyncedKeys.size > 0) {
+  // Keep pending metadata aligned with the explicit local mutation queue.
+  if (unsyncedKeys.size > 0) {
     try {
       safeSetLocalStorage(UNSYNCED_KEYS_KEY, JSON.stringify(Array.from(unsyncedKeys)));
       localStorage.setItem(DIRTY_KEY, 'true');
@@ -119,6 +123,9 @@ export function mergeRemoteWithPendingLocal(local: D1Snapshot, remote: D1Snapsho
     } catch (e) {
       console.warn('Failed to update unsynced keys tracking in localStorage:', e);
     }
+  } else {
+    localStorage.setItem(DIRTY_KEY, 'false');
+    setUnsyncedLocalChangesCount(0);
   }
 
   return migrateSnapshot(merged);
@@ -315,9 +322,18 @@ export async function syncLocalRecordsToD1(snapshot: D1Snapshot) {
   if (!response.ok) throw new Error(`D1 record sync failed (${response.status})`);
   const result = await response.json() as {revision: number; upserted: number; deleted: number};
   localStorage.setItem(REVISION_KEY, String(result.revision));
-  localStorage.setItem(DIRTY_KEY, 'false');
   localStorage.removeItem(REMOTE_PENDING_KEY);
-  localStorage.removeItem(DELETIONS_KEY);
+  const submittedDeletionKeys = new Set(deletes.map(({collection, documentId}) => `${collection}:${documentId}`));
+  const remainingDeletions = getDeletions().filter(
+    ({collection, documentId}) => !submittedDeletionKeys.has(`${collection}:${documentId}`),
+  );
+  if (remainingDeletions.length > 0) {
+    localStorage.setItem(DELETIONS_KEY, JSON.stringify(remainingDeletions));
+    localStorage.setItem(DIRTY_KEY, 'true');
+  } else {
+    localStorage.removeItem(DELETIONS_KEY);
+    localStorage.setItem(DIRTY_KEY, 'false');
+  }
   return result;
 }
 
@@ -336,6 +352,12 @@ export interface D1HealthStatus {
   endpoint: string;
   error?: string;
   status: 'healthy' | 'degraded' | 'offline' | 'error';
+  remoteSync?: {
+    configured: boolean;
+    authValid: boolean;
+    status: string;
+    message: string;
+  };
 }
 
 export async function checkD1Health(): Promise<D1HealthStatus> {
@@ -358,7 +380,7 @@ export async function checkD1Health(): Promise<D1HealthStatus> {
   try {
     const authHeaders = await getAuthHeaders();
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 7000);
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
 
     const response = await fetch('/api/storage/d1/health', {
       headers: { ...authHeaders, 'cache-control': 'no-cache' },
@@ -379,7 +401,8 @@ export async function checkD1Health(): Promise<D1HealthStatus> {
         revision: Number(data.revision || 0),
         totalDocuments: Number(data.totalDocuments || 0),
         endpoint: data.endpoint || 'Cloudflare D1 Primary Edge',
-        status: latencyMs > 2000 ? 'degraded' : 'healthy',
+        status: latencyMs > 3000 ? 'degraded' : 'healthy',
+        remoteSync: data.remoteSync,
       };
     } else {
       return {
@@ -397,6 +420,33 @@ export async function checkD1Health(): Promise<D1HealthStatus> {
   } catch (err: any) {
     const latencyMs = Math.round(performance.now() - start);
     const isTimeout = err?.name === 'AbortError';
+
+    // Quick lightweight retry to prevent transient cold-boot timeout false-positives
+    if (isTimeout) {
+      try {
+        const retryStart = performance.now();
+        const retryRes = await fetch('/api/storage/d1/health', {
+          headers: { 'cache-control': 'no-cache' },
+          credentials: 'include',
+        });
+        if (retryRes.ok) {
+          const data = (await retryRes.json()) as any;
+          return {
+            connected: Boolean(data.connected),
+            latencyMs: Math.max(1, Math.round(performance.now() - retryStart)),
+            lastChecked: Date.now(),
+            databaseId: data.databaseId || fallbackDbId,
+            revision: Number(data.revision || 0),
+            totalDocuments: Number(data.totalDocuments || 0),
+            endpoint: data.endpoint || 'Cloudflare D1 Primary Edge',
+            status: 'healthy',
+          };
+        }
+      } catch {
+        // Fall through to offline error reporting below
+      }
+    }
+
     return {
       connected: false,
       latencyMs,
@@ -405,7 +455,7 @@ export async function checkD1Health(): Promise<D1HealthStatus> {
       revision: Number(localStorage.getItem(REVISION_KEY) || 0),
       totalDocuments: 0,
       endpoint: 'Cloudflare D1 Storage API',
-      error: isTimeout ? 'D1 Endpoint connection timed out (>7s)' : (err?.message || 'Network unreachable'),
+      error: isTimeout ? 'D1 Endpoint connection timed out (>12s)' : (err?.message || 'Network unreachable'),
       status: 'offline',
     };
   }
@@ -434,4 +484,44 @@ async function flushD1Snapshot() {
   } finally {
     syncing = false;
   }
+}
+
+export interface D1ConfigInfo {
+  configured: boolean;
+  hasToken: boolean;
+  maskedToken: string;
+  accountId: string;
+  databaseId: string;
+  authStatus?: {
+    valid: boolean;
+    lastChecked: number;
+    errorMessage?: string;
+  };
+}
+
+export async function getD1Config(): Promise<D1ConfigInfo> {
+  const authHeaders = await getAuthHeaders();
+  const res = await fetch('/api/storage/d1/config', {
+    headers: { ...authHeaders, 'cache-control': 'no-cache' },
+  });
+  if (!res.ok) throw new Error('Failed to fetch D1 config');
+  return res.json();
+}
+
+export async function saveD1Config(payload: {
+  apiToken?: string;
+  accountId?: string;
+  databaseId?: string;
+  testOnly?: boolean;
+}): Promise<{ ok: boolean; message: string; error?: string; warning?: string; verified?: boolean }> {
+  const authHeaders = await getAuthHeaders();
+  const res = await fetch('/api/storage/d1/config', {
+    method: 'POST',
+    headers: {
+      ...authHeaders,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  return res.json();
 }

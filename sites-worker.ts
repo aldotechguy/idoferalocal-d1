@@ -306,7 +306,7 @@ async function authGoogle(request: Request, env: Env) {
 async function authSession(request: Request, env: Env) {
   await ensureAuthSeed(env);
   const user = await requireAppUser(request, env);
-  return user ? json({user: publicUser(user)}) : json({user: null}, 401);
+  return json({ user: user ? publicUser(user) : null, authenticated: Boolean(user) });
 }
 
 async function authLogout(request: Request, env: Env) {

@@ -125,7 +125,20 @@ export const sanitizeMoneyMovement = (m: any): MoneyMovement | null => {
 
 export const sanitizeMoneyMovements = (list: any[]): MoneyMovement[] => {
   if (!Array.isArray(list)) return [];
-  return list.map(sanitizeMoneyMovement).filter(Boolean) as MoneyMovement[];
+  const unique = new Map<string, MoneyMovement>();
+  list.forEach((raw) => {
+    const movement = sanitizeMoneyMovement(raw);
+    if (!movement || !movement.id || !Number.isFinite(movement.amount) || movement.amount <= 0) return;
+    const existing = unique.get(movement.id);
+    if (!existing) {
+      unique.set(movement.id, movement);
+      return;
+    }
+    const movementTime = Date.parse(movement.createdAt || movement.date || '') || 0;
+    const existingTime = Date.parse(existing.createdAt || existing.date || '') || 0;
+    if (movementTime >= existingTime) unique.set(movement.id, movement);
+  });
+  return [...unique.values()];
 };
 
 
@@ -189,7 +202,8 @@ interface AppContextType {
     deliveryFee?: number,
     orderTakenBy?: string,
     convertedBy?: string,
-    customInvoiceNo?: string
+    customInvoiceNo?: string,
+    paymentBreakdown?: Record<string, number>
   ) => Sale;
   generateUniqueInvoiceNo: (salesList?: Sale[], whatsappList?: WhatsAppPreOrder[]) => string;
   holdOrder: (name: string, items: SaleItem[], customerId?: string) => void;
@@ -268,7 +282,8 @@ interface AppContextType {
     paymentMethod: PaymentMethod,
     performedBy: string,
     notes?: string,
-    attributedSalesperson?: string
+    attributedSalesperson?: string,
+    paymentBreakdown?: Record<string, number>
   ) => Sale;
   deleteWhatsAppPreOrder: (id: string) => void;
 
@@ -749,60 +764,73 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Keep business collections in IndexedDB instead of duplicating them in the
   // much smaller localStorage quota.
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('products', products).catch((e) => console.warn('IndexedDB products sync error:', e));
-  }, [products]);
+  }, [isStorageReady, products]);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('customers', customers).catch((e) => console.warn('IndexedDB customers sync error:', e));
-  }, [customers]);
+  }, [isStorageReady, customers]);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('suppliers', suppliers).catch((e) => console.warn('IndexedDB suppliers sync error:', e));
-  }, [suppliers]);
+  }, [isStorageReady, suppliers]);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('sales', sales).catch((e) => console.warn('IndexedDB sales sync error:', e));
-  }, [sales]);
+  }, [isStorageReady, sales]);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('purchases', purchases).catch((e) => console.warn('IndexedDB purchases sync error:', e));
-  }, [purchases]);
+  }, [isStorageReady, purchases]);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('expenses', expenses).catch((e) => console.warn('IndexedDB expenses sync error:', e));
-  }, [expenses]);
+  }, [isStorageReady, expenses]);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('notifications', notifications).catch((e) => console.warn('IndexedDB notifications sync error:', e));
-  }, [notifications]);
+  }, [isStorageReady, notifications]);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('auditLogs', auditLogs).catch((e) => console.warn('IndexedDB auditLogs sync error:', e));
-  }, [auditLogs]);
+  }, [isStorageReady, auditLogs]);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('stockMovements', stockMovements).catch((e) => console.warn('IndexedDB stockMovements sync error:', e));
-  }, [stockMovements]);
+  }, [isStorageReady, stockMovements]);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('pricingHistory', pricingHistory).catch((e) => console.warn('IndexedDB pricingHistory sync error:', e));
-  }, [pricingHistory]);
+  }, [isStorageReady, pricingHistory]);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     safeSetLocalStorage('idofera_settings', JSON.stringify(settings));
     putItem('settings', { ...settings, id: 'store_settings' }).catch((e) => console.warn('IndexedDB settings sync error:', e));
     if (isInitialBootRef.current && !isApplyingD1Ref.current) {
       saveDocument('settings', { ...settings, id: 'store_settings' });
     }
-  }, [settings]);
+  }, [isStorageReady, settings]);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('heldOrders', heldOrders).catch((e) => console.warn('IndexedDB heldOrders sync error:', e));
-  }, [heldOrders]);
+  }, [isStorageReady, heldOrders]);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('deliveryOrders', deliveryOrders).catch((e) => console.warn('IndexedDB deliveryOrders sync error:', e));
-  }, [deliveryOrders]);
+  }, [isStorageReady, deliveryOrders]);
 
   // Auto deduplicate any existing duplicate SKUs on initial app load
   useEffect(() => {
@@ -825,12 +853,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, []);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('whatsAppPreOrders', whatsAppPreOrders).catch((e) => console.warn('IndexedDB preorders sync error:', e));
-  }, [whatsAppPreOrders]);
+  }, [isStorageReady, whatsAppPreOrders]);
 
   useEffect(() => {
+    if (!isStorageReady) return;
     replaceStoreItems('moneyMovements', moneyMovements).catch((e) => console.warn('IndexedDB moneyMovements sync error:', e));
-  }, [moneyMovements]);
+  }, [isStorageReady, moneyMovements]);
 
   const currentD1Snapshot = (): D1Snapshot => ({
     products,
@@ -1514,7 +1544,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     deliveryFee: number = 0,
     orderTakenBy?: string,
     convertedBy?: string,
-    customInvoiceNo?: string
+    customInvoiceNo?: string,
+    paymentBreakdown?: Record<string, number>
   ): Sale => {
     const subtotal = items.reduce((acc, item) => acc + item.total, 0);
     const totalAmount = Math.max(0, subtotal - discount + tax + (deliveryFee || 0));
@@ -1537,6 +1568,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       totalAmount,
       paidAmount,
       paymentMethod,
+      paymentBreakdown: paymentMethod === 'Split' ? paymentBreakdown : undefined,
       status: 'Completed',
       notes,
       createdBy: performedBy,
@@ -1680,8 +1712,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         putItem('moneyMovements', mm).catch(() => {});
       } else if (paymentMethod === 'Split') {
         const breakdown = newSale.paymentBreakdown || {};
-        const cashPart = breakdown['Cash'] || 0;
-        const transferPart = (breakdown['Mobile Transfer'] || 0) + (breakdown['Bank Transfer'] || 0) + (breakdown['Card'] || 0);
+        const cashPart = Math.max(0, Number(breakdown['Cash']) || 0);
+        const transferPart = Math.max(0,
+          (Number(breakdown['Mobile Transfer']) || 0) +
+          (Number(breakdown['Bank Transfer']) || 0) +
+          (Number(breakdown['Card']) || 0),
+        );
 
         if (cashPart > 0) {
           const mmCash: MoneyMovement = {
@@ -1718,39 +1754,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           };
           setMoneyMovements((prev) => [mmBiz, ...prev]);
           saveDocument('moneyMovements', mmBiz);
-          putItem('moneyMovements', mmBiz).catch(() => {});
-        } else if (cashPart === 0) {
-          const half = Number((paidAmount / 2).toFixed(2));
-          const mmCash: MoneyMovement = {
-            id: generateUniqueId('mm'),
-            date: now,
-            type: 'Sale Inflow',
-            subtype: 'Split - Cash (50%)',
-            destinationAccount: 'Physical Cash',
-            amount: half,
-            referenceNo: invoiceNo,
-            referenceId: newSale.id,
-            performedBy,
-            notes: `Split sale cash: ${invoiceNo}`,
-            createdAt: now,
-          };
-          const mmBiz: MoneyMovement = {
-            id: generateUniqueId('mm'),
-            date: now,
-            type: 'Sale Inflow',
-            subtype: 'Split - Biz Account (50%)',
-            destinationAccount: 'Biz Account',
-            amount: paidAmount - half,
-            referenceNo: invoiceNo,
-            referenceId: newSale.id,
-            performedBy,
-            notes: `Split sale bank: ${invoiceNo}`,
-            createdAt: now,
-          };
-          setMoneyMovements((prev) => [mmBiz, mmCash, ...prev]);
-          saveDocument('moneyMovements', mmCash);
-          saveDocument('moneyMovements', mmBiz);
-          putItem('moneyMovements', mmCash).catch(() => {});
           putItem('moneyMovements', mmBiz).catch(() => {});
         }
       }
@@ -2000,23 +2003,56 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // 7. Cascade to Money Movements (Only for real-time live sales, not historical sales)
     const refundPaid = sale.paidAmount !== undefined ? sale.paidAmount : sale.totalAmount;
     if (!isHistoricalSale && refundPaid > 0) {
-      const isCash = sale.paymentMethod === 'Cash';
-      const refMM: MoneyMovement = {
-        id: generateUniqueId('mm'),
-        date: new Date().toISOString(),
-        type: 'Sale Refund',
-        subtype: `Refund - ${sale.paymentMethod || 'Cash'}`,
-        sourceAccount: isCash ? 'Physical Cash' : 'Biz Account',
-        amount: refundPaid,
-        referenceNo: sale.invoiceNo,
-        referenceId: sale.id,
-        performedBy,
-        notes: `Refund for sale ${sale.invoiceNo}: ${settings.currencySymbol}${refundPaid.toFixed(2)} (${reason})`,
-        createdAt: new Date().toISOString(),
-      };
-      setMoneyMovements((prev) => [refMM, ...prev]);
-      saveDocument('moneyMovements', refMM);
-      putItem('moneyMovements', refMM).catch(() => {});
+      const now = new Date().toISOString();
+      const refundParts = sale.paymentMethod === 'Split'
+        ? [
+            { account: 'Physical Cash' as LiquidAccountType, amount: Number(sale.paymentBreakdown?.Cash) || 0, label: 'Split - Cash Portion' },
+            {
+              account: 'Biz Account' as LiquidAccountType,
+              amount:
+                (Number(sale.paymentBreakdown?.['Mobile Transfer']) || 0) +
+                (Number(sale.paymentBreakdown?.['Bank Transfer']) || 0) +
+                (Number(sale.paymentBreakdown?.Card) || 0),
+              label: 'Split - Transfer/Card Portion',
+            },
+          ]
+        : [{
+            account: sale.paymentMethod === 'Cash' ? 'Physical Cash' as LiquidAccountType : 'Biz Account' as LiquidAccountType,
+            amount: refundPaid,
+            label: sale.paymentMethod || 'Cash',
+          }];
+
+      const validRefundParts = refundParts.filter((part) => part.amount > 0);
+      // Legacy split sales did not retain a reliable breakdown. Do not invent a
+      // Till amount; reverse their existing sale inflow ledger entries instead.
+      if (sale.paymentMethod === 'Split' && validRefundParts.length === 0) {
+        moneyMovements
+          .filter((movement) => movement.type === 'Sale Inflow' && movement.referenceId === sale.id)
+          .forEach((movement) => validRefundParts.push({
+            account: movement.destinationAccount || 'Biz Account',
+            amount: Number(movement.amount) || 0,
+            label: movement.subtype || 'Split payment',
+          }));
+      }
+
+      validRefundParts.forEach((part) => {
+        const refMM: MoneyMovement = {
+          id: generateUniqueId('mm'),
+          date: now,
+          type: 'Sale Refund',
+          subtype: `Refund - ${part.label}`,
+          sourceAccount: part.account,
+          amount: part.amount,
+          referenceNo: sale.invoiceNo,
+          referenceId: sale.id,
+          performedBy,
+          notes: `Refund for sale ${sale.invoiceNo}: ${settings.currencySymbol}${part.amount.toFixed(2)} (${reason})`,
+          createdAt: now,
+        };
+        setMoneyMovements((prev) => [refMM, ...prev]);
+        saveDocument('moneyMovements', refMM);
+        putItem('moneyMovements', refMM).catch(() => {});
+      });
     }
 
     logAudit(
@@ -4248,7 +4284,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     paymentMethod: PaymentMethod,
     performedBy: string,
     notes?: string,
-    attributedSalesperson?: string
+    attributedSalesperson?: string,
+    paymentBreakdown?: Record<string, number>
   ) => {
     const preOrder = whatsAppPreOrders.find((p) => p.id === preOrderId);
     if (!preOrder) {
@@ -4359,7 +4396,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       deliveryFee,
       orderTakenBy,
       convertingCashier,
-      targetInvoiceNo
+      targetInvoiceNo,
+      paymentBreakdown
     );
 
     // Update WhatsApp Pre-Order status to Completed
