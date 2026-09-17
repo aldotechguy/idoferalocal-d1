@@ -12,6 +12,7 @@ test('public routes preserve category, product and search parameters', () => {
 test('staff routes are deep-linkable', () => {
   assert.deepEqual(parseRoute('/labs/pos', ''), { surface: 'staff', staffPage: 'pos' });
   assert.deepEqual(parseRoute('/labs/reports', ''), { surface: 'staff', staffPage: 'reports' });
+  assert.deepEqual(parseRoute('/labs/mall-orders', ''), { surface: 'staff', staffPage: 'mall-orders' });
   assert.deepEqual(parseRoute('/labs', ''), { surface: 'staff', staffPage: undefined });
 });
 

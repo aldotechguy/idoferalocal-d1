@@ -18,7 +18,7 @@ import {
   CheckCircle,
   Check,
   X,
-  MessageCircle,
+  Store,
   Edit3,
   History,
   Calendar,
@@ -28,10 +28,11 @@ import {
   SlidersHorizontal,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { Product, SaleItem, PaymentMethod, Customer, WhatsAppPreOrder } from '../../types';
+import { Product, SaleItem, PaymentMethod, Customer } from '../../types';
 import { ReceiptModal } from '../common/ReceiptModal';
 import { useAuth } from '../../context/AuthContext';
 import { useInteractions } from '../../context/InteractionContext';
+import { navigateStaff } from '../../hooks/useRoute';
 
 export const PosView: React.FC = () => {
   const {
@@ -45,8 +46,6 @@ export const PosView: React.FC = () => {
     deleteHeldOrder,
     deleteHeldOrderItem,
     clearAllHeldOrders,
-    whatsAppPreOrders,
-    convertPreOrderToSale,
     settings,
   } = useApp();
   const { currentUser } = useAuth();
@@ -73,8 +72,6 @@ export const PosView: React.FC = () => {
   const [activeReceiptSale, setActiveReceiptSale] = useState<any | null>(null);
   const [showHeldModal, setShowHeldModal] = useState(false);
   const [expandedHeldOrderId, setExpandedHeldOrderId] = useState<string | null>(null);
-  const [showWhatsAppModal, setShowWhatsAppModal] = useState(false);
-  const [activePreOrderToFulfill, setActivePreOrderToFulfill] = useState<WhatsAppPreOrder | null>(null);
   const [holdOrderName, setHoldOrderName] = useState('');
   const [qtyModalProduct, setQtyModalProduct] = useState<{ product: Product; currentQty: number } | null>(null);
   const [qtyInputVal, setQtyInputVal] = useState<string>('1');
@@ -408,56 +405,6 @@ export const PosView: React.FC = () => {
     }
   };
 
-  const handleImportWhatsAppOrderToCart = (preOrder: WhatsAppPreOrder) => {
-    const mappedItems: SaleItem[] = preOrder.items.map((item) => {
-      const match = products.find(
-        (p) =>
-          (item.productId && p.id === item.productId) ||
-          (item.sku && p.sku === item.sku) ||
-          (item.productName && p.name && p.name.toLowerCase() === item.productName.toLowerCase())
-      );
-
-      const meetsWholesale = match ? item.quantity >= match.minWholesaleQty : Boolean(item.isWholesale);
-      const useRP = Boolean(item.useRetailPrice);
-      const unitPrice = useRP ? (match ? match.retailPrice : item.unitPrice) : item.unitPrice;
-
-      return {
-        productId: match ? match.id : 'prod-gen-' + Date.now(),
-        productName: match ? match.name : item.productName,
-        sku: match ? match.sku : item.sku || 'N/A',
-        quantity: item.quantity,
-        unitPrice,
-        costPrice: match ? match.costPrice : item.unitPrice * 0.6,
-        total: item.quantity * unitPrice,
-        isWholesale: meetsWholesale && !useRP,
-        useRetailPrice: useRP,
-      };
-    });
-
-    setCart(mappedItems);
-    setDiscountAmount(preOrder.discount || 0);
-    setNoTax(true); // WhatsApp Pre-Orders are tax exempt
-    if (preOrder.deliveryFee && preOrder.deliveryFee > 0) {
-      setHasDeliveryFee(true);
-      setDeliveryFeeInput(preOrder.deliveryFee.toString());
-    } else {
-      setHasDeliveryFee(false);
-      setDeliveryFeeInput('0');
-    }
-
-    const matchCust = customers.find(
-      (c) =>
-        (preOrder.customerPhone && c.phone && c.phone.replace(/\D/g, '') === preOrder.customerPhone.replace(/\D/g, '')) ||
-        (preOrder.customerName && c.name && c.name.toLowerCase() === preOrder.customerName.toLowerCase())
-    );
-    if (matchCust) {
-      setSelectedCustomer(matchCust);
-    }
-
-    setActivePreOrderToFulfill(preOrder);
-    setShowWhatsAppModal(false);
-  };
-
   const handleCheckout = (customPaid?: number, customNotes?: string) => {
     if (cart.length === 0) return;
 
@@ -485,22 +432,7 @@ export const PosView: React.FC = () => {
         : `Historical Past Sale Entry (Admin) - ${formattedDT}`;
     }
 
-    let completedSale;
-    if (activePreOrderToFulfill) {
-      try {
-        completedSale = convertPreOrderToSale(
-          activePreOrderToFulfill.id,
-          paymentMethod,
-          currentUser?.displayName || 'Sales Clerk',
-          notesToSave || 'Fulfill via POS Checkout',
-          undefined,
-          paymentMethod === 'Split' ? { ...splitAmounts } : undefined
-        );
-      } catch (err) {
-        return;
-      }
-    } else {
-      completedSale = processSale(
+    const completedSale = processSale(
         cart,
         selectedCustomer,
         discountAmount,
@@ -517,7 +449,6 @@ export const PosView: React.FC = () => {
         undefined,
         paymentMethod === 'Split' ? { ...splitAmounts } : undefined
       );
-    }
 
     if (!completedSale?.isHistorical && !isBackdateMode) {
       setActiveReceiptSale(completedSale);
@@ -536,7 +467,6 @@ export const PosView: React.FC = () => {
       'Mobile Transfer': 0,
     });
     setShowSplitModal(false);
-    setActivePreOrderToFulfill(null);
   };
 
   const handleHoldCurrentCart = () => {
@@ -571,15 +501,13 @@ export const PosView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          {whatsAppPreOrders.filter((o) => o.status !== 'Completed' && o.status !== 'Cancelled').length > 0 && (
-            <button
-              onClick={() => setShowWhatsAppModal(true)}
-              className="flex items-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs shadow-xs transition-colors"
-            >
-              <MessageCircle className="w-4 h-4" />
-              <span>WhatsApp Orders ({whatsAppPreOrders.filter((o) => o.status !== 'Completed' && o.status !== 'Cancelled').length})</span>
-            </button>
-          )}
+          <button
+            onClick={() => navigateStaff('mall-orders')}
+            className="flex items-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs shadow-xs transition-colors"
+          >
+            <Store className="w-4 h-4" />
+            <span>Mall Orders</span>
+          </button>
 
           {heldOrders.length > 0 && (
             <button
@@ -1694,75 +1622,6 @@ export const PosView: React.FC = () => {
                     </div>
                   );
                 })
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* WhatsApp Pre-Orders Import Modal for POS */}
-      {showWhatsAppModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl max-w-lg w-full p-6 space-y-4 my-auto max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-800 pb-3">
-              <div className="flex items-center gap-2">
-                <MessageCircle className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
-                <h3 className="font-bold text-slate-900 dark:text-white text-base">
-                  Active WhatsApp Pre-Orders
-                </h3>
-              </div>
-              <button
-                onClick={() => setShowWhatsAppModal(false)}
-                className="p-1 rounded-xl text-slate-400 hover:text-slate-600"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
-              {whatsAppPreOrders.filter((o) => o.status !== 'Completed' && o.status !== 'Cancelled').length === 0 ? (
-                <div className="p-6 text-center text-xs text-slate-400">
-                  No active WhatsApp pre-orders ready for checkout.
-                </div>
-              ) : (
-                whatsAppPreOrders
-                  .filter((o) => o.status !== 'Completed' && o.status !== 'Cancelled')
-                  .map((order) => (
-                    <div
-                      key={order.id}
-                      className="p-3.5 bg-slate-50 dark:bg-slate-800/80 rounded-2xl border border-slate-200/80 dark:border-slate-700 flex flex-col gap-2"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <span className="font-mono font-bold text-xs text-slate-900 dark:text-white">
-                            {order.preOrderNo}
-                          </span>
-                          <span className="ml-2 text-xs font-semibold text-slate-700 dark:text-slate-300">
-                            {order.customerName} ({order.customerPhone})
-                          </span>
-                        </div>
-                        <span className="text-xs font-black text-emerald-600 dark:text-emerald-400 font-mono">
-                          {settings.currencySymbol}{order.totalAmount.toFixed(2)}
-                        </span>
-                      </div>
-
-                      <div className="text-[11px] text-slate-500">
-                        {order.items.map((i) => `${i.quantity}x ${i.productName}`).join(', ')}
-                      </div>
-
-                      <div className="flex items-center justify-between pt-1">
-                        <span className="text-[10px] font-bold text-slate-400">
-                          Status: {order.status}
-                        </span>
-                        <button
-                          onClick={() => handleImportWhatsAppOrderToCart(order)}
-                          className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition-all"
-                        >
-                          Load into POS Cart
-                        </button>
-                      </div>
-                    </div>
-                  ))
               )}
             </div>
           </div>

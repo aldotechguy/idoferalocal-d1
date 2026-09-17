@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useApp } from '../../context/AppContext';
+import { staffMallClient } from '../../services/staffMallClient';
 
 interface SidebarProps {
   activePage: string;
@@ -35,7 +36,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onToggleCollapse: controlledToggle,
 }) => {
   const { hasPermission } = useAuth();
-  const { whatsAppPreOrders, deliveryOrders, treasuryBalances, settings } = useApp();
+  const { deliveryOrders, treasuryBalances, settings } = useApp();
+  const [pendingMallCount, setPendingMallCount] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = () => staffMallClient.counts().then((data) => { if (active) setPendingMallCount(data.actionable); }).catch(() => {});
+    refresh();
+    const timer = window.setInterval(refresh, 60_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
 
   // Desktop rail collapsed mode (internal state fallback if not controlled)
   const [internalCollapsed, setInternalCollapsed] = useState<boolean>(() => {
@@ -65,13 +75,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
 
   // Pending counts for badges
-  const pendingWhatsAppCount = whatsAppPreOrders.filter(
-    (o) => o.status !== 'Completed' && o.status !== 'Cancelled'
-  ).length;
   const pendingPickupCount = deliveryOrders
     ? deliveryOrders.filter((o) => !o.isPickupConfirmed && o.status !== 'Cancelled').length
     : 0;
-  const totalPendingOrders = pendingWhatsAppCount + pendingPickupCount;
+  const totalPendingOrders = pendingMallCount + pendingPickupCount;
 
   // Active Hub matching logic
   const isHubActive = (hubId: string) => {
@@ -81,7 +88,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       case 'pos':
         return activePage === 'pos';
       case 'sales':
-        return ['sales', 'sales-orders', 'whatsapp-orders', 'deliveries'].includes(activePage);
+        return ['sales', 'sales-orders', 'mall-orders', 'whatsapp-orders', 'deliveries'].includes(activePage);
       case 'products':
         return ['products', 'products-stock', 'inventory', 'pricing', 'archive'].includes(activePage);
       case 'customers':
@@ -118,7 +125,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     {
       id: 'sales',
       label: 'Sales & Orders',
-      subtitle: 'Sales, WhatsApp & Delivery',
+      subtitle: 'Sales, Mall & Delivery',
       icon: ShoppingBag,
       roles: ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
       badge: totalPendingOrders > 0 ? `${totalPendingOrders} Active` : undefined,

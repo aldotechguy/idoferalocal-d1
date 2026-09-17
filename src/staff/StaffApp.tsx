@@ -16,7 +16,7 @@ const ProductsStockHubView = React.lazy(() => import('../components/products/Pro
 const PurchasesSuppliersHubView = React.lazy(() => import('../components/purchases/PurchasesSuppliersHubView').then((m) => ({ default: m.PurchasesSuppliersHubView })));
 const SettingsHubView = React.lazy(() => import('../components/settings/SettingsHubView').then((m) => ({ default: m.SettingsHubView })));
 
-const PAGE_TITLES: Record<string, string> = { dashboard: 'Dashboard', pos: 'Point of Sale', sales: 'Sales & Orders', 'sales-orders': 'Sales & Orders', 'whatsapp-orders': 'WhatsApp Orders', deliveries: 'Deliveries', products: 'Products & Stock', 'products-stock': 'Products & Stock', inventory: 'Inventory', pricing: 'Pricing', archive: 'Archive', customers: 'Customers', purchases: 'Purchases', 'purchases-suppliers': 'Purchases', suppliers: 'Suppliers', expenses: 'Finance & Expenses', finance: 'Finance', 'money-movement': 'Money Movement', 'investment-planner': 'Investment Planner', reports: 'Reports', settings: 'Settings', 'settings-tools': 'Settings', import: 'Import', ai: 'AI Assistant' };
+const PAGE_TITLES: Record<string, string> = { dashboard: 'Dashboard', pos: 'Point of Sale', sales: 'Sales & Orders', 'sales-orders': 'Sales & Orders', 'mall-orders': 'Mall Orders', deliveries: 'Deliveries', products: 'Products & Stock', 'products-stock': 'Products & Stock', inventory: 'Inventory', pricing: 'Pricing', archive: 'Archive', customers: 'Customers', purchases: 'Purchases', 'purchases-suppliers': 'Purchases', suppliers: 'Suppliers', expenses: 'Finance & Expenses', finance: 'Finance', 'money-movement': 'Money Movement', 'investment-planner': 'Investment Planner', reports: 'Reports', settings: 'Settings', 'settings-tools': 'Settings', import: 'Import', ai: 'AI Assistant' };
 
 export const StaffApp: React.FC = () => {
   const { currentUser, hasPermission } = useAuth();
@@ -44,6 +44,10 @@ export const StaffApp: React.FC = () => {
 
   React.useEffect(() => {
     document.title = `${PAGE_TITLES[activePage] || 'Workspace'} — IdoferaLabs`;
+    if (route.surface === 'staff' && route.staffPage === 'whatsapp-orders') {
+      navigateStaff('mall-orders', true);
+      return;
+    }
     if (route.surface === 'staff' && (route.legacyPath || !route.staffPage)) {
       navigateStaff(route.staffPage || 'dashboard', true);
     }
@@ -59,6 +63,7 @@ export const StaffApp: React.FC = () => {
     sales: ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
     'sales-orders': ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
     deliveries: ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
+    'mall-orders': ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
     'whatsapp-orders': ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
     products: ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
     'products-stock': ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
@@ -101,8 +106,9 @@ export const StaffApp: React.FC = () => {
       case 'sales':
       case 'sales-orders':
         return <SalesOrdersHubView initialTab="sales" onNavigate={setActivePage} />;
+      case 'mall-orders':
       case 'whatsapp-orders':
-        return <SalesOrdersHubView initialTab="whatsapp-orders" onNavigate={setActivePage} />;
+        return <SalesOrdersHubView initialTab="mall-orders" onNavigate={setActivePage} />;
       case 'deliveries':
         return <SalesOrdersHubView initialTab="deliveries" onNavigate={setActivePage} />;
       case 'products':

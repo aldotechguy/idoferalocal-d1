@@ -185,6 +185,8 @@ export const mallClient = {
 
   resetSession: () => {
     clearSession();
-    return newSession();
+    const session = newSession();
+    setSession(session);
+    return session;
   },
 };

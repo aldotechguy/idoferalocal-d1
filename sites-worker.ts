@@ -28,6 +28,7 @@ import {
   backfillStatementsFromDocumentRows,
 } from './src/server/relationalWrites.js';
 import { handleMallApi, MALL_OVERSELL_TRIGGER_SQL } from './src/server/mallApi.js';
+import { handleStaffMallApi } from './src/server/mallOrderAdminApi.js';
 import type { QueryAll } from './src/server/relationalMapper.js';
 
 /** Rows out of D1 -> the QueryAll shape the shared mapper expects. */
@@ -733,15 +734,27 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/ai/business-assistant') return await businessAssistant(request, env);
       if (request.method === 'POST' && url.pathname === '/api/ai/pricing-assistant') return await pricingAssistant(request, env);
       if (request.method === 'POST' && url.pathname === '/api/ai/sales-forecasting') return await salesForecast(request, env);
+      if (url.pathname === '/api/staff/mall-orders' || url.pathname.startsWith('/api/staff/mall-orders/')) {
+        const actor = await requireAppUser(request, env);
+        if (!actor) return json({error: 'Authentication required.'}, 401);
+        return handleStaffMallApi(request, {
+          queryAll: makeD1QueryAll(env),
+          runBatch: async (stmts) => {
+            const results = await env.DB.batch(toD1Statements(env, stmts));
+            return results.map((result: any) => Number(result?.meta?.changes ?? 0));
+          },
+        }, {id: actor.id, displayName: actor.display_name, role: actor.role});
+      }
       // Phase 5: mall storefront API (public catalog/cart/checkout/track).
-      const mallResponse = await handleMallApi(request, {
-        queryAll: makeD1QueryAll(env),
-        runBatch: async (stmts) => {
-          const results = await env.DB.batch(toD1Statements(env, stmts));
-          return results.map((r: any) => Number(r?.meta?.changes ?? 0));
-        },
-      });
-      if (mallResponse) return mallResponse;
+      if (url.pathname === '/api/mall' || url.pathname.startsWith('/api/mall/')) {
+        return handleMallApi(request, {
+          queryAll: makeD1QueryAll(env),
+          runBatch: async (stmts) => {
+            const results = await env.DB.batch(toD1Statements(env, stmts));
+            return results.map((r: any) => Number(r?.meta?.changes ?? 0));
+          },
+        });
+      }
       if (url.pathname.startsWith('/api/')) return json({error: 'Not found'}, 404);
       return await serveAsset(request, env);
     } catch (error) {

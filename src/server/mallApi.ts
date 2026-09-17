@@ -262,10 +262,24 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any) {
   const note = s(body?.note).trim().slice(0, 400);
   const rawMethod = s(body?.paymentMethod);
   const paymentMethod = PAYMENT_PROVIDERS.has(rawMethod) ? rawMethod : 'pay_on_pickup';
-  const deliveryFeeKobo = Math.min(Math.max(Math.round(n(body?.deliveryFeeNaira, 0) * 100), 0), 10_000_000);
+  // Delivery fees are staff-quoted or calculated by trusted server rules, never accepted from a public client.
+  const deliveryFeeKobo = 0;
 
 
   const cartId = await getOrCreateCartId(exec, sessionId);
+  const orderId = `mo-${sessionId}`;
+  const existingOrder = await exec.queryAll('SELECT * FROM mall_orders WHERE id = ? LIMIT 1', [orderId]);
+  if (existingOrder.length) {
+    const existingItems = await exec.queryAll('SELECT product_id, product_name, qty, unit_price_kobo FROM mall_order_items WHERE mall_order_id = ? ORDER BY rowid', [orderId]);
+    const existing = existingOrder[0];
+    return json({
+      ok: true, orderNo: s(existing.order_no), status: s(existing.status, 'pending'),
+      items: existingItems.map((item) => ({ productId: s(item.product_id), name: s(item.product_name), unit: 'pcs', price: n(item.unit_price_kobo), qty: n(item.qty) })),
+      customerName: s(existing.customer_name), subtotalKobo: n(existing.subtotal_kobo), totalKobo: n(existing.total_kobo), paymentStatus: 'pending',
+      paidKobo: 0, amountDueKobo: n(existing.total_kobo), createdAt: s(existing.created_at),
+      subtotal: KoboToNaira(existing.subtotal_kobo), deliveryFee: KoboToNaira(existing.delivery_fee_kobo), total: KoboToNaira(existing.total_kobo),
+    });
+  }
   const rows = await exec.queryAll(
     `SELECT ci.product_id AS product_id, ci.qty AS qty, p.name AS name, p.stock_qty AS stock_qty,
             p.is_mall_listed AS is_mall_listed, p.status AS status,
@@ -292,7 +306,6 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any) {
 
   const subtotalKobo = items.reduce((sum, it) => sum + it.totalKobo, 0);
   const totalKobo = subtotalKobo + deliveryFeeKobo;
-  const orderId = `mo-${uuid()}`;
   const orderNo = orderNumber();
   const createdAt = nowIso();
 
@@ -348,7 +361,10 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any) {
     })),
     customerName,
     subtotalKobo,
-    paidKobo: totalKobo,
+    totalKobo,
+    paymentStatus: 'pending',
+    paidKobo: 0,
+    amountDueKobo: totalKobo,
     createdAt,
     subtotal: KoboToNaira(subtotalKobo),
     deliveryFee: KoboToNaira(deliveryFeeKobo),
@@ -404,9 +420,11 @@ async function parseMallBody(request: Request): Promise<any> {
 }
 
 export async function handleMallApi(request: Request, exec: MallExecutor): Promise<Response> {
+  try {
   const methodName = request.method;
   const rawPath = new URL(request.url, 'http://localhost').pathname;
-  const pathname = new URL(request.url, 'http://localhost').pathname.replace(/^\/api\/mall/, '');
+  if (rawPath !== '/api/mall' && !rawPath.startsWith('/api/mall/')) return json({ error: 'Not found' }, 404);
+  const pathname = rawPath.replace(/^\/api\/mall/, '');
 
   if (pathname.startsWith('/health')) {
     return json({
@@ -428,7 +446,12 @@ export async function handleMallApi(request: Request, exec: MallExecutor): Promi
     return getOrdersByPhone(exec, new URL(request.url, 'http://localhost'));
   }
 
-    if (pathname.startsWith('/products')) {
+  if (pathname.startsWith('/products/')) {
+    if (methodName !== 'GET') return json({ error: 'Only GET is supported.' }, 405);
+    return getProduct(exec, decodeURIComponent(pathname.slice('/products/'.length)));
+  }
+
+  if (pathname.startsWith('/products')) {
     if (methodName !== 'GET') return json({ error: 'Only GET is supported.' }, 405);
     return getCatalog(exec, new URL(request.url, 'http://localhost'));
   }
@@ -468,4 +491,8 @@ export async function handleMallApi(request: Request, exec: MallExecutor): Promi
   }
 
   return json({ error: 'Unknown /api/mall route.' }, 404);
+  } catch (error) {
+    const known = error as MallError;
+    return json({ error: error instanceof Error ? error.message : 'Mall API error', payload: known.mallPayload }, known.mallStatus || 500);
+  }
 }

@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { History, MessageCircle, Truck, ShoppingBag } from 'lucide-react';
+import { History, Store, Truck, ShoppingBag } from 'lucide-react';
 import { SalesView } from './SalesView';
-import { WhatsAppOrdersView } from '../whatsapp/WhatsAppOrdersView';
+import { MallOrdersView } from '../mall-admin/MallOrdersView';
 import { DeliveriesView } from '../deliveries/DeliveriesView';
 import { useApp } from '../../context/AppContext';
 
-export type SalesOrdersTab = 'sales' | 'whatsapp-orders' | 'deliveries';
+export type SalesOrdersTab = 'sales' | 'mall-orders' | 'deliveries';
 
 interface SalesOrdersHubViewProps {
   initialTab?: SalesOrdersTab;
@@ -17,11 +17,7 @@ export const SalesOrdersHubView: React.FC<SalesOrdersHubViewProps> = ({
   onNavigate,
 }) => {
   const [activeTab, setActiveTab] = useState<SalesOrdersTab>(initialTab);
-  const { whatsAppPreOrders, deliveryOrders } = useApp();
-
-  const pendingWhatsAppCount = whatsAppPreOrders.filter(
-    (o) => o.status !== 'Completed' && o.status !== 'Cancelled'
-  ).length;
+  const { deliveryOrders } = useApp();
 
   const pendingPickupCount = deliveryOrders
     ? deliveryOrders.filter((o) => !o.isPickupConfirmed && o.status !== 'Cancelled').length
@@ -52,7 +48,7 @@ export const SalesOrdersHubView: React.FC<SalesOrdersHubViewProps> = ({
                 </span>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Track all completed sales transactions, WhatsApp pre-orders, and dispatch delivery orders.
+                 Track completed sales, storefront Mall orders, and dispatch delivery orders.
               </p>
             </div>
           </div>
@@ -73,24 +69,15 @@ export const SalesOrdersHubView: React.FC<SalesOrdersHubViewProps> = ({
           </button>
 
           <button
-            onClick={() => setActiveTab('whatsapp-orders')}
+             onClick={() => setActiveTab('mall-orders')}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
-              activeTab === 'whatsapp-orders'
+               activeTab === 'mall-orders'
                 ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
                 : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
             }`}
           >
-            <MessageCircle className="w-3.5 h-3.5" />
-            <span>WhatsApp Pre-Orders</span>
-            {pendingWhatsAppCount > 0 ? (
-              <span className="px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-emerald-500 text-white">
-                {pendingWhatsAppCount} Active
-              </span>
-            ) : (
-              <span className="px-1.5 py-0.5 rounded-md text-[9px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
-                Catalogue
-              </span>
-            )}
+             <Store className="w-3.5 h-3.5" />
+             <span>Mall Orders</span>
           </button>
 
           <button
@@ -115,7 +102,7 @@ export const SalesOrdersHubView: React.FC<SalesOrdersHubViewProps> = ({
       {/* Active Tab Content */}
       <div>
         {activeTab === 'sales' && <SalesView onNavigate={onNavigate} />}
-        {activeTab === 'whatsapp-orders' && <WhatsAppOrdersView onNavigate={onNavigate} />}
+         {activeTab === 'mall-orders' && <MallOrdersView />}
         {activeTab === 'deliveries' && <DeliveriesView onNavigate={onNavigate} />}
       </div>
     </div>

@@ -48,6 +48,8 @@ export type MallOrder = {
   subtotalKobo: number;
   customerName?: string;
   paidKobo?: number;
+  amountDueKobo?: number;
+  paymentStatus?: string;
   createdAt?: string;
 };
 
@@ -57,8 +59,6 @@ export type MallCheckoutBody = {
   deliveryAddress?: string;
   note?: string;
   paymentMethod?: 'pay_on_pickup' | 'bank_transfer';
-  deliveryFeeNaira?: number;
-  paidKobo?: number;
 };
 
 export type MallBuyerProfile = {

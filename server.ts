@@ -54,6 +54,7 @@ let db = createDatabaseInstance();
 import { makeNodeAdapter } from "./src/server/nodeAdapter";
 import { ensureRelationalSchemaNode, makeNodeMallExecutor } from "./src/server/nodeAdapter";
 import { handleMallApi } from "./src/server/mallApi";
+import { handleStaffMallApi } from "./src/server/mallOrderAdminApi";
 import { buildSnapshot } from "./src/server/relationalSnapshot.js";
 import {
   upsertToStatements,
@@ -764,6 +765,28 @@ app.all("/api/mall/*", async (req, res) => {
     const body: any = { error: error?.message || "Mall API error" };
     if (error?.mallPayload) body.payload = error.mallPayload;
     return res.status(status).json(body);
+  }
+});
+
+app.all("/api/staff/mall-orders*", async (req, res) => {
+  try {
+    const actor = await requireAppUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required." });
+    const url = new URL(req.originalUrl || req.url, "http://localhost:3000");
+    const headers = new Headers({ "content-type": "application/json" });
+    const request = new globalThis.Request(url, {
+      method: req.method,
+      headers,
+      body: ["GET", "HEAD"].includes(req.method) ? undefined : JSON.stringify(req.body ?? {}),
+    });
+    const response = await handleStaffMallApi(request, makeNodeMallExecutor(db), {
+      id: actor.id,
+      displayName: actor.display_name,
+      role: actor.role,
+    });
+    return res.status(response.status).set("content-type", "application/json").send(await response.text());
+  } catch (error: any) {
+    return res.status(500).json({ error: error?.message || "Mall order operation failed." });
   }
 });
 

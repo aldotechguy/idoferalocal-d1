@@ -18,13 +18,11 @@ interface Props {
 export const MallCheckoutPanel: React.FC<Props> = ({ open, onClose }) => {
   const { cart, checkout, order, view, setView } = useMall();
   const [customerName, setCustomerName] = React.useState('Walk-in customer');
-  const [paidKobo, setPaidKobo] = React.useState<number | undefined>();
   const [submitting, setSubmitting] = React.useState(false);
 
   const items: MallCartItem[] = cart?.items ?? [];
   const subtotal = cart?.subtotalKobo ?? 0;
   const itemCount = items.reduce((a, i) => a + i.qty, 0);
-  const paid = paidKobo ?? subtotal;
   const showReceipt = view === 'receipt' && order;
 
   const handleBack = () => {
@@ -35,7 +33,7 @@ export const MallCheckoutPanel: React.FC<Props> = ({ open, onClose }) => {
   const handleSubmit = async () => {
     setSubmitting(true);
     try {
-      await checkout({ customerName: customerName.trim() || 'Walk-in customer', paidKobo });
+      await checkout({ customerName: customerName.trim() || 'Walk-in customer' });
     } finally {
       setSubmitting(false);
     }
@@ -85,8 +83,6 @@ export const MallCheckoutPanel: React.FC<Props> = ({ open, onClose }) => {
               subtotal={subtotal}
               customerName={customerName}
               setCustomerName={setCustomerName}
-              paid={paid}
-              setPaid={setPaidKobo}
               submitting={submitting}
               onSubmit={handleSubmit}
             />
