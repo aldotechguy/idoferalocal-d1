@@ -44,7 +44,9 @@ export const StaffApp: React.FC = () => {
 
   React.useEffect(() => {
     document.title = `${PAGE_TITLES[activePage] || 'Workspace'} — IdoferaLabs`;
-    if (route.surface === 'staff' && !route.staffPage) navigateStaff('dashboard', true);
+    if (route.surface === 'staff' && (route.legacyPath || !route.staffPage)) {
+      navigateStaff(route.staffPage || 'dashboard', true);
+    }
   }, [activePage, route]);
 
   if (!currentUser) {

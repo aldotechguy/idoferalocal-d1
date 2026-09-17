@@ -2,13 +2,17 @@ import { useSyncExternalStore, useCallback } from 'react';
 
 export type PublicRoute =
   | { surface: 'mall'; page: 'home' | 'category' | 'search' | 'product' | 'checkout' | 'orders' | 'success'; param?: string }
-  | { surface: 'staff'; staffPage?: string };
+  | { surface: 'staff'; staffPage?: string; legacyPath?: boolean };
 
 export function parseRoute(pathname: string, search: string): PublicRoute {
   const path = (pathname || '/').replace(/\/+$/, '') || '/';
-  if (path === '/app' || path.startsWith('/app/')) {
-    const rest = path.slice(4).replace(/^\//, '');
+  if (path === '/labs' || path.startsWith('/labs/')) {
+    const rest = path.slice('/labs'.length).replace(/^\//, '');
     return { surface: 'staff', staffPage: rest || undefined };
+  }
+  if (path === '/app' || path.startsWith('/app/')) {
+    const rest = path.slice('/app'.length).replace(/^\//, '');
+    return { surface: 'staff', staffPage: rest || undefined, legacyPath: true };
   }
   const params = new URLSearchParams(search || '');
   if (path.startsWith('/category/')) {
@@ -54,7 +58,7 @@ export function navigateMall(to: string) {
 }
 
 export function navigateStaff(page: string, replace = false) {
-  const target = `/app/${encodeURIComponent(page || 'dashboard')}`;
+  const target = `/labs/${encodeURIComponent(page || 'dashboard')}`;
   window.history[replace ? 'replaceState' : 'pushState'](null, '', target);
   window.dispatchEvent(new PopStateEvent('popstate'));
   window.scrollTo({ top: 0, behavior: 'auto' });

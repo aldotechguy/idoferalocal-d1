@@ -78,7 +78,7 @@ export const MallFooter: React.FC = () => {
             ))}
           </div>
           <button
-            type="button" onClick={() => { window.location.href = '/app'; }}
+            type="button" onClick={() => { window.location.href = '/labs'; }}
             className="mt-4 inline-flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 hover:text-slate-300"
           >
             <Lock className="w-3 h-3" /> Staff Login
