@@ -3,6 +3,7 @@ import { X, ShieldCheck, AlertTriangle, CheckCircle, PackageCheck, ClipboardChec
 import { NairaSign } from '../common/NairaSign';
 import { PurchaseOrder, PaymentMethod, PriceAdjustmentItem } from '../../types';
 import { useApp } from '../../context/AppContext';
+import { useInteractions } from '../../context/InteractionContext';
 
 interface InspectStockModalProps {
   isOpen: boolean;
@@ -37,6 +38,7 @@ export const InspectStockModal: React.FC<InspectStockModalProps> = ({
   currentUserName,
   onTriggerPriceAdjustment,
 }) => {
+  const { notify } = useInteractions();
   const { receiveAndInspectPO, settings, products } = useApp();
 
   const [itemsState, setItemsState] = useState<ItemInspectionState[]>([]);
@@ -177,7 +179,7 @@ export const InspectStockModal: React.FC<InspectStockModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (totalReceiving === 0) {
-      alert('Please specify at least 1 receiving quantity to process stock entry.');
+      notify('Specify at least one receiving quantity to process this stock entry.', 'Receiving quantity required');
       return;
     }
 

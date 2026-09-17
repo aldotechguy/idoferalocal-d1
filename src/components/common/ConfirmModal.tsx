@@ -1,6 +1,6 @@
 import React from 'react';
-import { createPortal } from 'react-dom';
-import { Trash2, AlertTriangle, Info, X } from 'lucide-react';
+import { Trash2, AlertTriangle, Info } from 'lucide-react';
+import { AccessibleOverlay } from './AccessibleOverlay';
 
 interface ConfirmModalProps {
   isOpen: boolean;
@@ -39,57 +39,24 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
     IconComponent = Info;
   }
 
-  const modalContent = (
-    <div className="fixed inset-0 z-[9999] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-150">
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl max-w-md w-full p-6 space-y-4 text-left my-auto max-h-[90vh] overflow-y-auto relative z-[10000]">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-3">
+  return (
+    <AccessibleOverlay open={isOpen} onClose={onClose} title={title} description="Confirmation required" className="max-w-md" footer={
+      <div className="flex items-center justify-end gap-2.5">
+        <button type="button" onClick={onClose} className="min-h-10 px-4 text-sm font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl">{cancelText}</button>
+        <button type="button" onClick={() => { onConfirm(); onClose(); }} className={`min-h-10 px-4 text-sm font-extrabold rounded-xl shadow-xs ${buttonBg}`}>{confirmText}</button>
+      </div>
+    }>
+      <div className="space-y-4">
+        <div className="flex items-center gap-3">
             <div className={`p-3 rounded-2xl shrink-0 ${iconBg}`}>
               <IconComponent className="w-5 h-5" />
             </div>
-            <div>
-              <h3 className="font-extrabold text-slate-900 dark:text-white text-base tracking-tight">
-                {title}
-              </h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                Confirmation Required
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-1 rounded-lg cursor-pointer"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <p className="text-sm font-bold">Please review this action before continuing.</p>
         </div>
-
-        <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed bg-slate-50 dark:bg-slate-800/50 p-3.5 rounded-2xl border border-slate-100 dark:border-slate-800">
+        <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed bg-slate-50 dark:bg-slate-800/50 p-3.5 rounded-2xl border border-slate-100 dark:border-slate-800">
           {message}
         </p>
-
-        <div className="flex items-center justify-end gap-2.5 pt-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors cursor-pointer"
-          >
-            {cancelText}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onConfirm();
-              onClose();
-            }}
-            className={`px-4 py-2 text-xs font-extrabold rounded-xl shadow-xs transition-colors cursor-pointer ${buttonBg}`}
-          >
-            {confirmText}
-          </button>
-        </div>
       </div>
-    </div>
+    </AccessibleOverlay>
   );
-
-  return createPortal(modalContent, document.body);
 };

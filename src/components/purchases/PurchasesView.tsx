@@ -43,6 +43,7 @@ import { PriceAdjustmentReportModal } from './PriceAdjustmentReportModal';
 import { OrderNoteModal } from './OrderNoteModal';
 import { ConfirmPlaceOrderModal } from './ConfirmPlaceOrderModal';
 import { ProductSearchPicker, POItemFormState } from './ProductSearchPicker';
+import { useInteractions } from '../../context/InteractionContext';
 
 type DeliveryTab = 'All' | 'Draft' | 'Pending' | 'Partial' | 'Received' | 'Cancelled';
 
@@ -64,6 +65,7 @@ export const PurchasesView: React.FC = () => {
   } = useApp();
   const { currentUser, isSuperAdmin } = useAuth();
   const { showToast } = useToast();
+  const { notify, confirm } = useInteractions();
 
   // Filters & Tabs State
   const [activeTab, setActiveTab] = useState<DeliveryTab>('All');
@@ -301,7 +303,7 @@ export const PurchasesView: React.FC = () => {
   const handleSaveDraftChanges = (openNoteAfter: boolean = false) => {
     if (!editingDraftPo) return;
     if (poItems.length === 0) {
-      alert('Please add at least one product item.');
+      notify('Please add at least one product item.', 'Purchase order is empty');
       return;
     }
 
@@ -367,7 +369,7 @@ export const PurchasesView: React.FC = () => {
   const handleSaveAndPlaceOfficialOrder = () => {
     if (!editingDraftPo) return;
     if (poItems.length === 0) {
-      alert('Please add at least one product item.');
+      notify('Please add at least one product item.', 'Purchase order is empty');
       return;
     }
 
@@ -424,7 +426,7 @@ export const PurchasesView: React.FC = () => {
 
   const handleCreatePO = (isDraftMode: boolean = false) => {
     if (poItems.length === 0) {
-      alert('Please add at least one product item to the purchase order.');
+      notify('Please add at least one product item to the purchase order.', 'Purchase order is empty');
       return;
     }
 
@@ -615,8 +617,8 @@ export const PurchasesView: React.FC = () => {
     setPriceAdjustmentItems([]);
   };
 
-  const handleDeletePO = (po: PurchaseOrder) => {
-    if (confirm(`Are you sure you want to cancel and remove Purchase Order ${po.poNumber}?`)) {
+  const handleDeletePO = async (po: PurchaseOrder) => {
+    if (await confirm({ title: 'Remove purchase order', message: `Cancel and remove purchase order ${po.poNumber}?`, confirmText: 'Remove order', variant: 'danger' })) {
       deletePurchaseOrder(po.id, currentUser?.displayName || 'Admin');
     }
   };

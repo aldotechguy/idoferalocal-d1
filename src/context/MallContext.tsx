@@ -24,6 +24,7 @@ interface MallContextValue {
 }
 
 const MallContext = createContext<MallContextValue | undefined>(undefined);
+const messageOf = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export const MallProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const toast = useToast();
@@ -43,8 +44,8 @@ export const MallProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setProducts(data);
       setError(null);
     } catch (err) {
-      setError(String(err));
-      toast.showToast({ title: 'Catalog failed', message: String(err), type: 'error' });
+      setError(messageOf(err));
+      toast.showToast({ title: 'Catalog failed', message: messageOf(err), type: 'error' });
     }
   }, [toast]);
 
@@ -54,8 +55,8 @@ export const MallProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setCart(data);
       setError(null);
     } catch (err) {
-      setError(String(err));
-      toast.showToast({ title: 'Cart failed', message: String(err), type: 'error' });
+      setError(messageOf(err));
+      toast.showToast({ title: 'Cart failed', message: messageOf(err), type: 'error' });
     }
   }, [toast]);
 
@@ -66,8 +67,8 @@ export const MallProvider: React.FC<{ children: React.ReactNode }> = ({ children
       toast.showToast({ title: 'Added to cart', message: `${qty} × added`, type: 'success' });
       return true;
     } catch (err) {
-      setError(String(err));
-      toast.showToast({ title: 'Add failed', message: String(err), type: 'error' });
+      setError(messageOf(err));
+      toast.showToast({ title: 'Add failed', message: messageOf(err), type: 'error' });
       return false;
     }
   }, [toast]);
@@ -79,8 +80,8 @@ export const MallProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setError(null);
       return true;
     } catch (err) {
-      setError(String(err));
-      toast.showToast({ title: 'Quantity failed', message: String(err), type: 'error' });
+      setError(messageOf(err));
+      toast.showToast({ title: 'Quantity failed', message: messageOf(err), type: 'error' });
       return false;
     }
   }, [toast]);
@@ -98,8 +99,8 @@ export const MallProvider: React.FC<{ children: React.ReactNode }> = ({ children
       toast.showToast({ title: 'Order placed', message: data.orderNo, type: 'success' });
       return true;
     } catch (err) {
-      setError(String(err));
-      toast.showToast({ title: 'Checkout failed', message: String(err), type: 'error' });
+      setError(messageOf(err));
+      toast.showToast({ title: 'Checkout failed', message: messageOf(err), type: 'error' });
       return false;
     }
   }, [toast]);

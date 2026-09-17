@@ -4,7 +4,7 @@ export type PublicRoute =
   | { surface: 'mall'; page: 'home' | 'category' | 'search' | 'product' | 'checkout' | 'orders' | 'success'; param?: string }
   | { surface: 'staff'; staffPage?: string };
 
-function parseRoute(pathname: string, search: string): PublicRoute {
+export function parseRoute(pathname: string, search: string): PublicRoute {
   const path = (pathname || '/').replace(/\/+$/, '') || '/';
   if (path === '/app' || path.startsWith('/app/')) {
     const rest = path.slice(4).replace(/^\//, '');
@@ -51,6 +51,13 @@ export function navigateMall(to: string) {
   window.history.pushState(null, '', to);
   window.dispatchEvent(new PopStateEvent('popstate'));
   window.scrollTo({ top: 0 });
+}
+
+export function navigateStaff(page: string, replace = false) {
+  const target = `/app/${encodeURIComponent(page || 'dashboard')}`;
+  window.history[replace ? 'replaceState' : 'pushState'](null, '', target);
+  window.dispatchEvent(new PopStateEvent('popstate'));
+  window.scrollTo({ top: 0, behavior: 'auto' });
 }
 
 export function useRoute(): PublicRoute {

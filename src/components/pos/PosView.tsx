@@ -31,6 +31,7 @@ import { useApp } from '../../context/AppContext';
 import { Product, SaleItem, PaymentMethod, Customer, WhatsAppPreOrder } from '../../types';
 import { ReceiptModal } from '../common/ReceiptModal';
 import { useAuth } from '../../context/AuthContext';
+import { useInteractions } from '../../context/InteractionContext';
 
 export const PosView: React.FC = () => {
   const {
@@ -49,6 +50,7 @@ export const PosView: React.FC = () => {
     settings,
   } = useApp();
   const { currentUser } = useAuth();
+  const { notify, confirm } = useInteractions();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
@@ -99,12 +101,12 @@ export const PosView: React.FC = () => {
     if (e) e.preventDefault();
     const price = parseFloat(clearanceAmount);
     if (isNaN(price) || price <= 0) {
-      alert('Please enter a valid clearance sale amount greater than 0.');
+      notify('Please enter a valid clearance sale amount greater than 0.', 'Invalid amount');
       return;
     }
     const qty = parseInt(clearanceQty, 10) || 1;
     if (qty <= 0) {
-      alert('Please enter a valid quantity of at least 1.');
+      notify('Please enter a valid quantity of at least 1.', 'Invalid quantity');
       return;
     }
     const cost = parseFloat(clearanceCostPrice) || 0;
@@ -180,7 +182,7 @@ export const PosView: React.FC = () => {
 
   const addToCart = (product: Product) => {
     if (!isBackdateMode && product.currentStock <= 0) {
-      alert(`${product.name} is out of stock!`);
+      notify(`${product.name} is out of stock.`, 'Product unavailable', 'warning');
       return;
     }
 
@@ -189,7 +191,7 @@ export const PosView: React.FC = () => {
       if (existing) {
         const newQty = existing.quantity + 1;
         if (!isBackdateMode && newQty > product.currentStock) {
-          alert(`Cannot add more. Current stock limit is ${product.currentStock}.`);
+          notify(`Current stock limit is ${product.currentStock}.`, 'Stock limit reached', 'warning');
           return prevCart;
         }
         // Auto wholesale check
@@ -283,7 +285,7 @@ export const PosView: React.FC = () => {
           const newQty = item.quantity + delta;
           if (newQty <= 0) return null;
           if (!isClearanceItem && product && !isBackdateMode && newQty > product.currentStock) {
-            alert(`Stock limit reached (${product.currentStock} ${product.unit}).`);
+            notify(`Maximum available stock is ${product.currentStock} ${product.unit}.`, 'Stock limit reached', 'warning');
             return item;
           }
           if (isClearanceItem) {
@@ -335,7 +337,7 @@ export const PosView: React.FC = () => {
 
     let finalQty = targetQty;
     if (!isClearanceItem && product && !isBackdateMode && finalQty > product.currentStock) {
-      alert(`Stock limit reached. Maximum available stock is ${product.currentStock} ${product.unit}.`);
+      notify(`Maximum available stock is ${product.currentStock} ${product.unit}.`, 'Stock limit reached', 'warning');
       finalQty = product.currentStock;
     }
 
@@ -1296,11 +1298,11 @@ export const PosView: React.FC = () => {
                           onChange={(e) => {
                             if (e.target.checked) {
                               if (currentUser?.role !== 'Administrator' && currentUser?.role !== 'Manager') {
-                                alert('Credit Sales custom pricing is restricted to Administrators and Managers only.');
+                                notify('Credit Sales custom pricing is restricted to Administrators and Store Managers.', 'Permission required', 'warning');
                                 return;
                               }
                               if (!selectedCustomer) {
-                                alert('Please select a Customer first before enabling Credit Sales mode.');
+                                notify('Select a customer before enabling Credit Sales mode.', 'Customer required', 'warning');
                                 return;
                               }
                               setIsCreditSaleMode(true);
@@ -1572,10 +1574,8 @@ export const PosView: React.FC = () => {
               <div className="flex items-center gap-2">
                 {heldOrders.length > 0 && (
                   <button
-                    onClick={() => {
-                      if (window.confirm('Are you sure you want to clear all held orders?')) {
-                        clearAllHeldOrders();
-                      }
+                    onClick={async () => {
+                      if (await confirm({ title: 'Clear held orders', message: 'Remove every held order from the queue? This cannot be undone.', confirmText: 'Clear all', variant: 'danger' })) clearAllHeldOrders();
                     }}
                     className="text-xs font-bold text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300 px-2 py-1 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-colors flex items-center gap-1"
                   >
@@ -1652,10 +1652,8 @@ export const PosView: React.FC = () => {
                           </button>
 
                           <button
-                            onClick={() => {
-                              if (window.confirm(`Delete held order "${h.name}"?`)) {
-                                deleteHeldOrder(h.id);
-                              }
+                            onClick={async () => {
+                              if (await confirm({ title: 'Delete held order', message: `Delete held order “${h.name}”?`, confirmText: 'Delete', variant: 'danger' })) deleteHeldOrder(h.id);
                             }}
                             className="p-1.5 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 rounded-xl text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition-colors"
                             title="Delete held order"

@@ -3,6 +3,7 @@ import { X, Upload, Image as ImageIcon, Check, Trash2, Link as LinkIcon, Refresh
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { Product, ProductStatus } from '../../types';
+import { useInteractions } from '../../context/InteractionContext';
 
 interface AddProductModalProps {
   isOpen: boolean;
@@ -53,6 +54,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
   onClose,
   editingProduct,
 }) => {
+  const { notify } = useInteractions();
   const { products, addProduct, updateProduct, suppliers, settings } = useApp();
   const { currentUser } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -227,7 +229,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
 
     if (editingProduct) {
       if (currentUser?.role === 'Sales Staff') {
-        alert('Sales Staff accounts are not authorized to edit existing products.');
+        notify('Sales Staff accounts are not authorized to edit existing products.', 'Permission required', 'warning');
         return;
       }
       updateProduct(editingProduct.id, {

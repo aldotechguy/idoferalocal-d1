@@ -53,6 +53,7 @@ export const MallHeader: React.FC<{ query: string; setQuery: (q: string) => void
             value={local}
             onChange={(e) => { setLocal(e.target.value); setQuery(e.target.value); }}
             placeholder="Search products, brands and categories…"
+            aria-label="Search mall products, brands and categories"
             className="w-full h-10 sm:h-11 pl-9 pr-20 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500"
           />
           <button
@@ -102,9 +103,9 @@ export const MallHeader: React.FC<{ query: string; setQuery: (q: string) => void
           <User className="w-3.5 h-3.5" /> Account
         </button>
         <span className="text-slate-200 dark:text-slate-700">•</span>
-        <span className="inline-flex items-center gap-1"><Heart className="w-3.5 h-3.5" /> Wishlist</span>
+        <span className="inline-flex items-center gap-1 text-slate-400" aria-label="Wishlist coming soon"><Heart className="w-3.5 h-3.5" /> Wishlist · Soon</span>
         <span className="text-slate-200 dark:text-slate-700">•</span>
-        <span className="inline-flex items-center gap-1"><Store className="w-3.5 h-3.5" /> Official stores</span>
+        <span className="inline-flex items-center gap-1 text-slate-400" aria-label="Official stores coming soon"><Store className="w-3.5 h-3.5" /> Stores · Soon</span>
       </div>
     </header>
   );

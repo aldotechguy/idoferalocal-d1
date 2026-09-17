@@ -543,7 +543,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                 />
                 <Area type="monotone" dataKey="sales" name="Orders / Sales Units" stroke="#2563eb" strokeWidth={3} fillOpacity={1} fill="url(#colorSales)" />
                 {!isSalesStaff && (
-                  <Area type="monotone" dataKey="revenue" name="Revenue ($)" stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorRev)" />
+                  <Area type="monotone" dataKey="revenue" name={`Revenue (${settings.currencySymbol})`} stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorRev)" />
                 )}
               </AreaChart>
             </ResponsiveContainer>

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, UserMinus, UserCheck, Building, Banknote, HelpCircle, ArrowDownRight, ArrowUpRight } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { LiquidAccountType, OwnerWithdrawalSubtype } from '../../types';
+import { useInteractions } from '../../context/InteractionContext';
 
 interface OwnerWithdrawalModalProps {
   isOpen: boolean;
@@ -17,6 +18,7 @@ export const OwnerWithdrawalModal: React.FC<OwnerWithdrawalModalProps> = ({
   initialMode = 'withdrawal',
 }) => {
   const { treasuryBalances, recordOwnerWithdrawal, recordOwnerRepayment, settings } = useApp();
+  const { notify, confirm } = useInteractions();
 
   const [mode, setMode] = useState<'withdrawal' | 'repayment'>(initialMode);
   const [account, setAccount] = useState<LiquidAccountType>('Biz Account');
@@ -48,17 +50,15 @@ export const OwnerWithdrawalModal: React.FC<OwnerWithdrawalModalProps> = ({
   const numAmount = parseFloat(amount) || 0;
   const isOverdraft = mode === 'withdrawal' && numAmount > currentAccountBalance;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (numAmount <= 0) {
-      alert('Please enter a valid amount greater than zero.');
+      notify('Please enter a valid amount greater than zero.', 'Invalid amount');
       return;
     }
 
     if (isOverdraft) {
-      const proceed = confirm(
-        `Warning: Withdrawal amount (${settings.currencySymbol}${numAmount.toLocaleString()}) is greater than the available balance in ${account} (${settings.currencySymbol}${currentAccountBalance.toLocaleString()}). Do you still wish to proceed?`
-      );
+      const proceed = await confirm({ title: 'Available balance exceeded', message: `Withdrawal of ${settings.currencySymbol}${numAmount.toLocaleString()} exceeds the ${settings.currencySymbol}${currentAccountBalance.toLocaleString()} available in ${account}.`, confirmText: 'Record withdrawal', variant: 'warning' });
       if (!proceed) return;
     }
 

@@ -1,22 +1,28 @@
-import React, { useState } from 'react';
+import React, { Suspense, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { Header } from '../components/common/Header';
 import { Sidebar } from '../components/common/Sidebar';
-import { DashboardView } from '../components/dashboard/DashboardView';
 import { LoginView } from '../components/auth/LoginView';
 import { PWAInstallBanner } from '../components/common/PWAInstallBanner';
-import { PosView } from '../components/pos/PosView';
-import { CustomersView } from '../components/customers/CustomersView';
-import { ReportsView } from '../components/reports/ReportsView';
-import { FinanceHubView } from '../components/finance/FinanceHubView';
-import { SalesOrdersHubView } from '../components/sales/SalesOrdersHubView';
-import { ProductsStockHubView } from '../components/products/ProductsStockHubView';
-import { PurchasesSuppliersHubView } from '../components/purchases/PurchasesSuppliersHubView';
-import { SettingsHubView } from '../components/settings/SettingsHubView';
+import { navigateStaff, useRoute } from '../hooks/useRoute';
+
+const DashboardView = React.lazy(() => import('../components/dashboard/DashboardView').then((m) => ({ default: m.DashboardView })));
+const PosView = React.lazy(() => import('../components/pos/PosView').then((m) => ({ default: m.PosView })));
+const CustomersView = React.lazy(() => import('../components/customers/CustomersView').then((m) => ({ default: m.CustomersView })));
+const ReportsView = React.lazy(() => import('../components/reports/ReportsView').then((m) => ({ default: m.ReportsView })));
+const FinanceHubView = React.lazy(() => import('../components/finance/FinanceHubView').then((m) => ({ default: m.FinanceHubView })));
+const SalesOrdersHubView = React.lazy(() => import('../components/sales/SalesOrdersHubView').then((m) => ({ default: m.SalesOrdersHubView })));
+const ProductsStockHubView = React.lazy(() => import('../components/products/ProductsStockHubView').then((m) => ({ default: m.ProductsStockHubView })));
+const PurchasesSuppliersHubView = React.lazy(() => import('../components/purchases/PurchasesSuppliersHubView').then((m) => ({ default: m.PurchasesSuppliersHubView })));
+const SettingsHubView = React.lazy(() => import('../components/settings/SettingsHubView').then((m) => ({ default: m.SettingsHubView })));
+
+const PAGE_TITLES: Record<string, string> = { dashboard: 'Dashboard', pos: 'Point of Sale', sales: 'Sales & Orders', 'sales-orders': 'Sales & Orders', 'whatsapp-orders': 'WhatsApp Orders', deliveries: 'Deliveries', products: 'Products & Stock', 'products-stock': 'Products & Stock', inventory: 'Inventory', pricing: 'Pricing', archive: 'Archive', customers: 'Customers', purchases: 'Purchases', 'purchases-suppliers': 'Purchases', suppliers: 'Suppliers', expenses: 'Finance & Expenses', finance: 'Finance', 'money-movement': 'Money Movement', 'investment-planner': 'Investment Planner', reports: 'Reports', settings: 'Settings', 'settings-tools': 'Settings', import: 'Import', ai: 'AI Assistant' };
 
 export const StaffApp: React.FC = () => {
   const { currentUser, hasPermission } = useAuth();
-  const [activePage, setActivePage] = useState<string>('dashboard');
+  const route = useRoute();
+  const activePage = route.surface === 'staff' ? (route.staffPage || 'dashboard') : 'dashboard';
+  const setActivePage = React.useCallback((page: string) => navigateStaff(page), []);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     try {
@@ -35,6 +41,11 @@ export const StaffApp: React.FC = () => {
       return next;
     });
   };
+
+  React.useEffect(() => {
+    document.title = `${PAGE_TITLES[activePage] || 'Workspace'} — IdoferaLabs`;
+    if (route.surface === 'staff' && !route.staffPage) navigateStaff('dashboard', true);
+  }, [activePage, route]);
 
   if (!currentUser) {
     return <LoginView />;
@@ -135,8 +146,10 @@ export const StaffApp: React.FC = () => {
         <Sidebar activePage={activePage} onNavigate={setActivePage} isMobileOpen={isMobileSidebarOpen} onMobileClose={() => setIsMobileSidebarOpen(false)} isCollapsed={isSidebarCollapsed} onToggleCollapse={handleToggleSidebarCollapse} />
         <div className="app-content flex-1 flex flex-col min-w-0">
           <Header onMobileMenuToggle={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)} onNavigate={setActivePage} activePage={activePage} />
-          <main className="app-main flex-1 p-4 sm:p-6 lg:p-8 max-w-[1600px] w-full mx-auto">
-            {renderActiveView()}
+          <main id="main-content" tabIndex={-1} className="app-main flex-1 p-4 sm:p-6 lg:p-8 max-w-[1600px] w-full mx-auto">
+            <Suspense fallback={<div className="min-h-64 rounded-2xl bg-white/70 dark:bg-slate-900/70 animate-pulse" role="status" aria-label="Loading workspace" />}>
+              {renderActiveView()}
+            </Suspense>
           </main>
         </div>
       </div>

@@ -11,10 +11,12 @@ import {
 import { NairaSign } from '../common/NairaSign';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
+import { useInteractions } from '../../context/InteractionContext';
 
 export const PricingView: React.FC = () => {
   const { products, changeProductPrice, pricingHistory, settings } = useApp();
   const { currentUser } = useAuth();
+  const { notify } = useInteractions();
 
   const [selectedProductId, setSelectedProductId] = useState<string>(products[0]?.id || '');
   const [priceType, setPriceType] = useState<'Retail' | 'Wholesale' | 'Dealer' | 'Promotional'>('Retail');
@@ -30,7 +32,7 @@ export const PricingView: React.FC = () => {
     if (!selectedProduct || newPrice <= 0) return;
 
     if (newPrice < (Number(selectedProduct.minimumSellingPrice) || 0) && !overrideRestrictions) {
-      alert(`Cannot set price below minimum selling threshold (${settings.currencySymbol}${(Number(selectedProduct.minimumSellingPrice) || 0).toFixed(2)}) without Administrator override permission.`);
+      notify(`Cannot set price below ${settings.currencySymbol}${(Number(selectedProduct.minimumSellingPrice) || 0).toFixed(2)} without Administrator override permission.`, 'Minimum price restriction', 'warning');
       return;
     }
 

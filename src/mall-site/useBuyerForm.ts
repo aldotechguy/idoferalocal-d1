@@ -8,7 +8,7 @@ export function useBuyerForm() {
   const [phone, setPhone] = React.useState('');
   const [address, setAddress] = React.useState('');
   const [pay, setPay] = React.useState<'pay_on_pickup' | 'bank_transfer'>('pay_on_pickup');
-  const [save, setSave] = React.useState(true);
+  const [save, setSave] = React.useState(false);
   React.useEffect(() => {
     const b = getBuyerProfile();
     if (b && (b.name || b.phone)) { setName(b.name); setPhone(b.phone); setAddress(b.address); setMode('saved'); }

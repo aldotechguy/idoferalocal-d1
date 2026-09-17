@@ -1,4 +1,4 @@
-import React, { useEffect, Suspense } from 'react';
+import React, { Suspense } from 'react';
 import { ThemeProvider } from './context/ThemeContext';
 import { ToastProvider } from './context/ToastContext';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
@@ -7,6 +7,7 @@ import { StaffProviders } from './staff/StaffProviders';
 import { useRoute } from './hooks/useRoute';
 import { MallSite } from './mall-site/MallSite';
 import { StaffApp } from './staff/StaffApp';
+import { InteractionProvider } from './context/InteractionContext';
 
 function StaffFallback() {
   return (
@@ -18,22 +19,14 @@ function StaffFallback() {
 
 
 export default function App() {
-  useEffect(() => {
-    const handleRejection = (event: PromiseRejectionEvent) => {
-      console.warn('Handled async promise rejection safely:', event.reason);
-      event.preventDefault();
-    };
-    window.addEventListener('unhandledrejection', handleRejection);
-    return () => {
-      window.removeEventListener('unhandledrejection', handleRejection);
-    };
-  }, []);
-
   return (
     <ErrorBoundary>
       <ThemeProvider>
         <ToastProvider>
-          <RootRouter />
+          <InteractionProvider>
+            <a href="#main-content" className="skip-link">Skip to main content</a>
+            <RootRouter />
+          </InteractionProvider>
         </ToastProvider>
       </ThemeProvider>
     </ErrorBoundary>

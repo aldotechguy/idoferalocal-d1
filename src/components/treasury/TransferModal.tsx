@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, ArrowRightLeft, Building, Banknote, AlertCircle, CheckCircle2, ArrowRight } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { LiquidAccountType } from '../../types';
+import { useInteractions } from '../../context/InteractionContext';
 
 interface TransferModalProps {
   isOpen: boolean;
@@ -17,6 +18,7 @@ export const TransferModal: React.FC<TransferModalProps> = ({
   defaultDirection = 'CashToBank',
 }) => {
   const { treasuryBalances, transferBetweenAccounts, settings } = useApp();
+  const { notify, confirm } = useInteractions();
 
   const [fromAccount, setFromAccount] = useState<LiquidAccountType>(
     defaultDirection === 'CashToBank' ? 'Physical Cash' : 'Biz Account'
@@ -77,17 +79,15 @@ export const TransferModal: React.FC<TransferModalProps> = ({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (numAmount <= 0) {
-      alert('Please enter a valid transfer amount greater than zero.');
+      notify('Please enter a valid transfer amount greater than zero.', 'Invalid transfer amount');
       return;
     }
 
     if (isOverdraft) {
-      const proceed = confirm(
-        `Warning: Transfer amount (${settings.currencySymbol}${numAmount.toLocaleString()}) is greater than current balance in ${fromAccount} (${settings.currencySymbol}${sourceBalance.toLocaleString()}). Do you still want to proceed?`
-      );
+      const proceed = await confirm({ title: 'Available balance exceeded', message: `Transfer of ${settings.currencySymbol}${numAmount.toLocaleString()} exceeds the ${settings.currencySymbol}${sourceBalance.toLocaleString()} available in ${fromAccount}.`, confirmText: 'Continue transfer', variant: 'warning' });
       if (!proceed) return;
     }
 

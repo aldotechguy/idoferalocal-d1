@@ -52,6 +52,7 @@ import { Sale, SaleItem, PaymentMethod, SaleStatus, Customer } from '../../types
 import { ReceiptModal } from '../common/ReceiptModal';
 import { Pagination } from '../common/Pagination';
 import { InvoiceWorkshopModal } from './InvoiceWorkshopModal';
+import { useInteractions } from '../../context/InteractionContext';
 
 interface SalesViewProps {
   onNavigate?: (page: string) => void;
@@ -60,6 +61,7 @@ interface SalesViewProps {
 export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
   const { sales, products, customers, settings, refundSale, updateSale, deleteSale } = useApp();
   const { currentUser, isSuperAdmin, hasPermission } = useAuth();
+  const { notify } = useInteractions();
 
   // Active view tab: 'calendar' (Daily Calendar History) or 'list' (Table list)
   const [activeTab, setActiveTab] = useState<'calendar' | 'list'>('calendar');
@@ -2447,7 +2449,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                         onClick={() => {
                           const price = parseFloat(editClearanceAmount);
                           if (isNaN(price) || price <= 0) {
-                            alert('Please enter a valid clearance amount.');
+                            notify('Please enter a valid clearance amount.', 'Invalid amount');
                             return;
                           }
                           const qty = parseInt(editClearanceQty) || 1;

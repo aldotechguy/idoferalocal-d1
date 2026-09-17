@@ -183,6 +183,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Sidebar Container */}
       <aside
+        aria-label="Primary navigation"
         className={`app-sidebar fixed lg:sticky top-0 left-0 z-50 lg:z-30 h-screen bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 flex flex-col justify-between transition-all duration-300 ease-in-out shrink-0 ${
           isMobileOpen ? 'translate-x-0 w-72 sm:w-80 shadow-2xl' : '-translate-x-full lg:translate-x-0'
         } ${isEffectiveCollapsed ? 'lg:w-20' : 'lg:w-64'}`}
@@ -248,6 +249,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       onMobileClose();
                     }}
                     title={isEffectiveCollapsed ? item.label : undefined}
+                    aria-current={isActive ? 'page' : undefined}
                     className={`app-nav-item w-full flex items-center ${
                       isEffectiveCollapsed ? 'justify-center p-2.5' : 'justify-between px-3 py-2.5'
                     } rounded-xl text-xs font-semibold transition-all group ${

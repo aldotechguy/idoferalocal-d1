@@ -1,13 +1,16 @@
 import React from 'react';
-import { ShoppingCart, Truck, Package } from 'lucide-react';
+import { ShoppingCart, Truck, Package, ChevronRight, Share2 } from 'lucide-react';
 import { useMall } from '../context/MallContext';
 import { useNavigateMall } from '../hooks/useRoute';
 import { formatNaira } from './mallUi';
 import { MallQuantityControl } from './MallQuantityControl';
+import { ProductImage } from '../components/common/ProductImage';
+import { useToast } from '../context/ToastContext';
 
 export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
   const { products, cart, addToCart, refreshProducts } = useMall();
   const go = useNavigateMall();
+  const toast = useToast();
   const [qty, setQty] = React.useState(1);
   const [adding, setAdding] = React.useState(false);
 
@@ -15,6 +18,9 @@ export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
 
   const key = decodeURIComponent(id);
   const product = products?.products.find((p) => p.id === id || p.id === key);
+  React.useEffect(() => {
+    if (product) document.title = `${product.name} — IdoferaMall`;
+  }, [product]);
 
   if (!products) {
     return <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 animate-pulse"><div className="h-48 rounded-xl bg-slate-100 dark:bg-slate-800" /></div>;
@@ -31,24 +37,40 @@ export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
 
   const inCart = cart?.items.find((i) => i.productId === product.id);
   const related = products.products.filter((p) => p.id !== product.id && (p.category || '') === (product.category || '')).slice(0, 6);
+  const share = async () => {
+    const data = { title: product.name, text: `${product.name} on IdoferaMall`, url: window.location.href };
+    try {
+      if (navigator.share) await navigator.share(data);
+      else { await navigator.clipboard.writeText(window.location.href); toast.showToast({ title: 'Link copied', message: 'Product link copied to your clipboard.', type: 'success' }); }
+    } catch { /* User cancelled sharing. */ }
+  };
 
   return (
     <div className="space-y-6">
+      <nav aria-label="Breadcrumb" className="flex items-center gap-1 text-xs font-semibold text-slate-500">
+        <button type="button" onClick={() => go('/')} className="hover:text-amber-700">Mall</button><ChevronRight className="w-3 h-3" />
+        {product.category && <><button type="button" onClick={() => go(`/category/${encodeURIComponent(product.category || '')}`)} className="hover:text-amber-700">{product.category}</button><ChevronRight className="w-3 h-3" /></>}
+        <span aria-current="page" className="truncate text-slate-700">{product.name}</span>
+      </nav>
       <div className="liquid-glass rounded-2xl text-slate-900 p-4 sm:p-6">
         <div className="grid sm:grid-cols-2 gap-5 sm:gap-8">
           <div className="relative aspect-square rounded-2xl bg-slate-100 dark:bg-slate-800 overflow-hidden">
-            {product.image ? <img src={product.image} alt={product.name} className="absolute inset-0 w-full h-full object-cover" /> : <span className="absolute inset-0 flex items-center justify-center text-slate-300"><Package className="w-12 h-12" /></span>}
+            <ProductImage src={product.image} alt={product.name} loading="eager" className="absolute inset-0 w-full h-full object-cover" fallbackClassName="absolute inset-0" />
           </div>
           <div className="min-w-0">
             <p className="text-[11px] font-bold uppercase tracking-widest text-blue-600 dark:text-blue-400">{product.brand || product.category || 'Idofera Mall'}</p>
             <h1 className="mt-1 text-xl sm:text-2xl font-black text-slate-900 dark:text-white tracking-tight leading-tight">{product.name}</h1>
+            <p className="mt-2 text-sm leading-relaxed text-slate-600">{product.description || `Quality ${product.unit || 'product'} available for pickup from IdoferaMall.`}</p>
             <div className="mt-3 flex items-baseline gap-2">
               <span className="text-2xl font-black text-slate-900 dark:text-white">{formatNaira(product.price)}</span>
               {product.retailPriceKobo != null && product.retailPriceKobo > product.price && (
                 <span className="text-sm text-slate-400 line-through">{formatNaira(product.retailPriceKobo)}</span>
               )}
             </div>
-            <p className="mt-1 text-xs font-semibold text-slate-400">{product.available ? `${product.stock} in stock` : 'Out of stock'}</p>
+            <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
+              <div className="rounded-xl bg-white/60 p-2"><dt className="text-xs text-slate-500">Unit</dt><dd className="font-bold">{product.unit}</dd></div>
+              <div className="rounded-xl bg-white/60 p-2"><dt className="text-xs text-slate-500">Availability</dt><dd className="font-bold">{product.available ? `${product.stock.toLocaleString('en-NG')} in stock` : 'Out of stock'}</dd></div>
+            </dl>
             <div className="mt-4 flex items-center gap-2">
               <MallQuantityControl value={qty} min={1} max={product.stock} onChange={setQty} label={`${product.name} quantity`} />
               <button
@@ -62,6 +84,7 @@ export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
             <div className="mt-3 flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
               <Truck className="w-4 h-4 text-emerald-500" /> Pickup in Uyo • Pay on pickup
             </div>
+            <button type="button" onClick={share} className="mt-3 min-h-10 px-3 rounded-xl border border-slate-200 inline-flex items-center gap-2 text-sm font-bold"><Share2 className="w-4 h-4" /> Share product</button>
           </div>
         </div>
       </div>
@@ -72,7 +95,7 @@ export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
             {related.map((p) => (
               <button key={p.id} type="button" onClick={() => go(`/product/${encodeURIComponent(p.id)}`)} className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden text-left hover:border-blue-400">
                 <span className="block aspect-square bg-slate-100 dark:bg-slate-800 relative">
-                  {p.image ? <img src={p.image} alt={p.name} loading="lazy" className="absolute inset-0 w-full h-full object-cover" /> : null}
+                  <ProductImage src={p.image} alt={p.name} className="absolute inset-0 w-full h-full object-cover" fallbackClassName="absolute inset-0" />
                 </span>
                 <span className="block p-2">
                   <span className="block text-xs font-semibold line-clamp-2 min-h-[2.2em]">{p.name}</span>

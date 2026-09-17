@@ -62,6 +62,21 @@ body {
   margin: 0;
 }
 
+.skip-link {
+  position: fixed;
+  top: .75rem;
+  left: .75rem;
+  z-index: 10000;
+  transform: translateY(-200%);
+  padding: .65rem 1rem;
+  border-radius: .75rem;
+  background: #0f172a;
+  color: white;
+  font-size: .875rem;
+  font-weight: 800;
+}
+.skip-link:focus { transform: translateY(0); }
+
 ::selection {
   background: rgba(245, 158, 11, 0.24);
 }
@@ -69,6 +84,15 @@ body {
 :focus-visible {
   outline: 2px solid var(--app-accent) !important;
   outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 @layer utilities {
@@ -123,6 +147,12 @@ body {
 }
 
 @media screen {
+  .app-shell :is(.text-\[9px\], .text-\[10px\], .text-\[11px\]),
+  .mall-shell :is(.text-\[9px\], .text-\[10px\], .text-\[11px\]) {
+    font-size: .75rem;
+    line-height: 1rem;
+  }
+
   .app-shell {
     background-color: #f8fafc;
     background-image:

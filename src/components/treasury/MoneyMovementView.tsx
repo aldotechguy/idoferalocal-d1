@@ -166,7 +166,7 @@ export const MoneyMovementView: React.FC = () => {
   // CSV Export
   const handleExportCsv = () => {
     if (filteredMovements.length === 0) {
-      alert('No records available to export.');
+      showToast({ title: 'Nothing to export', message: 'No records match the current filters.', type: 'info' });
       return;
     }
 

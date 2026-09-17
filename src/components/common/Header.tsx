@@ -312,6 +312,7 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={onMobileMenuToggle}
             className="p-2 text-slate-600 dark:text-slate-300 liquid-glass-pill rounded-xl transition-all cursor-pointer"
             title="Toggle Menu"
+              aria-label="Open navigation menu"
           >
             <Menu className="w-5 h-5" />
           </button>
@@ -324,7 +325,7 @@ export const Header: React.FC<HeaderProps> = ({
             <input
               ref={searchInputRef}
               type="text"
-              placeholder="Search products, invoices, customers... (Cmd + K)"
+              placeholder="Search products, invoices, customers… (Ctrl/⌘ K)"
               value={searchQuery}
               onChange={(e) => {
                 setSearchQuery(e.target.value);
@@ -332,6 +333,12 @@ export const Header: React.FC<HeaderProps> = ({
                 setIsSearchFocused(true);
               }}
               onFocus={() => setIsSearchFocused(true)}
+              role="combobox"
+              aria-label="Search products, invoices, customers and suppliers"
+              aria-expanded={isSearchFocused && cleanQuery.length > 0}
+              aria-controls="staff-search-results"
+              aria-autocomplete="list"
+              aria-activedescendant={selectedIndex >= 0 ? `staff-search-option-${selectedIndex}` : undefined}
               onKeyDown={(e) => {
                 if (e.key === 'ArrowDown') {
                   e.preventDefault();
@@ -368,7 +375,7 @@ export const Header: React.FC<HeaderProps> = ({
                 </button>
               )}
               <kbd className="hidden lg:inline-block px-1.5 py-0.5 text-[10px] font-mono text-slate-400 bg-white/50 dark:bg-slate-800/60 rounded-md border border-slate-200/50 dark:border-slate-700/50">
-                ⌘K
+                Ctrl/⌘ K
               </kbd>
             </div>
           </div>
@@ -380,7 +387,7 @@ export const Header: React.FC<HeaderProps> = ({
                 className="fixed inset-0 z-40"
                 onClick={() => setIsSearchFocused(false)}
               />
-              <div className="absolute left-0 right-0 top-full mt-2 liquid-glass-elevated rounded-2xl z-50 overflow-hidden divide-y divide-slate-100/60 dark:divide-slate-800/60 animate-in fade-in duration-150">
+              <div id="staff-search-results" role="listbox" className="absolute left-0 right-0 top-full mt-2 liquid-glass-elevated rounded-2xl z-50 overflow-hidden divide-y divide-slate-100/60 dark:divide-slate-800/60 animate-in fade-in duration-150">
                 {predictions.length === 0 ? (
                   <div className="p-4 text-center text-xs text-slate-500 space-y-1">
                     <p className="font-bold">No quick predictions for "{searchQuery}"</p>
@@ -405,6 +412,9 @@ export const Header: React.FC<HeaderProps> = ({
                         return (
                           <div
                             key={p.id}
+                            id={`staff-search-option-${idx}`}
+                            role="option"
+                            aria-selected={isSelected}
                             onClick={() => p.onSelect()}
                             onMouseEnter={() => setSelectedIndex(idx)}
                             className={`p-3 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
