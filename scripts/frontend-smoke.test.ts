@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseRoute } from '../src/hooks/useRoute.ts';
 import { validateBuyer } from '../src/mall-site/useBuyerForm.ts';
+import { mallDeliveryFeeKobo, mallDeliveryZone } from '../src/shared/mallDelivery.ts';
 
 test('public routes preserve category, product and search parameters', () => {
   assert.deepEqual(parseRoute('/category/Bottles', ''), { surface: 'mall', page: 'category', param: 'Bottles' });
@@ -25,4 +26,12 @@ test('checkout validation requires a name and plausible phone', () => {
   assert.equal(validateBuyer('', '08031234567'), 'Please enter your name.');
   assert.equal(validateBuyer('Ada', '123'), 'Enter a valid phone number.');
   assert.equal(validateBuyer('Ada', '0803 123 4567'), '');
+});
+
+test('fixed delivery zones expose canonical fees', () => {
+  assert.equal(mallDeliveryFeeKobo('pickup'), 0);
+  assert.equal(mallDeliveryFeeKobo('uyo_central'), 150000);
+  assert.equal(mallDeliveryFeeKobo('uyo_outer'), 250000);
+  assert.equal(mallDeliveryFeeKobo('other'), null);
+  assert.equal(mallDeliveryZone('invalid'), 'pickup');
 });

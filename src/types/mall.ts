@@ -1,3 +1,5 @@
+import type { MallDeliveryZone } from '../shared/mallDelivery';
+
 export type MallProduct = {
   id: string;
   name: string;
@@ -46,6 +48,11 @@ export type MallOrder = {
   status: string;
   items: MallOrderItem[];
   subtotalKobo: number;
+  deliveryFeeKobo?: number;
+  totalKobo?: number;
+  deliveryZone?: MallDeliveryZone;
+  deliveryLabel?: string;
+  quoteRequired?: boolean;
   customerName?: string;
   paidKobo?: number;
   amountDueKobo?: number;
@@ -57,6 +64,7 @@ export type MallCheckoutBody = {
   customerName?: string;
   customerPhone?: string;
   deliveryAddress?: string;
+  deliveryZone?: MallDeliveryZone;
   note?: string;
   paymentMethod?: 'pay_on_pickup' | 'bank_transfer';
 };

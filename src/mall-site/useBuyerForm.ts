@@ -1,19 +1,21 @@
 import React from 'react';
 import { useMall } from '../context/MallContext';
 import { getBuyerProfile, saveBuyerProfile } from '../services/mallClient';
+import type { MallDeliveryZone } from '../shared/mallDelivery';
 
 export function useBuyerForm() {
   const [mode, setMode] = React.useState<'guest' | 'saved'>('guest');
   const [name, setName] = React.useState('');
   const [phone, setPhone] = React.useState('');
   const [address, setAddress] = React.useState('');
+  const [deliveryZone, setDeliveryZone] = React.useState<MallDeliveryZone>('pickup');
   const [pay, setPay] = React.useState<'pay_on_pickup' | 'bank_transfer'>('pay_on_pickup');
   const [save, setSave] = React.useState(false);
   React.useEffect(() => {
     const b = getBuyerProfile();
     if (b && (b.name || b.phone)) { setName(b.name); setPhone(b.phone); setAddress(b.address); setMode('saved'); }
   }, []);
-  return { mode, setMode, name, setName, phone, setPhone, address, setAddress, pay, setPay, save, setSave };
+  return { mode, setMode, name, setName, phone, setPhone, address, setAddress, deliveryZone, setDeliveryZone, pay, setPay, save, setSave };
 }
 
 export function validateBuyer(name: string, phone: string): string {

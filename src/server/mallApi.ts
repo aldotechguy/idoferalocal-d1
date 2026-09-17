@@ -15,6 +15,7 @@
  *    the whole checkout batch.
  */
 import { KoboToNaira, parseJsonArray, s, n } from './relationalMapper.js';
+import { MALL_DELIVERY_ZONE_IDS, mallDeliveryFeeKobo, mallDeliveryLabel, mallDeliveryZone } from '../shared/mallDelivery.js';
 
 export type MallStmt = { sql: string; params?: any[] };
 
@@ -262,9 +263,13 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any) {
   const note = s(body?.note).trim().slice(0, 400);
   const rawMethod = s(body?.paymentMethod);
   const paymentMethod = PAYMENT_PROVIDERS.has(rawMethod) ? rawMethod : 'pay_on_pickup';
-  // Delivery fees are staff-quoted or calculated by trusted server rules, never accepted from a public client.
-  const deliveryFeeKobo = 0;
-
+  if (body?.deliveryZone != null && !MALL_DELIVERY_ZONE_IDS.has(body.deliveryZone)) fail(400, 'Select a valid delivery zone.');
+  const deliveryZone = mallDeliveryZone(body?.deliveryZone);
+  const fixedDeliveryFeeKobo = mallDeliveryFeeKobo(deliveryZone);
+  const quoteRequired = fixedDeliveryFeeKobo === null;
+  // Fixed fees are resolved from the trusted zone policy. Public clients never provide an amount.
+  const deliveryFeeKobo = fixedDeliveryFeeKobo ?? 0;
+  if (deliveryZone !== 'pickup' && !deliveryAddress) fail(400, 'Enter a delivery address for the selected zone.');
 
   const cartId = await getOrCreateCartId(exec, sessionId);
   const orderId = `mo-${sessionId}`;
@@ -272,10 +277,13 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any) {
   if (existingOrder.length) {
     const existingItems = await exec.queryAll('SELECT product_id, product_name, qty, unit_price_kobo FROM mall_order_items WHERE mall_order_id = ? ORDER BY rowid', [orderId]);
     const existing = existingOrder[0];
+    let existingDelivery: Record<string, any> = {};
+    try { existingDelivery = existing.delivery_address_json ? JSON.parse(existing.delivery_address_json) : {}; } catch { /* malformed legacy data */ }
     return json({
       ok: true, orderNo: s(existing.order_no), status: s(existing.status, 'pending'),
       items: existingItems.map((item) => ({ productId: s(item.product_id), name: s(item.product_name), unit: 'pcs', price: n(item.unit_price_kobo), qty: n(item.qty) })),
-      customerName: s(existing.customer_name), subtotalKobo: n(existing.subtotal_kobo), totalKobo: n(existing.total_kobo), paymentStatus: 'pending',
+      customerName: s(existing.customer_name), subtotalKobo: n(existing.subtotal_kobo), deliveryFeeKobo: n(existing.delivery_fee_kobo), totalKobo: n(existing.total_kobo), paymentStatus: 'pending',
+      deliveryZone: mallDeliveryZone(existingDelivery.zone), deliveryLabel: s(existingDelivery.zoneLabel, mallDeliveryLabel(mallDeliveryZone(existingDelivery.zone))), quoteRequired: existingDelivery.quoteRequired === true && existingDelivery.quoteConfirmed !== true,
       paidKobo: 0, amountDueKobo: n(existing.total_kobo), createdAt: s(existing.created_at),
       subtotal: KoboToNaira(existing.subtotal_kobo), deliveryFee: KoboToNaira(existing.delivery_fee_kobo), total: KoboToNaira(existing.total_kobo),
     });
@@ -316,7 +324,7 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any) {
     params: [
       orderId, orderNo, customerName, customerPhone,
       subtotalKobo, deliveryFeeKobo, totalKobo,
-      JSON.stringify({ address: deliveryAddress, note, paymentMethod }),
+      JSON.stringify({ address: deliveryAddress, note, paymentMethod, zone: deliveryZone, zoneLabel: mallDeliveryLabel(deliveryZone), quoteRequired, quoteConfirmed: !quoteRequired }),
       createdAt,
     ],
   }];
@@ -361,7 +369,11 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any) {
     })),
     customerName,
     subtotalKobo,
+    deliveryFeeKobo,
     totalKobo,
+    deliveryZone,
+    deliveryLabel: mallDeliveryLabel(deliveryZone),
+    quoteRequired,
     paymentStatus: 'pending',
     paidKobo: 0,
     amountDueKobo: totalKobo,

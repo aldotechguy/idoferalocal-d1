@@ -41,6 +41,16 @@ export const MallReceipt: React.FC<Props> = ({ order, onClose }) => {
           <span className="text-slate-500 dark:text-slate-400">Order</span>
           <span className="font-bold text-slate-900 dark:text-white font-mono text-xs">{order.orderNo}</span>
         </div>
+        <div className="flex justify-between">
+          <span className="text-slate-500 dark:text-slate-400">Delivery</span>
+          <span className="font-bold text-slate-900 dark:text-white">{order.quoteRequired ? 'Staff quote pending' : toNaira(order.deliveryFeeKobo ?? 0)}</span>
+        </div>
+        {!order.quoteRequired && order.totalKobo != null && (
+          <div className="flex justify-between">
+            <span className="font-bold text-slate-700 dark:text-slate-300">Total</span>
+            <span className="font-black text-slate-900 dark:text-white">{toNaira(order.totalKobo)}</span>
+          </div>
+        )}
         {order.customerName && (
           <div className="flex justify-between">
             <span className="text-slate-500 dark:text-slate-400">Customer</span>

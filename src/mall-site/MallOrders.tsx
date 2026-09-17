@@ -26,10 +26,11 @@ export const MallOrderSuccess: React.FC = () => {
       <button type="button" onClick={async () => { await navigator.clipboard.writeText(order.orderNo); setCopied(true); }} className="mt-2 min-h-10 px-3 rounded-xl border inline-flex items-center gap-2 text-sm font-bold"><Copy className="w-4 h-4" /> {copied ? 'Copied' : 'Copy order number'}</button>
       <div className="mt-4 rounded-xl bg-slate-50 p-3 text-left text-sm">
         <div className="flex justify-between"><span className="text-slate-500">Items</span><strong>{order.items.reduce((sum, item) => sum + item.qty, 0)}</strong></div>
-        <div className="mt-1 flex justify-between"><span className="text-slate-500">Total</span><strong>{formatNaira(order.subtotalKobo)}</strong></div>
+        <div className="mt-1 flex justify-between"><span className="text-slate-500">Delivery</span><strong>{order.quoteRequired ? 'Staff quote pending' : formatNaira(order.deliveryFeeKobo ?? 0)}</strong></div>
+        {!order.quoteRequired && <div className="mt-1 flex justify-between"><span className="text-slate-500">Total</span><strong>{formatNaira(order.totalKobo ?? order.subtotalKobo)}</strong></div>}
         {order.customerName && <div className="mt-1 flex justify-between"><span className="text-slate-500">Customer</span><strong>{order.customerName}</strong></div>}
       </div>
-      <p className="mt-3 text-xs text-slate-500">Show this order number at pickup. Payment and delivery details are confirmed during fulfilment.</p>
+      <p className="mt-3 text-xs text-slate-500">{order.quoteRequired ? 'Staff will confirm your delivery fee before the order can be confirmed or paid.' : 'Payment is confirmed by staff during fulfilment.'}</p>
       <div className="mt-4 flex gap-2">
         <button type="button" onClick={() => { newSession(); go('/'); }} className="flex-1 h-11 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-extrabold">Continue Shopping</button>
         <button type="button" onClick={() => go('/orders')} className="flex-1 h-11 rounded-xl bg-blue-600 text-white text-sm font-extrabold">Track Order</button>

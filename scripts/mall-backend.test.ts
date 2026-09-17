@@ -22,10 +22,10 @@ function fixture() {
   return { db, exec: makeNodeMallExecutor(db), session };
 }
 
-async function checkout(exec: ReturnType<typeof makeNodeMallExecutor>, session: string) {
+async function checkout(exec: ReturnType<typeof makeNodeMallExecutor>, session: string, overrides: Record<string, unknown> = {}) {
   const response = await handleMallApi(new Request('http://test/api/mall/checkout', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-mall-session': session },
-    body: JSON.stringify({ customerName: 'Ada', customerPhone: '08031234567', paymentMethod: 'pay_on_pickup', deliveryFeeNaira: 99999 }),
+    body: JSON.stringify({ customerName: 'Ada', customerPhone: '08031234567', paymentMethod: 'pay_on_pickup', deliveryFeeNaira: 99999, ...overrides }),
   }), exec);
   return { response, body: await response.json() as any };
 }
@@ -42,6 +42,46 @@ test('checkout is server-priced, pending, fee-safe and idempotent', async () => 
   assert.equal(second.body.orderNo, first.body.orderNo);
   assert.equal((db.prepare('SELECT COUNT(*) AS n FROM mall_orders').get() as any).n, 1);
   assert.equal((db.prepare(`SELECT stock_qty FROM products WHERE id = 'prod-1'`).get() as any).stock_qty, 8);
+});
+
+test('fixed delivery zones are server-priced and require an address', async () => {
+  const central = fixture();
+  await assert.rejects(
+    () => checkout(central.exec, central.session, { deliveryZone: 'invented_free_zone' }),
+    (error: any) => error?.mallStatus === 400 && /valid delivery zone/i.test(error.message),
+  );
+  await assert.rejects(
+    () => checkout(central.exec, central.session, { deliveryZone: 'uyo_central' }),
+    (error: any) => error?.mallStatus === 400 && /delivery address/i.test(error.message),
+  );
+  const outer = fixture();
+  const placed = await checkout(outer.exec, outer.session, { deliveryZone: 'uyo_outer', deliveryAddress: 'Shelter Afrique, Uyo', deliveryFeeNaira: 1 });
+  assert.equal(placed.response.status, 201);
+  assert.equal(placed.body.deliveryFeeKobo, 250000);
+  assert.equal(placed.body.totalKobo, 270000);
+  const row = outer.db.prepare('SELECT delivery_fee_kobo, total_kobo FROM mall_orders').get() as any;
+  assert.equal(row.delivery_fee_kobo, 250000);
+  assert.equal(row.total_kobo, 270000);
+});
+
+test('other locations require a manager quote before confirmation or payment', async () => {
+  const { db, exec, session } = fixture();
+  const placed = await checkout(exec, session, { deliveryZone: 'other', deliveryAddress: 'Calabar, Cross River' });
+  assert.equal(placed.body.quoteRequired, true);
+  const id = `mo-${session}`;
+  const unauthorizedQuote = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/quote-delivery`, { method: 'POST', body: JSON.stringify({ feeKobo: 1 }) }), exec, { ...actor, role: 'Sales Staff' });
+  assert.equal(unauthorizedQuote.status, 403);
+  const confirmBeforeQuote = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/confirm`, { method: 'POST', body: '{}' }), exec, actor);
+  assert.equal(confirmBeforeQuote.status, 409);
+  const payBeforeQuote = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/collect-payment`, { method: 'POST', body: JSON.stringify({ paymentMethod: 'Cash', amountKobo: 320000 }) }), exec, actor);
+  assert.equal(payBeforeQuote.status, 409);
+  const quoted = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/quote-delivery`, { method: 'POST', body: JSON.stringify({ feeKobo: 300000 }) }), exec, actor);
+  assert.equal(quoted.status, 200);
+  const row = db.prepare('SELECT delivery_fee_kobo, total_kobo FROM mall_orders WHERE id = ?').get(id) as any;
+  assert.equal(row.delivery_fee_kobo, 300000);
+  assert.equal(row.total_kobo, 320000);
+  assert.equal((db.prepare('SELECT amount_kobo FROM payments WHERE order_id = ?').get(id) as any).amount_kobo, 320000);
+  assert.equal((await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/confirm`, { method: 'POST', body: '{}' }), exec, actor)).status, 200);
 });
 
 test('staff payment creates one canonical sale without deducting stock twice', async () => {

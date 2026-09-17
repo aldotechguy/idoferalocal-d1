@@ -1,6 +1,7 @@
 import React from 'react';
 import { ShoppingCart } from 'lucide-react';
 import type { MallCartItem } from '../../types/mall';
+import { MALL_DELIVERY_ZONES, mallDeliveryFeeKobo, type MallDeliveryZone } from '../../shared/mallDelivery';
 
 function toNaira(kobo: number): string {
   const naira = kobo / 100;
@@ -12,6 +13,10 @@ interface Props {
   subtotal: number;
   customerName: string;
   setCustomerName: (v: string) => void;
+  deliveryZone: MallDeliveryZone;
+  setDeliveryZone: (v: MallDeliveryZone) => void;
+  deliveryAddress: string;
+  setDeliveryAddress: (v: string) => void;
   submitting: boolean;
   onSubmit: () => void;
 }
@@ -21,14 +26,20 @@ export const CheckoutBody: React.FC<Props> = ({
   subtotal,
   customerName,
   setCustomerName,
+  deliveryZone,
+  setDeliveryZone,
+  deliveryAddress,
+  setDeliveryAddress,
   submitting,
   onSubmit,
 }) => (
   <>
     <ItemList items={items} />
     <CustomerField value={customerName} onChange={setCustomerName} />
-    <OrderTotal subtotal={subtotal} />
-    <SubmitButton submitting={submitting} onSubmit={onSubmit} hasItems={items.length > 0} />
+    <div><label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-1.5">Delivery zone</label><select value={deliveryZone} onChange={(e) => setDeliveryZone(e.target.value as MallDeliveryZone)} className="w-full h-10 px-3 rounded-lg border bg-transparent text-sm">{MALL_DELIVERY_ZONES.map((zone) => <option key={zone.id} value={zone.id}>{zone.label} — {zone.feeKobo == null ? 'Staff quote' : toNaira(zone.feeKobo)}</option>)}</select></div>
+    {deliveryZone !== 'pickup' && <div><label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-1.5">Delivery address</label><input value={deliveryAddress} onChange={(e) => setDeliveryAddress(e.target.value)} placeholder="Enter full delivery address" className="w-full h-10 px-3 rounded-lg border bg-transparent text-sm" /></div>}
+    <OrderTotal subtotal={subtotal} deliveryFee={mallDeliveryFeeKobo(deliveryZone)} />
+    <SubmitButton submitting={submitting} onSubmit={onSubmit} hasItems={items.length > 0 && (deliveryZone === 'pickup' || Boolean(deliveryAddress.trim()))} />
     <p className="text-[11px] text-slate-400 dark:text-slate-500 text-center">Payment is confirmed by staff during fulfilment.</p>
   </>
 );
@@ -64,12 +75,14 @@ const CustomerField: React.FC<{ value: string; onChange: (v: string) => void }> 
   </div>
 );
 
-const OrderTotal: React.FC<{ subtotal: number }> = ({ subtotal }) => (
+const OrderTotal: React.FC<{ subtotal: number; deliveryFee: number | null }> = ({ subtotal, deliveryFee }) => (
   <div className="border-t border-slate-200 dark:border-slate-800 pt-3 space-y-1.5 text-sm mt-2">
       <div className="flex justify-between">
         <span className="text-slate-500 dark:text-slate-400">Subtotal</span>
         <span className="font-bold text-slate-900 dark:text-white">{toNaira(subtotal)}</span>
       </div>
+      <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">Delivery</span><span className="font-bold">{deliveryFee == null ? 'Staff quote' : toNaira(deliveryFee)}</span></div>
+      {deliveryFee != null && <div className="flex justify-between"><span className="font-bold">Total</span><span className="font-black">{toNaira(subtotal + deliveryFee)}</span></div>}
   </div>
 );
 

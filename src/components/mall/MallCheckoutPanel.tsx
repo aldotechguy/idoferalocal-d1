@@ -4,6 +4,7 @@ import { useMall } from '../../context/MallContext';
 import { MallReceipt } from './MallReceipt';
 import { CheckoutBody } from './MallCheckoutBody';
 import type { MallCartItem } from '../../types/mall';
+import type { MallDeliveryZone } from '../../shared/mallDelivery';
 
 function toNaira(kobo: number): string {
   const naira = kobo / 100;
@@ -18,6 +19,8 @@ interface Props {
 export const MallCheckoutPanel: React.FC<Props> = ({ open, onClose }) => {
   const { cart, checkout, order, view, setView } = useMall();
   const [customerName, setCustomerName] = React.useState('Walk-in customer');
+  const [deliveryZone, setDeliveryZone] = React.useState<MallDeliveryZone>('pickup');
+  const [deliveryAddress, setDeliveryAddress] = React.useState('');
   const [submitting, setSubmitting] = React.useState(false);
 
   const items: MallCartItem[] = cart?.items ?? [];
@@ -33,7 +36,7 @@ export const MallCheckoutPanel: React.FC<Props> = ({ open, onClose }) => {
   const handleSubmit = async () => {
     setSubmitting(true);
     try {
-      await checkout({ customerName: customerName.trim() || 'Walk-in customer' });
+      await checkout({ customerName: customerName.trim() || 'Walk-in customer', deliveryZone, deliveryAddress: deliveryAddress.trim() });
     } finally {
       setSubmitting(false);
     }
@@ -83,6 +86,10 @@ export const MallCheckoutPanel: React.FC<Props> = ({ open, onClose }) => {
               subtotal={subtotal}
               customerName={customerName}
               setCustomerName={setCustomerName}
+              deliveryZone={deliveryZone}
+              setDeliveryZone={setDeliveryZone}
+              deliveryAddress={deliveryAddress}
+              setDeliveryAddress={setDeliveryAddress}
               submitting={submitting}
               onSubmit={handleSubmit}
             />

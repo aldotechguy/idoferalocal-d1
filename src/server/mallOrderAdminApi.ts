@@ -106,6 +106,8 @@ async function detail(exec: MallExecutor, id: string) {
 async function confirmOrder(exec: MallExecutor, id: string, actor: StaffActor) {
   if (!canOperate(actor)) fail(403, 'You do not have permission to confirm Mall orders.');
   const row = await getOrderRow(exec, id);
+  const delivery = deliveryData(row);
+  if (delivery.quoteRequired === true && delivery.quoteConfirmed !== true) fail(409, 'Set the delivery quote before confirming this order.');
   const status = s(row.status);
   if (status === 'confirmed') return detail(exec, id);
   if (status !== 'pending') fail(409, `An order in ${status} state cannot be confirmed.`);
@@ -159,6 +161,25 @@ function deliveryData(row: any): Record<string, any> {
   try { return row.delivery_address_json ? JSON.parse(row.delivery_address_json) : {}; } catch { return {}; }
 }
 
+async function quoteDelivery(exec: MallExecutor, id: string, actor: StaffActor, body: any) {
+  if (!['Administrator', 'Store Manager'].includes(actor.role)) fail(403, 'Manager access is required to quote delivery.');
+  const row = await getOrderRow(exec, id);
+  if (s(row.linked_sale_id) || s(row.status) !== 'pending') fail(409, 'Delivery can only be quoted on an unpaid pending order.');
+  const delivery = deliveryData(row);
+  if (delivery.zone !== 'other' || delivery.quoteRequired !== true) fail(409, 'This order does not require a delivery quote.');
+  const feeKobo = Math.round(n(body?.feeKobo, -1));
+  if (!Number.isSafeInteger(feeKobo) || feeKobo < 0 || feeKobo > 10_000_000) fail(400, 'Enter a valid delivery fee.');
+  const totalKobo = n(row.subtotal_kobo) - n(row.discount_kobo) + feeKobo;
+  const at = nowIso();
+  const updatedDelivery = { ...delivery, quoteConfirmed: true, quotedAt: at, quotedBy: actor.displayName };
+  await exec.runBatch([
+    { sql: 'UPDATE mall_orders SET delivery_fee_kobo = ?, total_kobo = ?, delivery_address_json = ? WHERE id = ? AND status = ?', params: [feeKobo, totalKobo, JSON.stringify(updatedDelivery), id, 'pending'] },
+    { sql: `UPDATE payments SET amount_kobo = ?, raw_json = ? WHERE order_id = ? AND status = 'pending'`, params: [totalKobo, JSON.stringify({ orderNo: row.order_no, deliveryFeeKobo: feeKobo, quotedBy: actor.displayName, quotedAt: at }), id] },
+    { sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'QUOTE_MALL_DELIVERY', 'MallOrder', ?, ?, ?)`, params: [`audit-${uuid()}`, actor.id, id, `${actor.displayName} quoted delivery for ${row.order_no} at ${feeKobo} kobo.`, at] },
+  ]);
+  return detail(exec, id);
+}
+
 async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor, body: any, transferOnly: boolean) {
   const allowed = transferOnly
     ? ['Administrator', 'Store Manager', 'Accountant'].includes(actor.role)
@@ -167,6 +188,8 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
   const row = await getOrderRow(exec, id);
   if (s(row.linked_sale_id)) return detail(exec, id);
   const status = s(row.status);
+  const delivery = deliveryData(row);
+  if (delivery.quoteRequired === true && delivery.quoteConfirmed !== true) fail(409, 'Set the delivery quote before recording payment.');
   if (status === 'cancelled') fail(409, 'Cancelled orders cannot be paid.');
   if (!['pending', 'confirmed'].includes(status)) fail(409, `An order in ${status} state cannot be paid.`);
   const items = await getOrderItems(exec, id);
@@ -296,6 +319,7 @@ export async function handleStaffMallApi(request: Request, exec: MallExecutor, a
       const id = decodeURIComponent(parts[0]);
       const body = await parseBody(request);
       if (parts[1] === 'confirm') return await confirmOrder(exec, id, actor);
+      if (parts[1] === 'quote-delivery') return await quoteDelivery(exec, id, actor, body);
       if (parts[1] === 'cancel') return await cancelOrder(exec, id, actor, body);
       if (parts[1] === 'collect-payment') return await finalizePayment(exec, id, actor, body, false);
       if (parts[1] === 'verify-payment') return await finalizePayment(exec, id, actor, body, true);
