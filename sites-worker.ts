@@ -97,7 +97,10 @@ function publicUser(user: AppUserRow) {
   };
 }
 
+let isSchemaEnsured = false;
+
 async function ensureSchema(env: Env) {
+  if (isSchemaEnsured) return;
   await env.DB.batch([
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS app_documents (
       owner_id TEXT NOT NULL,
@@ -235,7 +238,7 @@ async function authGoogle(request: Request, env: Env) {
 async function authSession(request: Request, env: Env) {
   await ensureAuthSeed(env);
   const user = await requireAppUser(request, env);
-  return user ? json({user: publicUser(user)}) : json({user: null}, 401);
+  return json({ user: user ? publicUser(user) : null, authenticated: Boolean(user) });
 }
 
 async function authLogout(request: Request, env: Env) {

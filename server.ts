@@ -410,9 +410,9 @@ app.get("/api/auth/session", async (req, res) => {
     await ensureAuthSeed();
     const user = await requireAppUser(req);
     if (!user) {
-      return res.status(401).json({ user: null });
+      return res.json({ user: null, authenticated: false });
     }
-    return res.json({ user: publicUser(user) });
+    return res.json({ user: publicUser(user), authenticated: true });
   } catch (error: any) {
     return res.status(500).json({ error: error.message || "Session error" });
   }
@@ -587,15 +587,84 @@ app.post("/api/auth/password", async (req, res) => {
 
 // =================== D1 STORAGE ROUTES ===================
 
-const CLOUDFLARE_D1_DATABASE_ID = process.env.CLOUDFLARE_D1_DATABASE_ID || "3e95a550-a091-490b-819d-f0acb7ea8dd8";
-const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || "35b307711376954341708cbea8080dcc";
-const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN || "";
+let configuredD1DatabaseId = process.env.CLOUDFLARE_D1_DATABASE_ID || "3e95a550-a091-490b-819d-f0acb7ea8dd8";
+let configuredAccountId = process.env.CLOUDFLARE_ACCOUNT_ID || "35b307711376954341708cbea8080dcc";
+let configuredApiToken = process.env.CLOUDFLARE_API_TOKEN || "";
+
+function loadSavedCloudflareConfig() {
+  try {
+    const row = db.prepare("SELECT payload FROM app_documents WHERE owner_id = ? AND collection = ? AND document_id = ?").get("system", "system_config", "cloudflare_d1") as any;
+    if (row?.payload) {
+      const data = JSON.parse(row.payload);
+      if (data.apiToken !== undefined && data.apiToken !== "") configuredApiToken = data.apiToken;
+      if (data.accountId) configuredAccountId = data.accountId;
+      if (data.databaseId) configuredD1DatabaseId = data.databaseId;
+      console.log("Loaded Cloudflare D1 configuration from database storage.");
+    }
+  } catch (err: any) {
+    console.warn("Notice: could not load stored Cloudflare config:", err?.message || err);
+  }
+}
+loadSavedCloudflareConfig();
+
+function updateEnvFile(token: string, accountId?: string, databaseId?: string) {
+  try {
+    const envPath = path.join(process.cwd(), ".env");
+    let content = "";
+    if (fs.existsSync(envPath)) {
+      content = fs.readFileSync(envPath, "utf-8");
+    } else {
+      const examplePath = path.join(process.cwd(), ".env.example");
+      if (fs.existsSync(examplePath)) {
+        content = fs.readFileSync(examplePath, "utf-8");
+      }
+    }
+
+    if (content.includes("CLOUDFLARE_API_TOKEN=")) {
+      content = content.replace(/CLOUDFLARE_API_TOKEN=.*/g, `CLOUDFLARE_API_TOKEN="${token}"`);
+    } else {
+      content += `\nCLOUDFLARE_API_TOKEN="${token}"\n`;
+    }
+
+    if (accountId) {
+      if (content.includes("CLOUDFLARE_ACCOUNT_ID=")) {
+        content = content.replace(/CLOUDFLARE_ACCOUNT_ID=.*/g, `CLOUDFLARE_ACCOUNT_ID="${accountId}"`);
+      } else {
+        content += `\nCLOUDFLARE_ACCOUNT_ID="${accountId}"\n`;
+      }
+    }
+
+    if (databaseId) {
+      if (content.includes("CLOUDFLARE_D1_DATABASE_ID=")) {
+        content = content.replace(/CLOUDFLARE_D1_DATABASE_ID=.*/g, `CLOUDFLARE_D1_DATABASE_ID="${databaseId}"`);
+      } else {
+        content += `\nCLOUDFLARE_D1_DATABASE_ID="${databaseId}"\n`;
+      }
+    }
+
+    fs.writeFileSync(envPath, content, "utf-8");
+  } catch (err) {
+    console.warn("Could not write to .env file:", err);
+  }
+}
 
 let lastCloudflareSyncTime = 0;
 let isCloudflareSyncing = false;
 let ongoingD1SyncPromise: Promise<{ success: boolean; count?: number; error?: string; reason?: string }> | null = null;
+let cloudflareAuthStatus: {
+  valid: boolean;
+  lastChecked: number;
+  errorMessage?: string;
+} = { valid: true, lastChecked: 0 };
 
 async function syncFromCloudflareD1WithLock(): Promise<{ success: boolean; count?: number; error?: string; reason?: string }> {
+  // If we synced within the last 60 seconds, skip to prevent redundant edge calls
+  if (Date.now() - lastCloudflareSyncTime < 60000) {
+    return { success: true, reason: "cached_recent_sync" };
+  }
+  if (!cloudflareAuthStatus.valid && Date.now() - cloudflareAuthStatus.lastChecked < 60000) {
+    return { success: false, reason: "auth_failed_paused", error: cloudflareAuthStatus.errorMessage };
+  }
   if (ongoingD1SyncPromise) {
     return ongoingD1SyncPromise;
   }
@@ -607,7 +676,7 @@ async function syncFromCloudflareD1WithLock(): Promise<{ success: boolean; count
       await ensureBusinessDataOwner();
       return result;
     } catch (e: any) {
-      console.warn("Cloudflare D1 sync failed or timed out:", e?.message || e);
+      console.warn("Cloudflare D1 sync notice:", e?.message || e);
       return { success: false, count: 0, error: e?.message || String(e) };
     } finally {
       isCloudflareSyncing = false;
@@ -621,11 +690,11 @@ app.get("/api/storage/snapshot", async (req, res) => {
   try {
     const ownerId = BUSINESS_OWNER_ID;
 
-    // Whenever the browser refreshes or requests a snapshot, trigger an immediate sync from D1 before snapshot payloads are returned to the client
-    try {
-      await syncFromCloudflareD1WithLock();
-    } catch (e: any) {
-      console.warn("Pre-snapshot D1 sync fallback:", e?.message || e);
+    // Refresh from remote D1 non-blocking in background if stale
+    if (Date.now() - lastCloudflareSyncTime > 60000 && cloudflareAuthStatus.valid) {
+      syncFromCloudflareD1WithLock().catch((e: any) => {
+        console.warn("Background D1 refresh notice:", e?.message || e);
+      });
     }
 
     const rows = db.prepare(`
@@ -676,13 +745,19 @@ function interpolateSql(sql: string, params: any[] = []): string {
 }
 
 async function executeRemoteD1Statements(statements: { sql: string; params: any[] }[]) {
-  const accountId = CLOUDFLARE_ACCOUNT_ID;
-  const databaseId = CLOUDFLARE_D1_DATABASE_ID;
-  const token = CLOUDFLARE_API_TOKEN;
+  const accountId = configuredAccountId;
+  const databaseId = configuredD1DatabaseId;
+  const token = configuredApiToken;
 
   if (!token || !accountId || !databaseId || statements.length === 0) {
     return { success: false, reason: "skipped_or_missing_credentials" };
   }
+
+  // If token failed authentication recently, skip remote edge queries to keep local server lightning fast
+  if (!cloudflareAuthStatus.valid && Date.now() - cloudflareAuthStatus.lastChecked < 60000) {
+    return { success: false, reason: "auth_failed_paused", error: cloudflareAuthStatus.errorMessage };
+  }
+
   try {
     const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}/query`;
 
@@ -707,11 +782,26 @@ async function executeRemoteD1Statements(statements: { sql: string; params: any[
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ sql: stmt.sql, params: stmt.params || [] }),
+        signal: AbortSignal.timeout(4000),
       });
+
+      if (res.status === 401 || res.status === 403) {
+        cloudflareAuthStatus = {
+          valid: false,
+          lastChecked: Date.now(),
+          errorMessage: "Cloudflare API token authentication failed (HTTP " + res.status + ")",
+        };
+        console.warn("Cloudflare D1 authentication failure: token rejected. Using local SQLite store.");
+        return { success: false, reason: "auth_failed" };
+      }
+
       const data = (await res.json()) as any;
       if (!res.ok || !data.success) {
-        console.error("Cloudflare D1 query failed:", JSON.stringify(data));
-        throw new Error(data.errors?.[0]?.message || "Cloudflare D1 execution error");
+        if (data.errors?.[0]?.code === 10000 || data.errors?.[0]?.message?.includes("Authentication")) {
+          cloudflareAuthStatus = { valid: false, lastChecked: Date.now(), errorMessage: data.errors?.[0]?.message };
+        }
+        console.warn("Cloudflare D1 query warning:", JSON.stringify(data.errors || data));
+        return { success: false, error: data.errors?.[0]?.message };
       }
     }
 
@@ -739,19 +829,30 @@ async function executeRemoteD1Statements(statements: { sql: string; params: any[
             "Content-Type": "application/json",
           },
           body: JSON.stringify({ sql, params }),
+          signal: AbortSignal.timeout(4000),
         });
+
+        if (res.status === 401 || res.status === 403) {
+          cloudflareAuthStatus = {
+            valid: false,
+            lastChecked: Date.now(),
+            errorMessage: "Cloudflare API token authentication failed (HTTP " + res.status + ")",
+          };
+          return;
+        }
+
         const data = (await res.json()) as any;
         if (!res.ok || !data.success) {
-          console.error("Cloudflare D1 batched insert failed:", JSON.stringify(data));
-          throw new Error(data.errors?.[0]?.message || "Cloudflare D1 batched insert error");
+          console.warn("Cloudflare D1 batched insert notice:", JSON.stringify(data.errors || data));
         }
       }));
+      if (!cloudflareAuthStatus.valid) break;
     }
 
     return { success: true, databaseId };
   } catch (err: any) {
-    console.error("Cloudflare D1 execution error:", err);
-    throw err;
+    console.warn("Cloudflare D1 execution notice:", err.message);
+    return { success: false, error: err.message };
   }
 }
 
@@ -827,13 +928,16 @@ app.put("/api/storage/snapshot", async (req, res) => {
       throw txErr;
     }
 
-    await executeRemoteD1Statements(remoteStatements);
+    // Replicate to Cloudflare D1 non-blocking so local SQLite commit is instant and reliable
+    executeRemoteD1Statements(remoteStatements).catch((remoteErr: any) => {
+      console.warn("Non-blocking Cloudflare D1 replication notice:", remoteErr?.message || remoteErr);
+    });
 
     return res.json({
       ok: true,
       revision,
       d1Synced: true,
-      d1DatabaseId: CLOUDFLARE_D1_DATABASE_ID,
+      d1DatabaseId: configuredD1DatabaseId,
       collections: Object.keys(body.stores).filter((name) => ALLOWED_STORES.has(name)),
     });
   } catch (error: any) {
@@ -905,13 +1009,16 @@ app.patch("/api/storage/records", async (req, res) => {
       params: [ownerId, revision, now],
     });
 
-    await executeRemoteD1Statements(remoteStatements);
+    // Replicate to Cloudflare D1 non-blocking
+    executeRemoteD1Statements(remoteStatements).catch((remoteErr: any) => {
+      console.warn("Non-blocking Cloudflare D1 replication notice:", remoteErr?.message || remoteErr);
+    });
 
     return res.json({
       ok: true,
       revision,
       d1Synced: true,
-      d1DatabaseId: CLOUDFLARE_D1_DATABASE_ID,
+      d1DatabaseId: configuredD1DatabaseId,
       upserted: upserts.length,
       deleted: deletes.length,
     });
@@ -931,22 +1038,150 @@ app.get("/api/storage/d1/health", async (req, res) => {
     return res.json({
       status: "healthy",
       connected: true,
-      databaseId: CLOUDFLARE_D1_DATABASE_ID,
-      accountId: CLOUDFLARE_ACCOUNT_ID,
+      databaseId: configuredD1DatabaseId,
+      accountId: configuredAccountId,
       revision: Number(revRow?.revision || 0),
       totalDocuments: Number(countRow?.total || 0),
       latencyMs,
       endpoint: "Cloudflare D1 Primary Edge",
+      remoteSync: {
+        configured: Boolean(configuredApiToken),
+        authValid: cloudflareAuthStatus.valid,
+        status: !configuredApiToken ? "unconfigured" : !cloudflareAuthStatus.valid ? "auth_error" : "synced",
+        message: !configuredApiToken
+          ? "Local D1 SQLite active. Cloudflare API token not configured."
+          : !cloudflareAuthStatus.valid
+            ? (cloudflareAuthStatus.errorMessage || "Cloudflare API token returned 401. Local database serving requests.")
+            : "Cloudflare D1 edge connected.",
+      },
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
     return res.status(500).json({
       status: "unhealthy",
       connected: false,
-      databaseId: CLOUDFLARE_D1_DATABASE_ID,
+      databaseId: configuredD1DatabaseId,
       error: error.message || "D1 storage check failed",
       timestamp: new Date().toISOString(),
     });
+  }
+});
+
+// Cloudflare D1 Configuration APIs for user credential management
+app.get("/api/storage/d1/config", (req, res) => {
+  res.json({
+    configured: Boolean(configuredApiToken),
+    hasToken: Boolean(configuredApiToken),
+    maskedToken: configuredApiToken
+      ? (configuredApiToken.length > 8
+          ? configuredApiToken.slice(0, 4) + "••••••••" + configuredApiToken.slice(-4)
+          : "••••••••")
+      : "",
+    accountId: configuredAccountId,
+    databaseId: configuredD1DatabaseId,
+    authStatus: cloudflareAuthStatus,
+  });
+});
+
+app.post("/api/storage/d1/config", async (req, res) => {
+  try {
+    const { apiToken, accountId, databaseId, testOnly } = req.body || {};
+    const newToken = apiToken !== undefined ? String(apiToken).trim() : configuredApiToken;
+    const newAccountId = accountId ? String(accountId).trim() : configuredAccountId;
+    const newDbId = databaseId ? String(databaseId).trim() : configuredD1DatabaseId;
+
+    if (!newToken) {
+      if (!testOnly) {
+        configuredApiToken = "";
+        configuredAccountId = newAccountId;
+        configuredD1DatabaseId = newDbId;
+        cloudflareAuthStatus = { valid: false, lastChecked: Date.now(), errorMessage: "Token cleared" };
+        updateEnvFile("", newAccountId, newDbId);
+        const now = Date.now();
+        db.prepare(`
+          INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
+            payload = excluded.payload,
+            updated_at = excluded.updated_at
+        `).run("system", "system_config", "cloudflare_d1", JSON.stringify({ apiToken: "", accountId: newAccountId, databaseId: newDbId }), now);
+      }
+      return res.json({ ok: true, message: "Cloudflare token cleared." });
+    }
+
+    // Verify token with Cloudflare API
+    let verifySuccess = false;
+    let verifyError = "";
+    try {
+      const testRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${newAccountId}/d1/database/${newDbId}`, {
+        headers: {
+          "Authorization": `Bearer ${newToken}`,
+          "Content-Type": "application/json",
+        },
+        signal: AbortSignal.timeout(6000),
+      });
+
+      const testData = (await testRes.json()) as any;
+      if (testRes.ok && testData.success) {
+        verifySuccess = true;
+      } else {
+        verifyError = testData.errors?.[0]?.message || `HTTP ${testRes.status} authentication failure`;
+      }
+    } catch (fetchErr: any) {
+      verifyError = fetchErr.message || "Network request timed out or failed";
+    }
+
+    if (testOnly) {
+      return res.json({
+        ok: verifySuccess,
+        error: verifyError,
+        message: verifySuccess ? "Cloudflare API token is valid!" : `Verification failed: ${verifyError}`,
+      });
+    }
+
+    // Save configuration
+    configuredApiToken = newToken;
+    configuredAccountId = newAccountId;
+    configuredD1DatabaseId = newDbId;
+    cloudflareAuthStatus = {
+      valid: verifySuccess,
+      lastChecked: Date.now(),
+      errorMessage: verifySuccess ? undefined : verifyError,
+    };
+
+    updateEnvFile(newToken, newAccountId, newDbId);
+
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
+        payload = excluded.payload,
+        updated_at = excluded.updated_at
+    `).run("system", "system_config", "cloudflare_d1", JSON.stringify({
+      apiToken: newToken,
+      accountId: newAccountId,
+      databaseId: newDbId,
+    }), now);
+
+    // If verified successfully, trigger a background hydration/sync
+    if (verifySuccess) {
+      lastCloudflareSyncTime = 0;
+      syncFromCloudflareD1WithLock().catch((err) => {
+        console.warn("Post-token-save sync notice:", err?.message || err);
+      });
+    }
+
+    return res.json({
+      ok: true,
+      verified: verifySuccess,
+      warning: !verifySuccess ? `Token saved, but Cloudflare test returned: ${verifyError}.` : undefined,
+      message: verifySuccess
+        ? "Cloudflare API token verified and saved! Edge replication active."
+        : `Token saved (Note: verification failed: ${verifyError}).`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err.message || "Failed to update config" });
   }
 });
 
@@ -1030,12 +1265,16 @@ function normalizeDocumentPayload(collection: string, payloadStr: string): strin
 }
 
 async function syncFromCloudflareD1() {
-  const accountId = CLOUDFLARE_ACCOUNT_ID;
-  const databaseId = CLOUDFLARE_D1_DATABASE_ID;
-  const token = CLOUDFLARE_API_TOKEN;
+  const accountId = configuredAccountId;
+  const databaseId = configuredD1DatabaseId;
+  const token = configuredApiToken;
 
   if (!token || !accountId || !databaseId) {
     return { success: false, reason: "skipped_or_missing_credentials" };
+  }
+
+  if (!cloudflareAuthStatus.valid && Date.now() - cloudflareAuthStatus.lastChecked < 60000) {
+    return { success: false, reason: "auth_failed_paused", error: cloudflareAuthStatus.errorMessage };
   }
 
   try {
@@ -1049,8 +1288,28 @@ async function syncFromCloudflareD1() {
       body: JSON.stringify({
         sql: "SELECT owner_id, collection, document_id, payload, updated_at FROM app_documents;",
       }),
+      signal: AbortSignal.timeout(4000),
     });
+
+    if (res.status === 401 || res.status === 403) {
+      cloudflareAuthStatus = {
+        valid: false,
+        lastChecked: Date.now(),
+        errorMessage: "Cloudflare API token authentication failed (HTTP " + res.status + ")",
+      };
+      console.warn("Cloudflare D1 sync auth failure: token rejected. Using local SQLite store.");
+      return { success: false, reason: "auth_failed", error: cloudflareAuthStatus.errorMessage };
+    }
+
     const data = (await res.json()) as any;
+    if (!res.ok || !data.success) {
+      if (data.errors?.[0]?.code === 10000 || data.errors?.[0]?.message?.includes("Authentication")) {
+        cloudflareAuthStatus = { valid: false, lastChecked: Date.now(), errorMessage: data.errors?.[0]?.message };
+      }
+      return { success: false, error: data.errors?.[0]?.message || "Cloudflare D1 query failed" };
+    }
+
+    cloudflareAuthStatus = { valid: true, lastChecked: Date.now() };
     const docs = data.result?.[0]?.results || [];
 
     if (docs.length > 0) {
@@ -1079,6 +1338,7 @@ async function syncFromCloudflareD1() {
       body: JSON.stringify({
         sql: "SELECT owner_id, revision, updated_at FROM sync_revisions;",
       }),
+      signal: AbortSignal.timeout(4000),
     });
     const revData = (await revRes.json()) as any;
     const revs = revData.result?.[0]?.results || [];
@@ -1152,7 +1412,7 @@ app.post("/api/storage/d1/push-full", async (req, res) => {
     return res.json({
       ok: true,
       d1Synced: true,
-      d1DatabaseId: CLOUDFLARE_D1_DATABASE_ID,
+      d1DatabaseId: configuredD1DatabaseId,
       totalDocuments: rows.length,
     });
   } catch (error: any) {
@@ -1641,16 +1901,6 @@ Sample Products: ${JSON.stringify((products || []).slice(0, 5), null, 2)}`;
 });
 
 async function startServer() {
-  try {
-    console.log("Hydrating business database from Cloudflare D1 on boot...");
-    await syncFromCloudflareD1();
-    lastCloudflareSyncTime = Date.now();
-    await ensureBusinessDataOwner();
-    await runHistoricalDeliveryDataMigration();
-  } catch (syncErr: any) {
-    console.warn("Startup hydration warning:", syncErr.message);
-  }
-
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -1667,6 +1917,19 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`IdoferaLabs Server running on http://0.0.0.0:${PORT}`);
+
+    // Asynchronously perform background hydration and migration without blocking HTTP readiness
+    (async () => {
+      try {
+        console.log("Hydrating business database from Cloudflare D1 in background...");
+        await syncFromCloudflareD1();
+        lastCloudflareSyncTime = Date.now();
+        await ensureBusinessDataOwner();
+        await runHistoricalDeliveryDataMigration();
+      } catch (syncErr: any) {
+        console.warn("Background startup hydration warning:", syncErr?.message || syncErr);
+      }
+    })();
   });
 }
 

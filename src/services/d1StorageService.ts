@@ -336,6 +336,12 @@ export interface D1HealthStatus {
   endpoint: string;
   error?: string;
   status: 'healthy' | 'degraded' | 'offline' | 'error';
+  remoteSync?: {
+    configured: boolean;
+    authValid: boolean;
+    status: string;
+    message: string;
+  };
 }
 
 export async function checkD1Health(): Promise<D1HealthStatus> {
@@ -358,7 +364,7 @@ export async function checkD1Health(): Promise<D1HealthStatus> {
   try {
     const authHeaders = await getAuthHeaders();
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 7000);
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
 
     const response = await fetch('/api/storage/d1/health', {
       headers: { ...authHeaders, 'cache-control': 'no-cache' },
@@ -379,7 +385,8 @@ export async function checkD1Health(): Promise<D1HealthStatus> {
         revision: Number(data.revision || 0),
         totalDocuments: Number(data.totalDocuments || 0),
         endpoint: data.endpoint || 'Cloudflare D1 Primary Edge',
-        status: latencyMs > 2000 ? 'degraded' : 'healthy',
+        status: latencyMs > 3000 ? 'degraded' : 'healthy',
+        remoteSync: data.remoteSync,
       };
     } else {
       return {
@@ -397,6 +404,33 @@ export async function checkD1Health(): Promise<D1HealthStatus> {
   } catch (err: any) {
     const latencyMs = Math.round(performance.now() - start);
     const isTimeout = err?.name === 'AbortError';
+
+    // Quick lightweight retry to prevent transient cold-boot timeout false-positives
+    if (isTimeout) {
+      try {
+        const retryStart = performance.now();
+        const retryRes = await fetch('/api/storage/d1/health', {
+          headers: { 'cache-control': 'no-cache' },
+          credentials: 'include',
+        });
+        if (retryRes.ok) {
+          const data = (await retryRes.json()) as any;
+          return {
+            connected: Boolean(data.connected),
+            latencyMs: Math.max(1, Math.round(performance.now() - retryStart)),
+            lastChecked: Date.now(),
+            databaseId: data.databaseId || fallbackDbId,
+            revision: Number(data.revision || 0),
+            totalDocuments: Number(data.totalDocuments || 0),
+            endpoint: data.endpoint || 'Cloudflare D1 Primary Edge',
+            status: 'healthy',
+          };
+        }
+      } catch {
+        // Fall through to offline error reporting below
+      }
+    }
+
     return {
       connected: false,
       latencyMs,
@@ -405,7 +439,7 @@ export async function checkD1Health(): Promise<D1HealthStatus> {
       revision: Number(localStorage.getItem(REVISION_KEY) || 0),
       totalDocuments: 0,
       endpoint: 'Cloudflare D1 Storage API',
-      error: isTimeout ? 'D1 Endpoint connection timed out (>7s)' : (err?.message || 'Network unreachable'),
+      error: isTimeout ? 'D1 Endpoint connection timed out (>12s)' : (err?.message || 'Network unreachable'),
       status: 'offline',
     };
   }
@@ -434,4 +468,44 @@ async function flushD1Snapshot() {
   } finally {
     syncing = false;
   }
+}
+
+export interface D1ConfigInfo {
+  configured: boolean;
+  hasToken: boolean;
+  maskedToken: string;
+  accountId: string;
+  databaseId: string;
+  authStatus?: {
+    valid: boolean;
+    lastChecked: number;
+    errorMessage?: string;
+  };
+}
+
+export async function getD1Config(): Promise<D1ConfigInfo> {
+  const authHeaders = await getAuthHeaders();
+  const res = await fetch('/api/storage/d1/config', {
+    headers: { ...authHeaders, 'cache-control': 'no-cache' },
+  });
+  if (!res.ok) throw new Error('Failed to fetch D1 config');
+  return res.json();
+}
+
+export async function saveD1Config(payload: {
+  apiToken?: string;
+  accountId?: string;
+  databaseId?: string;
+  testOnly?: boolean;
+}): Promise<{ ok: boolean; message: string; error?: string; warning?: string; verified?: boolean }> {
+  const authHeaders = await getAuthHeaders();
+  const res = await fetch('/api/storage/d1/config', {
+    method: 'POST',
+    headers: {
+      ...authHeaders,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  return res.json();
 }

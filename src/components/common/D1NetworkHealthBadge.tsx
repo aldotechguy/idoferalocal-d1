@@ -11,8 +11,12 @@ import {
   Zap,
   Layers,
   ExternalLink,
+  Key,
+  Eye,
+  EyeOff,
+  Check,
 } from 'lucide-react';
-import { D1HealthStatus } from '../../services/d1StorageService';
+import { D1HealthStatus, saveD1Config } from '../../services/d1StorageService';
 
 interface D1NetworkHealthBadgeProps {
   health: D1HealthStatus | null;
@@ -33,12 +37,50 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [lastCheckText, setLastCheckText] = useState('Just now');
+  const [showTokenInput, setShowTokenInput] = useState(false);
+  const [tokenInput, setTokenInput] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [isSavingToken, setIsSavingToken] = useState(false);
+  const [tokenFeedback, setTokenFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
 
   const isConnected = Boolean(health?.connected);
   const isHealthy = health?.status === 'healthy' || (isConnected && (health?.latencyMs || 0) < 2000);
   const isDegraded = health?.status === 'degraded' || (isConnected && (health?.latencyMs || 0) >= 2000);
   const isOffline = !isConnected;
+
+  const handleSaveToken = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!tokenInput.trim()) return;
+    setIsSavingToken(true);
+    setTokenFeedback(null);
+    try {
+      const res = await saveD1Config({ apiToken: tokenInput.trim() });
+      if (res.ok) {
+        setTokenFeedback({
+          type: 'success',
+          message: res.verified ? 'Token verified & edge connected!' : res.message,
+        });
+        setTokenInput('');
+        await onPing();
+        if (onSync && res.verified) {
+          onSync();
+        }
+      } else {
+        setTokenFeedback({
+          type: 'error',
+          message: res.error || 'Failed to save token.',
+        });
+      }
+    } catch (err: any) {
+      setTokenFeedback({
+        type: 'error',
+        message: err.message || 'Error saving token.',
+      });
+    } finally {
+      setIsSavingToken(false);
+    }
+  };
 
   // Format the time since last check
   useEffect(() => {
@@ -293,6 +335,85 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
               </span>
             </div>
           </div>
+
+          {/* Remote Cloudflare Token Status Notice & Input */}
+          {(health?.remoteSync?.status === 'auth_error' || showTokenInput) && (
+            <div className="p-3 mb-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-xs text-amber-700 dark:text-amber-300 space-y-2.5">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-500" />
+                <div>
+                  <span className="font-bold block">Cloudflare API Token Required</span>
+                  <span className="text-[11px] leading-tight opacity-90 block mt-0.5">
+                    Local database is fully authoritative and working. Enter your Cloudflare API token below to re-enable Cloudflare Edge replication:
+                  </span>
+                </div>
+              </div>
+
+              <form onSubmit={handleSaveToken} className="space-y-2 pt-1">
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    value={tokenInput}
+                    onChange={(e) => setTokenInput(e.target.value)}
+                    placeholder="Enter Cloudflare API token..."
+                    className="w-full pl-3 pr-8 py-1.5 text-xs bg-white dark:bg-slate-900 border border-amber-400/60 dark:border-amber-500/40 rounded-lg text-slate-800 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                  >
+                    {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="submit"
+                    disabled={isSavingToken || !tokenInput.trim()}
+                    className="flex-1 py-1.5 px-3 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-lg text-[11px] transition-all flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-xs"
+                  >
+                    {isSavingToken ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                    <span>{isSavingToken ? 'Saving...' : 'Save & Connect'}</span>
+                  </button>
+                  {showTokenInput && health?.remoteSync?.status !== 'auth_error' && (
+                    <button
+                      type="button"
+                      onClick={() => setShowTokenInput(false)}
+                      className="py-1.5 px-2 text-slate-500 hover:text-slate-700 dark:text-slate-400 text-[11px]"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+
+                {tokenFeedback && (
+                  <div
+                    className={`p-2 rounded-lg text-[11px] ${
+                      tokenFeedback.type === 'success'
+                        ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
+                        : 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/30'
+                    }`}
+                  >
+                    {tokenFeedback.message}
+                  </div>
+                )}
+              </form>
+            </div>
+          )}
+
+          {health?.remoteSync?.status !== 'auth_error' && !showTokenInput && (
+            <div className="mb-2 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowTokenInput(true)}
+                className="text-[11px] text-emerald-600 dark:text-emerald-400 hover:underline flex items-center gap-1 cursor-pointer font-medium"
+              >
+                <Key className="w-3 h-3" />
+                <span>{health?.remoteSync?.configured ? 'Update Cloudflare Token' : 'Enter Cloudflare Token'}</span>
+              </button>
+            </div>
+          )}
 
           {/* Error notice if offline */}
           {health?.error && (
