@@ -231,6 +231,33 @@ export function migrateSnapshot(stores: Record<string, any[]>): Record<string, a
   if (!result.moneyMovements) result.moneyMovements = [];
   if (!result.purchases) result.purchases = [];
 
+  // Older POS builds saved the real split in sale notes but generated a false
+  // 50/50 Till/Bank ledger split. Recover those exact amounts deterministically.
+  const splitBreakdowns = new Map<string, {cash: number; bank: number}>();
+  result.sales.forEach((sale: any) => {
+    if (sale.paymentMethod !== 'Split' || !sale.id) return;
+    const stored = sale.paymentBreakdown || {};
+    let cash = Number(stored.Cash) || 0;
+    let bank =
+      (Number(stored.Card) || 0) +
+      (Number(stored['Mobile Transfer']) || 0) +
+      (Number(stored['Bank Transfer']) || 0);
+
+    if (cash <= 0 && bank <= 0 && typeof sale.notes === 'string') {
+      const readAmount = (label: string) => {
+        const match = sale.notes.match(new RegExp(`${label}:\\s*[^0-9-]*([0-9,]+(?:\\.[0-9]+)?)`, 'i'));
+        return match ? Number(match[1].replace(/,/g, '')) || 0 : 0;
+      };
+      cash = readAmount('Cash');
+      bank = readAmount('Card') + readAmount('Mobile Transfer') + readAmount('Bank Transfer');
+      if (cash > 0 || bank > 0) {
+        sale.paymentBreakdown = { Cash: cash, Card: readAmount('Card'), 'Mobile Transfer': readAmount('Mobile Transfer'), 'Bank Transfer': readAmount('Bank Transfer') };
+      }
+    }
+
+    if (cash > 0 || bank > 0) splitBreakdowns.set(String(sale.id), {cash, bank});
+  });
+
   // Cross-collection Historical Delivery Fee reconciliation
   const historicalSalesWithDelivery = result.sales.filter((s: any) => {
     const isHist = Boolean(
@@ -318,6 +345,17 @@ export function migrateSnapshot(stores: Record<string, any[]>): Record<string, a
       if (m.type === 'Sale Inflow' && m.referenceId && historicalSaleIds.has(m.referenceId)) return false;
       return true;
     });
+
+    splitBreakdowns.forEach(({cash, bank}, saleId) => {
+      const inflows = result.moneyMovements.filter(
+        (m: any) => m.type === 'Sale Inflow' && String(m.referenceId || '') === saleId,
+      );
+      const cashMovement = inflows.find((m: any) => m.destinationAccount === 'Physical Cash');
+      const bankMovement = inflows.find((m: any) => m.destinationAccount === 'Biz Account');
+      if (cashMovement) cashMovement.amount = cash;
+      if (bankMovement) bankMovement.amount = bank;
+    });
+    result.moneyMovements = result.moneyMovements.filter((m: any) => Number(m.amount) > 0);
   }
 
   return result;

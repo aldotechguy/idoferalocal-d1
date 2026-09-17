@@ -490,7 +490,9 @@ export const PosView: React.FC = () => {
           activePreOrderToFulfill.id,
           paymentMethod,
           currentUser?.displayName || 'Sales Clerk',
-          notesToSave || 'Fulfill via POS Checkout'
+          notesToSave || 'Fulfill via POS Checkout',
+          undefined,
+          paymentMethod === 'Split' ? { ...splitAmounts } : undefined
         );
       } catch (err) {
         return;
@@ -507,7 +509,11 @@ export const PosView: React.FC = () => {
         currentUser?.displayName || 'Sales Clerk',
         notesToSave,
         customCreatedAt,
-        deliveryFee
+        deliveryFee,
+        undefined,
+        undefined,
+        undefined,
+        paymentMethod === 'Split' ? { ...splitAmounts } : undefined
       );
     }
 
