@@ -1,7 +1,8 @@
 import React from 'react';
-import { Minus, Plus, Trash2, Package } from 'lucide-react';
+import { Trash2, Package } from 'lucide-react';
 import { useMall } from '../context/MallContext';
 import { formatNaira } from './mallUi';
+import { MallQuantityControl } from './MallQuantityControl';
 
 export const MallCartLines: React.FC = () => {
   const { cart, setCartQty } = useMall();
@@ -26,9 +27,7 @@ export const MallCartLines: React.FC = () => {
             <p className="text-[13px] font-bold line-clamp-2 leading-snug">{it.name}</p>
             <p className="text-xs font-black mt-0.5">{formatNaira(it.price)} <span className="font-semibold text-slate-400">x {it.qty}</span></p>
             <div className="mt-1.5 flex items-center gap-1.5">
-              <button type="button" onClick={() => setCartQty(it.productId, it.qty - 1)} className="w-7 h-7 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center" aria-label="Decrease"><Minus className="w-3.5 h-3.5" /></button>
-              <span className="w-6 text-center text-sm font-extrabold">{it.qty}</span>
-              <button type="button" onClick={() => setCartQty(it.productId, it.qty + 1)} className="w-7 h-7 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center" aria-label="Increase"><Plus className="w-3.5 h-3.5" /></button>
+              <MallQuantityControl value={it.qty} min={0} max={it.stock} onChange={(quantity) => setCartQty(it.productId, quantity)} compact label={`${it.name} quantity`} />
               <button type="button" onClick={() => setCartQty(it.productId, 0)} className="ml-auto p-1.5 text-slate-400 hover:text-rose-500" aria-label="Remove"><Trash2 className="w-4 h-4" /></button>
             </div>
           </div>

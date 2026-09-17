@@ -1,8 +1,9 @@
 import React from 'react';
-import { Minus, Plus, ShoppingCart, Truck, Package } from 'lucide-react';
+import { ShoppingCart, Truck, Package } from 'lucide-react';
 import { useMall } from '../context/MallContext';
 import { useNavigateMall } from '../hooks/useRoute';
 import { formatNaira } from './mallUi';
+import { MallQuantityControl } from './MallQuantityControl';
 
 export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
   const { products, cart, addToCart, refreshProducts } = useMall();
@@ -49,11 +50,7 @@ export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
             </div>
             <p className="mt-1 text-xs font-semibold text-slate-400">{product.available ? `${product.stock} in stock` : 'Out of stock'}</p>
             <div className="mt-4 flex items-center gap-2">
-              <div className="flex items-center gap-1.5">
-                <button type="button" onClick={() => setQty((q) => Math.max(1, q - 1))} className="w-10 h-10 rounded-xl border border-slate-200 dark:border-slate-700 flex items-center justify-center" aria-label="Decrease"><Minus className="w-4 h-4" /></button>
-                <span className="w-10 text-center text-base font-black">{qty}</span>
-                <button type="button" onClick={() => setQty((q) => Math.min(99, q + 1))} className="w-10 h-10 rounded-xl border border-slate-200 dark:border-slate-700 flex items-center justify-center" aria-label="Increase"><Plus className="w-4 h-4" /></button>
-              </div>
+              <MallQuantityControl value={qty} min={1} max={product.stock} onChange={setQty} label={`${product.name} quantity`} />
               <button
                 type="button" disabled={adding || !product.available}
                 onClick={async () => { setAdding(true); try { await addToCart(product.id, qty); } finally { setAdding(false); } }}

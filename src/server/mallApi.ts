@@ -35,7 +35,14 @@ END;`;
 
 const SELLABLE = `is_mall_listed = 1 AND status = 'Active' AND stock_qty > 0`;
 const CATALOG_COLUMNS = `id, sku, name, description, category_name, brand, unit, images_json, stock_qty,
-  COALESCE(mall_price_kobo, retail_price_kobo) AS price_kobo`;
+  retail_price_kobo, COALESCE(mall_price_kobo, retail_price_kobo) AS price_kobo,
+  COALESCE((
+    SELECT SUM(si.qty)
+    FROM sale_items si
+    JOIN sales sale ON sale.id = si.sale_id
+    WHERE si.product_id = products.id
+      AND LOWER(COALESCE(sale.status, '')) IN ('completed', 'paid', 'fulfilled', 'delivered')
+  ), 0) AS sold_qty`;
 
 const uuid = () => crypto.randomUUID();
 const nowIso = () => new Date().toISOString();
@@ -67,7 +74,9 @@ function publicProduct(r: any) {
     category: s(r.category_name),
     brand: s(r.brand),
     unit: s(r.unit, 'pcs'),
-    price: KoboToNaira(r.price_kobo),
+    price: n(r.price_kobo),
+    retailPriceKobo: n(r.retail_price_kobo),
+    sold: n(r.sold_qty),
     stock,
     image: images[0] || '',
     images,
@@ -161,14 +170,14 @@ async function readCart(exec: MallExecutor, cartId: string) {
       productId: s(r.product_id),
       name: s(r.name),
       unit: s(r.unit, 'pcs'),
-      price: KoboToNaira(r.price_kobo),
+      price: n(r.price_kobo),
       qty: n(r.qty),
       stock: n(r.stock_qty),
       image: (parseJsonArray(r.images_json)[0] as string) || '',
       available: sellable && n(r.qty) <= n(r.stock_qty),
     };
   });
-  const subtotalKobo = items.reduce((sum, it) => sum + Math.round(it.price * 100) * it.qty, 0);
+  const subtotalKobo = items.reduce((sum, it) => sum + it.price * it.qty, 0);
   return { items, subtotalKobo };
 }
 
@@ -182,7 +191,7 @@ async function addToCart(exec: MallExecutor, sessionId: string, body: any) {
   const productId = s(body?.productId);
   const qty = n(body?.qty, 1);
   if (!productId) fail(400, 'productId is required.');
-  if (!Number.isInteger(qty) || qty < 1 || qty > 99) fail(400, 'qty must be an integer between 1 and 99.');
+  if (!Number.isSafeInteger(qty) || qty < 1) fail(400, 'qty must be a positive whole number.');
 
   const rows = await exec.queryAll(
     `SELECT ${CATALOG_COLUMNS} FROM products WHERE id = ? AND ${SELLABLE} LIMIT 1`,
@@ -197,7 +206,7 @@ async function addToCart(exec: MallExecutor, sessionId: string, body: any) {
     [cartId, productId],
   );
   const stock = n((rows[0] as any).stock_qty);
-  const nextQty = Math.min(n((current[0] as any)?.qty) + qty, Math.max(stock, 1), 99);
+  const nextQty = Math.min(n((current[0] as any)?.qty) + qty, Math.max(stock, 1));
   await exec.runBatch([
     { sql: 'DELETE FROM mall_cart_items WHERE cart_id = ? AND product_id = ?', params: [cartId, productId] },
     { sql: 'INSERT INTO mall_cart_items (id, cart_id, product_id, variant_id, qty, unit_price_kobo) VALUES (?, ?, ?, NULL, ?, ?)', params: [`mci-${uuid()}`, cartId, productId, nextQty, n((rows[0] as any).price_kobo)] },
@@ -210,7 +219,7 @@ async function setCartQty(exec: MallExecutor, sessionId: string, body: any) {
   const productId = s(body?.productId);
   const qty = n(body?.qty, -1);
   if (!productId) fail(400, 'productId is required.');
-  if (!Number.isInteger(qty) || qty < 0 || qty > 99) fail(400, 'qty must be an integer between 0 and 99.');
+  if (!Number.isSafeInteger(qty) || qty < 0) fail(400, 'qty must be a non-negative whole number.');
 
   const cartId = await getOrCreateCartId(exec, sessionId);
   const stmts: MallStmt[] = [{ sql: 'DELETE FROM mall_cart_items WHERE cart_id = ? AND product_id = ?', params: [cartId, productId] }];

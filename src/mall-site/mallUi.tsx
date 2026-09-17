@@ -10,29 +10,6 @@ export function discountPct(p: { price: number; retailPriceKobo?: number }): num
   return Math.round(((p.retailPriceKobo - p.price) / p.retailPriceKobo) * 100);
 }
 
-export function soldCount(p: { id: string; stock: number }): number {
-  let h = 0;
-  for (let i = 0; i < p.id.length; i++) h = (h * 31 + p.id.charCodeAt(i)) >>> 0;
-  return 12 + (h % 900) + Math.min(400, Math.max(0, 60 - p.stock) * 8);
-}
-
-export function Stars({ seed }: { seed: string }) {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 33 + seed.charCodeAt(i)) >>> 0;
-  const rating = 3.6 + ((h % 14) / 10);
-  const full = Math.round(rating);
-  return (
-    <span className="flex items-center gap-0.5" aria-label={`${rating.toFixed(1)} stars`}>
-      {Array.from({ length: 5 }).map((_, i) => (
-        <svg key={i} viewBox="0 0 20 20" className={`w-3 h-3 ${i < full ? 'fill-amber-400' : 'fill-slate-200 dark:fill-slate-700'}`}>
-          <path d="M10 1.5l2.6 5.3 5.9.9-4.2 4.1 1 5.8L10 14.9 4.7 17.6l1-5.8L1.5 7.7l5.9-.9L10 1.5z" />
-        </svg>
-      ))}
-      <span className="ml-1 text-[10px] font-semibold text-slate-400">{rating.toFixed(1)}</span>
-    </span>
-  );
-}
-
 export const TRUST_ITEMS = [
   { icon: Truck, title: 'Fast Delivery', sub: 'Uyo & nationwide' },
   { icon: ShieldCheck, title: 'Secure Payments', sub: 'Pay on pickup' },

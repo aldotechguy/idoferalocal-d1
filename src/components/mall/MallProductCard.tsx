@@ -18,11 +18,11 @@ export const MallProductCard: React.FC<Props> = ({ product }) => {
 
   const inCart = cart?.items.find((i) => i.productId === product.id);
   const cartQty = inCart?.qty ?? 0;
-  const maxAdd = product.available ? Math.max(0, Math.min(99, (product.stock || 0) - (cartQty || 0))) : 0;
+  const maxAdd = product.available ? Math.max(0, (product.stock || 0) - (cartQty || 0)) : 0;
 
   const handleAdd = React.useCallback(async (qty: number) => {
     if (!product.available) return;
-    if (qty < 1 || qty > 99) return;
+    if (qty < 1 || qty > product.stock) return;
     setAdding(true);
     try {
       await addToCart(product.id, qty);
@@ -32,7 +32,7 @@ export const MallProductCard: React.FC<Props> = ({ product }) => {
   }, [product, addToCart]);
 
   const handleQtyChange = React.useCallback(async (next: number) => {
-    if (next < 0 || next > 99) return;
+    if (next < 0 || next > product.stock) return;
     if (next === cartQty) return;
     setAdding(true);
     try {
@@ -40,7 +40,7 @@ export const MallProductCard: React.FC<Props> = ({ product }) => {
     } finally {
       setAdding(false);
     }
-  }, [product.id, cartQty, setCartQty]);
+  }, [product.id, product.stock, cartQty, setCartQty]);
 
   const increment = () => {
     if (maxAdd < 1) return;

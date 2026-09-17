@@ -5,8 +5,11 @@ export type MallProduct = {
   category?: string;
   brand?: string;
   unit: string;
+  /** Canonical selling price from D1, in kobo. */
   price: number;
   retailPriceKobo?: number;
+  /** Quantity from canonical completed sales in D1. */
+  sold: number;
   stock: number;
   image: string;
   images?: string[];

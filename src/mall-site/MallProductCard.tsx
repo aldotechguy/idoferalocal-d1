@@ -1,9 +1,10 @@
 import React from 'react';
-import { ShoppingCart, Minus, Plus, Package } from 'lucide-react';
+import { ShoppingCart, Package } from 'lucide-react';
 import { useMall } from '../context/MallContext';
 import { useNavigateMall } from '../hooks/useRoute';
 import type { MallProduct } from '../types/mall';
-import { formatNaira, discountPct, soldCount, Stars } from './mallUi';
+import { formatNaira, discountPct } from './mallUi';
+import { MallQuantityControl } from './MallQuantityControl';
 
 export const MallProductCard: React.FC<{ product: MallProduct }> = ({ product }) => {
   const { cart, addToCart, setCartQty } = useMall();
@@ -14,9 +15,9 @@ export const MallProductCard: React.FC<{ product: MallProduct }> = ({ product })
   const pct = discountPct(product);
 
   const change = async (next: number) => {
-    if (next < 0 || next > 99) return;
+    if (next < 0 || next > product.stock) return false;
     setAdding(true);
-    try { await setCartQty(product.id, next); } finally { setAdding(false); }
+    try { return await setCartQty(product.id, next); } finally { setAdding(false); }
   };
 
   return (
@@ -39,21 +40,16 @@ export const MallProductCard: React.FC<{ product: MallProduct }> = ({ product })
           <span className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 truncate">{product.brand || product.category || product.unit}</span>
           <span className="block text-[13px] font-semibold text-slate-800 dark:text-slate-100 leading-snug line-clamp-2 min-h-[2.4em]">{product.name}</span>
         </button>
-        <Stars seed={product.id} />
         <div className="flex items-baseline gap-1.5 flex-wrap">
           <span className="text-[15px] font-black text-slate-900 dark:text-white">{formatNaira(product.price)}</span>
           {pct != null && product.retailPriceKobo != null && (
             <span className="text-[11px] text-slate-400 line-through">{formatNaira(product.retailPriceKobo)}</span>
           )}
         </div>
-        <p className="text-[10px] text-slate-400 font-medium">{soldCount(product)} sold • {product.available ? `${product.stock} left` : 'Unavailable'}</p>
+        <p className="text-[10px] text-slate-400 font-medium">{product.sold.toLocaleString('en-NG')} sold • {product.available ? `${product.stock.toLocaleString('en-NG')} left` : 'Unavailable'}</p>
         <div className="mt-auto pt-1.5">
           {qty > 0 ? (
-            <div className="flex items-center gap-1.5">
-              <button type="button" onClick={() => change(qty - 1)} disabled={adding} className="w-8 h-8 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-40" aria-label="Decrease"><Minus className="w-4 h-4" /></button>
-              <span className="w-7 text-center text-sm font-extrabold text-slate-900 dark:text-white">{qty}</span>
-              <button type="button" onClick={() => change(qty + 1)} disabled={adding} className="w-8 h-8 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-40" aria-label="Increase"><Plus className="w-4 h-4" /></button>
-            </div>
+            <MallQuantityControl value={qty} min={0} max={product.stock} onChange={change} disabled={adding} compact label={`${product.name} quantity`} />
           ) : (
             <button
               type="button" onClick={async () => { setAdding(true); try { await addToCart(product.id, 1); } finally { setAdding(false); } }}

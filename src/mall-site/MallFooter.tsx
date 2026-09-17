@@ -30,7 +30,7 @@ export const MallBottomNav: React.FC = () => {
               {it.label}
               {it.badge != null && it.badge > 0 && (
                 <span className="absolute top-1.5 right-1/2 translate-x-5 min-w-4 h-4 px-1 rounded-full bg-rose-500 text-white text-[9px] font-black flex items-center justify-center">
-                  {it.badge > 99 ? '99+' : it.badge}
+                  {it.badge.toLocaleString('en-NG')}
                 </span>
               )}
             </button>

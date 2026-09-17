@@ -1,7 +1,8 @@
 import React from 'react';
-import { Minus, Plus, Trash2, Package } from 'lucide-react';
+import { Trash2, Package } from 'lucide-react';
 import { useMall } from '../../context/MallContext';
 import type { MallCartItem } from '../../types/mall';
+import { MallQuantityControl } from '../../mall-site/MallQuantityControl';
 
 function toNaira(kobo: number): string {
   const naira = kobo / 100;
@@ -47,27 +48,7 @@ export const MallCartItemRow: React.FC<Props> = ({ item }) => {
         <p className="text-xs font-bold text-blue-600 dark:text-blue-400 mt-1">{toNaira(lineTotal)}</p>
 
         <div className="flex items-center gap-1.5 mt-2">
-          <button
-            type="button"
-            onClick={() => setQty(item.qty - 1)}
-            disabled={changing || item.qty <= 0}
-            className="w-7 h-7 rounded border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 flex items-center justify-center text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            aria-label="Decrease quantity"
-          >
-            <Minus className="w-3.5 h-3.5" />
-          </button>
-          <span className="w-6 text-center text-sm font-extrabold text-slate-900 dark:text-white">
-            {item.qty}
-          </span>
-          <button
-            type="button"
-            onClick={() => setQty(item.qty + 1)}
-            disabled={changing || item.qty >= 99}
-            className="w-7 h-7 rounded border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 flex items-center justify-center text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            aria-label="Increase quantity"
-          >
-            <Plus className="w-3.5 h-3.5" />
-          </button>
+          <MallQuantityControl value={item.qty} min={0} max={item.stock} onChange={setQty} disabled={changing} compact label={`${item.name} quantity`} />
           <div className="flex-1" />
           <button
             type="button"

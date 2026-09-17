@@ -26,8 +26,8 @@ export const MallCartToolbar: React.FC = () => {
       <ShoppingCart className="w-4 h-4" />
       <span className="hidden sm:inline">Cart</span>
       {itemCount > 0 && (
-        <span className="flex items-center justify-center w-5 h-5 rounded-full bg-blue-600 text-white text-[10px] font-extrabold">
-          {itemCount > 99 ? '99+' : itemCount}
+        <span className="flex items-center justify-center min-w-5 h-5 px-1 rounded-full bg-blue-600 text-white text-[10px] font-extrabold">
+          {itemCount.toLocaleString('en-NG')}
         </span>
       )}
     </button>

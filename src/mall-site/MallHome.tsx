@@ -5,7 +5,7 @@ import { MallHero } from './MallHero';
 import { MallTrustRow, MallHelpStrip } from './MallTrustRow';
 import { MallFlashSales, MallCategoryTiles, MallRail, RailIcons } from './MallSections';
 import { MallProductCard } from './MallProductCard';
-import { discountPct, soldCount } from './mallUi';
+import { discountPct } from './mallUi';
 
 export const MallHome: React.FC = () => {
   const { products, loading, refreshProducts } = useMall();
@@ -15,7 +15,7 @@ export const MallHome: React.FC = () => {
   }, [products]);
   const flash = list.filter((p) => discountPct(p) != null && p.available);
   const pool = flash.length >= 4 ? flash : list.filter((p) => p.available);
-  const top = React.useMemo(() => [...list].sort((a, b) => soldCount(b) - soldCount(a)), [list]);
+  const top = React.useMemo(() => [...list].sort((a, b) => b.sold - a.sold), [list]);
   const brands = React.useMemo(() => {
     const m = new Map<string, number>();
     list.forEach((p) => { if (p.brand) m.set(p.brand, (m.get(p.brand) || 0) + 1); });
