@@ -4,33 +4,40 @@ import { MallHero } from './MallHero';
 import { MallTrustRow, MallHelpStrip } from './MallTrustRow';
 import { MallFlashSales, MallCategoryTiles, MallRail, RailIcons } from './MallSections';
 import { MallBrowseGrid, fetchSearch } from './MallBrowseGrid';
+import { mallClient } from '../services/mallClient';
 
 export const MallHome: React.FC = () => {
-  const { products, loading } = useMall();
-  const list = products?.products ?? [];
+  const { products, order } = useMall();
+  const [sections, setSections] = React.useState<Awaited<ReturnType<typeof mallClient.home>> | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState(false);
+  const [retry, setRetry] = React.useState(0);
+  React.useEffect(() => {
+    let alive = true;
+    mallClient.ensureSession();
+    setLoading(true);
+    setError(false);
+    mallClient.home().then(data => { if (alive) setSections(data); })
+      .catch(() => { if (alive) setError(true); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [order, retry]);
   const cats = React.useMemo(() => {
     return (products?.categories ?? []).map((c) => (typeof c === 'string' ? { name: c, count: 0 } : c));
   }, [products]);
-  const top = React.useMemo(() => [...list].sort((a, b) => b.sold - a.sold), [list]);
-  const brands = React.useMemo(() => {
-    const m = new Map<string, number>();
-    list.forEach((p) => { if (p.brand) m.set(p.brand, (m.get(p.brand) || 0) + 1); });
-    return [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
-  }, [list]);
-  const brandProducts = brands.length ? list.filter((p) => p.brand === brands[0][0]) : [];
   return (
     <div className="space-y-5">
       <MallHero />
       <MallTrustRow />
-      <MallFlashSales products={list} loading={loading} />
+      {error && <div role="alert" className="text-sm text-slate-600 dark:text-slate-300">Featured sections could not load. <button type="button" className="underline font-bold" onClick={() => setRetry(value => value + 1)}>Retry sections</button></div>}
+      <MallFlashSales products={sections?.flashSales ?? []} loading={loading} />
       <div id="mall-categories">
-        <MallCategoryTiles categories={cats} />
+        {loading ? <MallRail title="For you" icon={RailIcons.RotateCcw} products={[]} loading limit={10} />
+          : sections?.buyAgain.length ? <MallRail title="Buy Again" sub="Your previous purchases, at today’s prices" icon={RailIcons.RotateCcw} products={sections.buyAgain} loading={false} limit={10} />
+          : <MallCategoryTiles categories={cats} />}
       </div>
-      <MallRail title="Top Sellers" sub="Most loved right now" icon={RailIcons.Trophy} products={top} loading={loading} />
-      {brands.length > 0 && (
-        <MallRail title={`${brands[0][0]} Official Store`} sub={`${brands[0][1]} products`} icon={RailIcons.Store} products={brandProducts} loading={loading} />
-      )}
-      <MallRail title="New Arrivals" sub="Fresh in the outlet" icon={RailIcons.Sparkles} products={[...list].reverse()} loading={loading} />
+      <MallRail title="Top Sellers" sub="Most loved right now" icon={RailIcons.Trophy} products={sections?.topSellers ?? []} loading={loading} />
+      <MallRail title="New Arrivals" sub="Recently restocked" icon={RailIcons.Sparkles} products={sections?.newArrivals ?? []} loading={loading} />
       <MallBrowseGrid title="Explore the Mall" sub="Browse our complete product catalog" fetchKey="catalog:all" fetchFn={fetchSearch('')} />
       <MallHelpStrip />
     </div>

@@ -821,6 +821,7 @@ export default {
         if (!actor) return json({error: 'Authentication required.'}, 401);
         return await handleStaffMallApi(request, {
           config: env,
+          imagesConfigured: !!env.MALL_IMAGES,
           queryAll: makeD1QueryAll(env),
           runBatch: async (stmts) => {
             const results = await env.DB.batch(toD1Statements(env, stmts));
@@ -833,6 +834,7 @@ export default {
         await ensureSchema(env);
         return await handleMallApi(request, {
           config: env,
+          imagesConfigured: !!env.MALL_IMAGES,
           clientIp: request.headers.get('cf-connecting-ip') || 'unknown',
           queryAll: makeD1QueryAll(env),
           runBatch: async (stmts) => {

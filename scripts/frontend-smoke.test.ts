@@ -6,6 +6,61 @@ import { computeMenuStyle, PORTAL_DROPDOWN_Z } from '../src/components/common/Po
 import { validateBuyer } from '../src/mall-site/useBuyerForm.ts';
 import { mallDeliveryFeeKobo, mallDeliveryZone } from '../src/shared/mallDelivery.ts';
 import { mallStockLabel } from '../src/shared/mallProductPresentation.ts';
+import { mallClient } from '../src/services/mallClient.ts';
+import { createMallSearchMatcher, mallOneTypo } from '../src/shared/mallSearch.ts';
+
+test('forgiving search handles spacing, word order and conservative typos', () => {
+  const product = { name: 'Spray Bottle 500 ml', category_name: 'Packaging', brand: 'Acme' };
+  for (const query of ['spraybottle', 'spray   bottle', 'bot tle', 'bottle spray', '500ml bottle', 'spray-bottle']) {
+    assert.ok(createMallSearchMatcher(query)(product) >= 60, query);
+  }
+  for (const query of ['botle', 'bottel', 'spray botle']) assert.equal(createMallSearchMatcher(query)(product), 30, query);
+  for (const query of ['5000ml bottle', '50ml bottle', 'spray bot', 'botle unrelated', '%%']) {
+    if (query === 'spray bot') assert.ok(createMallSearchMatcher(query)(product) >= 60);
+    else assert.equal(createMallSearchMatcher(query)(product), 0, query);
+  }
+  assert.equal(mallOneTypo('cat', 'cap'), false);
+  assert.equal(mallOneTypo('5000', '5001'), false);
+  assert.equal(createMallSearchMatcher('bottel')({ name: 'Box', description: 'Bottle' }), 0);
+  assert.ok(createMallSearchMatcher('bottle')({ name: 'Bottle' }) > createMallSearchMatcher('bottle')(product));
+});
+
+test('forgiving matching benchmark over 10000 catalog documents', () => {
+  const match = createMallSearchMatcher('spray bottel');
+  const start = performance.now();
+  let found = 0;
+  for (let i = 0; i < 10000; i++) if (match({ name: `Spray Bottle ${i} ml`, brand: 'Acme', category_name: 'Packaging' })) found++;
+  assert.equal(found, 10000);
+  console.info(`Search matching: 10000 documents in ${Math.round(performance.now() - start)}ms (local, excludes database/network).`);
+});
+
+test('mall catalog requests forward cancellation and encode live-search text', async () => {
+  const original = globalThis.fetch;
+  const controller = new AbortController();
+  let requested = '';
+  let signal: AbortSignal | null | undefined;
+  globalThis.fetch = async (url, options) => {
+    requested = String(url);
+    signal = options?.signal;
+    return new Response(JSON.stringify({ products: [], total: 0, categories: [] }));
+  };
+  try {
+    await mallClient.products({ q: 'bottles & jars', limit: 6 }, { signal: controller.signal });
+    const url = new URL(requested, 'http://test');
+    assert.equal(url.pathname, '/api/mall/products');
+    assert.equal(url.searchParams.get('q'), 'bottles & jars');
+    assert.equal(url.searchParams.get('limit'), '6');
+    assert.equal(signal, controller.signal);
+  } finally { globalThis.fetch = original; }
+});
+
+test('mall header exposes accessible cancellable live search without staff data', () => {
+  const source = fs.readFileSync('src/mall-site/MallHeaderSearch.tsx', 'utf8');
+  const header = fs.readFileSync('src/mall-site/MallHeader.tsx', 'utf8');
+  assert.match(header, /<MallHeaderSearch/);
+  for (const pattern of [/PortalDropdown/, /role="combobox"/, /role="listbox"/, /role="option"/, /aria-activedescendant/, /ArrowDown/, /ArrowUp/, /Escape/, /event.metaKey/, /controller.abort\(\)/, /!controller.signal.aborted/, /window.clearTimeout/, /result\?\.query === cleanQuery/, /View all results/, /Retry suggestions/]) assert.match(source, pattern);
+  assert.doesNotMatch(source, /useApp|AppContext|useAuth|\/api\/staff/);
+});
 
 test('Mall cards always show catalog stock independently of purchase eligibility', () => {
   assert.equal(mallStockLabel(250), '250 left');
@@ -17,6 +72,27 @@ test('Mall cards always show catalog stock independently of purchase eligibility
   const card = fs.readFileSync('src/mall-site/MallProductCard.tsx', 'utf8');
   assert.match(card, /\{product.unit\}.*\{mallStockLabel\(product.stock\)\}/);
   assert.doesNotMatch(card, /product.available && product.stock <= 10/);
+});
+
+test('homepage keeps ordered single-row carousels and the original catalog grid', () => {
+  const home = fs.readFileSync('src/mall-site/MallHome.tsx', 'utf8');
+  const sections = fs.readFileSync('src/mall-site/MallSections.tsx', 'utf8');
+  const carousel = fs.readFileSync('src/mall-site/MallCarousel.tsx', 'utf8');
+  const positions = ['<MallFlashSales', 'id="mall-categories"', 'title="Top Sellers"', 'title="New Arrivals"', 'title="Explore the Mall"'].map(text => home.indexOf(text));
+  assert.ok(positions.every((value, index) => value >= 0 && (index === 0 || value > positions[index - 1])));
+  assert.match(home, /sections\?\.buyAgain.length/);
+  assert.match(home, /title="Buy Again"[^\n]*limit=\{10\}/);
+  assert.doesNotMatch(home, /Official Store|\.reverse\(/);
+  assert.match(sections, /categories.slice\(0, 10\)/);
+  assert.match(sections, /discountPct\(p\) != null\).slice\(0, 10\)/);
+  assert.match(sections, /limit = 12/);
+  assert.doesNotMatch(sections, /grid-cols/);
+  assert.match(carousel, /flex-nowrap/);
+  assert.match(carousel, /snap-mandatory/);
+  assert.match(carousel, /aria-controls/);
+  assert.match(carousel, /ArrowLeft/);
+  assert.match(carousel, /prefers-reduced-motion/);
+  assert.doesNotMatch(carousel, /setInterval/);
 });
 
 test('public routes preserve category, product and search parameters', () => {

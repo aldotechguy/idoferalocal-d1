@@ -103,6 +103,7 @@ export type MallCategory = {
 };
 
 export type MallProductsResponse = {
+  search?: { query: string; approximate: boolean };
   products: MallProduct[];
   categories: (string | MallCategory)[];
   /** Brand facets for the current search/category scope (full set, not just this page). */

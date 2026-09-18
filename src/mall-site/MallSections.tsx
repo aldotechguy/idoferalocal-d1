@@ -1,9 +1,10 @@
 import React from 'react';
-import { Zap, ChevronRight, LayoutGrid, Store, Trophy, Sparkles } from 'lucide-react';
+import { Zap, LayoutGrid, Store, Trophy, Sparkles, RotateCcw } from 'lucide-react';
 import type { MallProduct } from '../types/mall';
 import { useNavigateMall } from '../hooks/useRoute';
 import { MallProductCard } from './MallProductCard';
 import { SectionHeader, ProductCardSkeleton, discountPct } from './mallUi';
+import { MallCarousel } from './MallCarousel';
 
 function useCountdown() {
   const [left, setLeft] = React.useState('');
@@ -27,8 +28,7 @@ function useCountdown() {
 
 export const MallFlashSales: React.FC<{ products: MallProduct[]; loading: boolean }> = ({ products, loading }) => {
   const left = useCountdown();
-  const deals = products.filter((p) => discountPct(p) != null && p.available).slice(0, 12);
-  const go = useNavigateMall();
+  const deals = products.filter((p) => discountPct(p) != null).slice(0, 10);
   if (!loading && deals.length === 0) return null;
   return (
     <section className="mall-flash rounded-2xl p-3 sm:p-4">
@@ -38,13 +38,12 @@ export const MallFlashSales: React.FC<{ products: MallProduct[]; loading: boolea
           <h2 className="text-base sm:text-lg font-black tracking-tight">Flash Sales</h2>
           <span className="text-[11px] sm:text-xs font-bold bg-black/30 px-2 py-1 rounded-lg tabular-nums">{left}</span>
         </div>
-        <button type="button" onClick={() => go('/')} className="text-xs font-extrabold inline-flex items-center gap-0.5 hover:underline">See All <ChevronRight className="w-3.5 h-3.5" /></button>
       </div>
-      <div className="flex gap-2.5 overflow-x-auto pb-1 -mx-1 px-1 snap-x">
+      <MallCarousel label="Flash Sales">
         {loading
-          ? Array.from({ length: 6 }).map((_, i) => <div key={i} className="w-36 sm:w-44 shrink-0 snap-start"><ProductCardSkeleton /></div>)
-          : deals.map((p) => <div key={p.id} className="w-36 sm:w-44 shrink-0 snap-start"><MallProductCard product={p} /></div>)}
-      </div>
+          ? Array.from({ length: 6 }).map((_, i) => <ProductCardSkeleton key={i} />)
+          : deals.map((p) => <MallProductCard key={p.id} product={p} />)}
+      </MallCarousel>
     </section>
   );
 };
@@ -55,12 +54,12 @@ export const MallCategoryTiles: React.FC<{ categories: { name: string; count: nu
   return (
     <section>
       <SectionHeader icon={LayoutGrid} title="Shop by Category" sub="Everything in the outlet, grouped" />
-      <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-2.5">
-        {categories.slice(0, 12).map((c) => (
+      <MallCarousel label="Shop by Category">
+        {categories.slice(0, 10).map((c) => (
           <button
             key={c.name} type="button"
             onClick={() => go(`/category/${encodeURIComponent(c.name)}`)}
-            className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3.5 text-center hover:border-blue-400 hover:shadow-md transition-all group"
+            className="w-full rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3.5 text-center hover:border-blue-400 hover:shadow-md transition-all group"
           >
             <span className="mx-auto w-11 h-11 rounded-2xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center font-black text-lg group-hover:scale-110 transition-transform">
               {c.name.charAt(0).toUpperCase()}
@@ -69,25 +68,25 @@ export const MallCategoryTiles: React.FC<{ categories: { name: string; count: nu
             <span className="block text-[10px] text-slate-400 font-semibold">{c.count} item{c.count === 1 ? '' : 's'}</span>
           </button>
         ))}
-      </div>
+      </MallCarousel>
     </section>
   );
 };
 
-export function MallRail({ title, sub, icon, products, loading }: {
-  title: string; sub?: string; icon: React.ElementType; products: MallProduct[]; loading: boolean;
+export function MallRail({ title, sub, icon, products, loading, limit = 12 }: {
+  title: string; sub?: string; icon: React.ElementType; products: MallProduct[]; loading: boolean; limit?: number;
 }) {
   if (!loading && products.length === 0) return null;
   return (
     <section>
-      <SectionHeader icon={icon} title={title} sub={sub} actionLabel="See All" />
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2.5 sm:gap-3">
+      <SectionHeader icon={icon} title={title} sub={sub} />
+      <MallCarousel label={title}>
         {loading
           ? Array.from({ length: 6 }).map((_, i) => <ProductCardSkeleton key={i} />)
-          : products.slice(0, 12).map((p) => <MallProductCard key={p.id} product={p} />)}
-      </div>
+          : products.slice(0, limit).map((p) => <MallProductCard key={p.id} product={p} />)}
+      </MallCarousel>
     </section>
   );
 }
 
-export const RailIcons = { Store, Trophy, Sparkles };
+export const RailIcons = { Store, Trophy, Sparkles, RotateCcw };

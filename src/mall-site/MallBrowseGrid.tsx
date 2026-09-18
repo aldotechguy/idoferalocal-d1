@@ -11,6 +11,7 @@ const PAGE_SIZE = 10;
 export type MallCatalogParams = { limit: number; offset: number; sort: string; brand?: string };
 export type MallCatalogFetcher = (params: MallCatalogParams) => Promise<{
   products: MallProduct[]; total: number; brands?: MallCategory[];
+  search?: { query: string; approximate: boolean };
 }>;
 
 const SORT_OPTIONS = [
@@ -35,6 +36,7 @@ export const MallBrowseGrid: React.FC<{
   const [items, setItems] = React.useState<MallProduct[]>([]);
   const [total, setTotal] = React.useState(0);
   const [brands, setBrands] = React.useState<MallCategory[]>([]);
+  const [search, setSearch] = React.useState<{ query: string; approximate: boolean }>();
   const [sort, setSort] = React.useState('relevance');
   const [brand, setBrand] = React.useState('all');
   const [loading, setLoading] = React.useState(true);
@@ -73,6 +75,7 @@ export const MallBrowseGrid: React.FC<{
         nextOffset.current = result.products.length;
         setTotal(result.total);
         setBrands(result.brands ?? []);
+        setSearch(result.search);
         setLoading(false);
       })
       .catch((reason) => {
@@ -118,6 +121,7 @@ export const MallBrowseGrid: React.FC<{
       <div className="mb-3">
         <h1 className="text-lg sm:text-xl font-black text-slate-900 dark:text-white tracking-tight">{title}</h1>
         {sub && <p className="text-xs sm:text-sm text-slate-400 font-medium">{sub}</p>}
+        {!loading && !error && total > 0 && search?.approximate && <p role="status" className="text-sm text-amber-700 dark:text-amber-400">Similar matches for “{search.query}”</p>}
         {!loading && !error && <p role="status" className="text-[11px] text-slate-400 mt-0.5">Showing {items.length} of {total} product{total === 1 ? '' : 's'}</p>}
       </div>
       {!loading && !error && total > 0 && <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200 bg-white/75 p-3">

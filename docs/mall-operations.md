@@ -190,19 +190,27 @@ Product images no longer live as base64 `data:` URLs in the database. `AddProduc
 
 Storage backends: the Node server writes to disk under `MALL_IMAGE_DIR`
 (default `data/mall-images`); the Worker uses the R2 binding `MALL_IMAGES`.
-For Cloudflare deployment, create the bucket and bind it, e.g.:
+For the live `mall` Cloudflare Worker environment, the existing bucket is `idomall`.
+Bind it as shown below; there is no need to create it again. For a new account:
 
 ```bash
-wrangler r2 bucket create idofera-mall-images
+wrangler r2 bucket create idomall
 ```
 
 and in `wrangler.toml`:
 
 ```toml
-[[r2_buckets]]
+[[env.mall.r2_buckets]]
 binding = "MALL_IMAGES"
-bucket_name = "idofera-mall-images"
+bucket_name = "idomall"
 ```
+
+The `mall` environment is now the live target: Worker `idofera-mall-preview`
+(existing name retained), database `idofera`, and image bucket `idomall`.
+Use `--env mall` for deployment. It is no longer a disposable preview.
+The default target remains separate. Future preview environments must use isolated
+databases and buckets. Build frontend assets with `npx vite build` before deploying;
+do not upload the Node server bundle as a public static asset.
 
 Images uploaded before this change (base64 in `images_json`) remain renderable,
 but a listing that still contains any `data:` URL is blocked from publishing

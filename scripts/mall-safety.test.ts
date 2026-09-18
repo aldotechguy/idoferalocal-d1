@@ -79,6 +79,57 @@ async function fixture(runtime: 'node' | 'worker') {
 }
 
 for (const runtime of ['node', 'worker'] as const) {
+  test(`${runtime}: homepage rows use the whole catalog and browser-scoped paid history`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    const home = async (sid = session) => {
+      const response = await f.send(new Request('http://test/api/mall/home', { headers: { 'x-mall-session': sid } }));
+      assert.equal(response.status, 200);
+      return response.json() as Promise<any>;
+    };
+    for (let i = 0; i < 75; i++) {
+      f.db.prepare(`INSERT INTO products(id,sku,name,stock_qty,status,retail_price_kobo,mall_price_kobo,created_at,updated_at)
+        VALUES(?,?,?,0,'Active',10000,9000,?,?)`).run(`home-${i}`, `home-${i}`, `Home ${i}`, `2026-01-${String(i % 28 + 1).padStart(2, '0')}`, '2026-01-01');
+    }
+    f.db.exec("UPDATE products SET created_at='2020-01-01' WHERE id='p'");
+    const initial = await home();
+    assert.equal(initial.flashSales.length, 10);
+    assert.equal(initial.topSellers.length, 12);
+    assert.deepEqual(initial.newArrivals, [], 'Creation dates alone do not qualify as restocks');
+    const movement = (id: string, product: string, type: string, at: string, qty = 5) => f.db.prepare(
+      'INSERT INTO stock_movements(id,product_id,type,qty,prev_stock,new_stock,created_at) VALUES(?,?,?,?,0,?,?)'
+    ).run(id, product, type, qty, qty, at);
+    for (let i = 0; i < 15; i++) movement(`restock-${i}`, `home-${i}`, 'Incoming', `2026-02-${String(i + 1).padStart(2, '0')}`);
+    movement('repeat-restock', 'home-0', 'Incoming', '2026-03-01');
+    movement('return', 'home-70', 'Returned', '2026-04-01');
+    movement('adjustment', 'home-71', 'Adjustment', '2026-04-01');
+    movement('zero-receipt', 'home-72', 'Incoming', '2026-04-01', 0);
+    movement('negative-receipt', 'home-73', 'Incoming', '2026-04-01', -1);
+    f.db.exec("UPDATE products SET status='Archived' WHERE id='home-14'; UPDATE products SET updated_at='2026-05-01' WHERE id='home-1'");
+    const restocked = (await home()).newArrivals;
+    assert.deepEqual(restocked.map((p: any) => p.id), ['home-0', ...Array.from({ length: 11 }, (_, i) => `home-${13 - i}`)]);
+    assert.equal(new Set(restocked.map((p: any) => p.id)).size, 12);
+    assert.ok(restocked.every((p: any) => !p.available), 'Restocked products remain visible after selling out');
+    assert.ok(initial.flashSales.every((p: any) => p.stock === 0 && !p.available));
+    assert.deepEqual(initial.buyAgain, []);
+    assert.equal((await f.checkout()).status, 201);
+    assert.deepEqual((await home()).buyAgain, [], 'Pending orders are not purchases');
+    assert.equal((await f.pay()).status, 200);
+    f.db.exec("UPDATE products SET stock_qty=0, mall_price_kobo=12345 WHERE id='p'");
+    const purchased = await home();
+    assert.equal(purchased.buyAgain.length, 1);
+    assert.equal(purchased.buyAgain[0].id, 'p');
+    assert.equal(purchased.buyAgain[0].price, 12345);
+    assert.equal(purchased.buyAgain[0].available, false);
+    assert.equal(purchased.topSellers[0].id, 'p');
+    assert.deepEqual((await home('another-browser-session')).buyAgain, []);
+    f.db.exec("UPDATE products SET status='Archived' WHERE id='p'");
+    assert.deepEqual((await home()).buyAgain, []);
+    assert.ok((await home()).topSellers.every((p: any) => p.id !== 'p'));
+    f.db.exec("UPDATE products SET status='Active' WHERE id='p'; UPDATE mall_orders SET status='refunded'");
+    assert.deepEqual((await home()).buyAgain, []);
+    assert.equal((await f.send(new Request('http://test/api/mall/home'))).status, 400);
+  });
+
   test(`${runtime}: unpriced products stay visible but cannot be purchased`, async t => {
     const f = await fixture(runtime); t.after(() => f.db.close());
     f.db.exec('UPDATE products SET retail_price_kobo=0');
@@ -100,6 +151,57 @@ for (const runtime of ['node', 'worker'] as const) {
     const priced: any = await (await f.send(new Request('http://test/api/mall/products/p'))).json();
     assert.equal(priced.product.available, true);
   });
+  test(`${runtime}: forgiving search ranks, paginates, filters and labels typo fallback`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    f.db.exec("UPDATE products SET name='Spray Bottle 500 ml', brand='Acme', category_name='Packaging'; INSERT INTO products(id,sku,name,brand,stock_qty,status,is_mall_listed,retail_price_kobo,created_at,updated_at) VALUES('p2','p2','Spray Bottle','Other',0,'Active',1,500,'now','now')");
+    const search = async (query: string, extra = '') => {
+      const response = await f.send(new Request(`http://test/api/mall/products?q=${encodeURIComponent(query)}${extra}`));
+      assert.equal(response.status, 200);
+      return await response.json() as any;
+    };
+    for (const query of ['spraybottle', 'bottle spray', 'spray   bottle', 'bot tle']) {
+      const result = await search(query);
+      assert.equal(result.total, 2, query);
+      assert.equal(result.search.approximate, false);
+    }
+    const exact = await search('Spray Bottle', '&limit=1');
+    assert.equal(exact.products[0].id, 'p2');
+    assert.equal(exact.total, 2);
+    assert.equal((await search('Spray Bottle', '&limit=1&offset=1')).products[0].id, 'p');
+    const fuzzy = await search('spray bottel');
+    assert.equal(fuzzy.total, 2);
+    assert.equal(fuzzy.search.approximate, true);
+    assert.equal(fuzzy.brands.length, 2);
+    assert.equal((await search('spray bottel', '&brand=Acme')).total, 1);
+    assert.equal((await search('spray bottel', '&inStock=1')).total, 1);
+    assert.equal((await search('500ml botle')).total, 1);
+    assert.equal((await search('5000ml bottle')).total, 0);
+    assert.equal((await search('spraybottle', '&sort=price_asc')).products[0].id, 'p2');
+    f.db.exec("UPDATE products SET name='Spray Bottel' WHERE id='p2'");
+    const strong = await search('spray bottel');
+    assert.equal(strong.total, 1);
+    assert.equal(strong.search.approximate, false);
+  });
+
+  test(`${runtime}: live search matches categories and escapes wildcard characters`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    f.db.exec("UPDATE products SET category_name='Special Bottles 100%_safe', stock_qty=0");
+    for (const q of ['special bottles', '100%_safe']) {
+      const response = await f.send(new Request(`http://test/api/mall/products?q=${encodeURIComponent(q)}&limit=6`));
+      assert.equal(response.status, 200);
+      const result: any = await response.json();
+      assert.equal(result.total, 1);
+      assert.equal(result.products[0].id, 'p');
+      assert.equal(result.products[0].available, false);
+      assert.equal(result.products[0].costPrice, undefined);
+    }
+    const unmatched: any = await (await f.send(new Request('http://test/api/mall/products?q=100X'))).json();
+    assert.equal(unmatched.total, 0);
+    f.db.exec("UPDATE products SET status='Archived'");
+    const archived: any = await (await f.send(new Request('http://test/api/mall/products?q=bottles'))).json();
+    assert.equal(archived.total, 0);
+  });
+
   test(`${runtime}: catalog, direct detail, description, pagination and cart concurrency`,async t=>{
     const f=await fixture(runtime);t.after(()=>f.db.close());
     f.db.exec("UPDATE products SET mall_description='Public description',mall_price_kobo=12000; INSERT INTO products(id,sku,name,stock_qty,status,is_mall_listed,retail_price_kobo,created_at,updated_at) VALUES('hidden','hidden','Hidden',10,'Active',0,100,'now','now')");

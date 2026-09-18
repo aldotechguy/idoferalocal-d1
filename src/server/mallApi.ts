@@ -16,6 +16,7 @@
  */
 import { KoboToNaira, parseJsonArray, s, n } from './relationalMapper.js';
 import { hasMallPrice } from '../shared/mallProductPresentation.js';
+import { createMallSearchMatcher } from '../shared/mallSearch.js';
 import { MALL_DELIVERY_ZONE_IDS, mallDeliveryFeeKobo, mallDeliveryLabel, mallDeliveryZone } from '../shared/mallDelivery.js';
 import { assertSql } from './mallSafety.js';
 import { normalizeMallPhone, normalizedPhoneSql } from '../shared/mallPhone.js';
@@ -147,16 +148,41 @@ async function getCatalog(exec: MallExecutor, url: URL) {
   // set (search + category), not just the current page.
   const base: string[] = [VISIBLE];
   const baseParams: any[] = [];
-  if (q) {
-    const like = `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
-    base.push(`(name LIKE ? ESCAPE '\\' OR COALESCE(NULLIF(mall_description, ''), description) LIKE ? ESCAPE '\\' OR brand LIKE ? ESCAPE '\\')`);
-    baseParams.push(like, like, like);
-  }
   if (category) {
     base.push('category_name = ?');
     baseParams.push(category);
   }
   const whereBase = base.join(' AND ');
+
+  if (q) {
+    // Scan only searchable public text, not images, prices or sales aggregates.
+    // JSON binds keep large match sets within both runtimes' parameter limits.
+    const candidates = await exec.queryAll(`SELECT id, name, brand, category_name, stock_qty,
+      COALESCE(NULLIF(mall_description, ''), description) AS description
+      FROM products WHERE ${whereBase} ORDER BY id`, baseParams);
+    const match = createMallSearchMatcher(q);
+    const scored = candidates.map(row => ({ row, score: match(row) })).filter(item => item.score > 0);
+    const strong = scored.some(item => item.score >= 60);
+    const matches = scored.filter(item => !strong || item.score >= 60).sort((a, b) => b.score - a.score);
+    const brandCounts = new Map<string, number>();
+    for (const { row } of matches) if (row.brand) brandCounts.set(row.brand, (brandCounts.get(row.brand) || 0) + 1);
+    const ids = matches.filter(({ row }) => (!brandFilter || row.brand === brandFilter) &&
+      (rawInStock !== '1' || n(row.stock_qty) > 0)).map(({ row }) => row.id);
+    const encodedIds = JSON.stringify(ids);
+    const order = sortKey === 'relevance'
+      ? `(SELECT CAST(key AS INTEGER) FROM json_each(?) WHERE value = products.id)` : sort;
+    const rows = ids.length ? await exec.queryAll(
+      `SELECT ${CATALOG_COLUMNS} FROM products WHERE ${VISIBLE} AND id IN (SELECT value FROM json_each(?))
+       ORDER BY ${order} LIMIT ? OFFSET ?`,
+      [encodedIds, ...(sortKey === 'relevance' ? [encodedIds] : []), limit, offset],
+    ) : [];
+    const categories = await exec.queryAll(`SELECT category_name AS name, COUNT(*) AS count FROM products WHERE ${VISIBLE} GROUP BY category_name ORDER BY count DESC, name ASC`);
+    return json({ products: rows.map(publicProduct), total: ids.length, limit, offset, sort: sortKey,
+      search: { query: q, approximate: !strong && matches.length > 0 },
+      categories: categories.map(row => ({ name: s(row.name, 'Uncategorized'), count: n(row.count) })),
+      brands: [...brandCounts].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
+    });
+  }
 
   const filters = [...base];
   const params = [...baseParams];
@@ -189,6 +215,32 @@ async function getCatalog(exec: MallExecutor, url: URL) {
     offset,
     sort: sortKey,
   });
+}
+
+async function getHomeSections(exec: MallExecutor, session: string) {
+  // Supplier receipts and manual restocks use Incoming; returns and corrections
+  // must not make an old product appear newly restocked.
+  const lastRestock = `SELECT MAX(sm.created_at) FROM stock_movements sm
+    WHERE sm.product_id = products.id AND sm.type = 'Incoming'
+      AND sm.qty > 0 AND sm.new_stock > sm.prev_stock`;
+  const history = `SELECT MAX(o.created_at) FROM mall_order_items oi
+    JOIN mall_orders o ON o.id = oi.mall_order_id
+    WHERE oi.product_id = products.id
+      AND o.status NOT IN ('cancelled', 'refunded')
+      AND (o.status = 'completed' OR EXISTS (SELECT 1 FROM payments pay WHERE pay.order_id = o.id AND pay.status = 'paid'))
+      AND EXISTS (SELECT 1 FROM mall_checkout_attempts a WHERE a.order_id = o.id AND a.session_id = ?)`;
+  const [flash, top, newest, again] = await Promise.all([
+    exec.queryAll(`SELECT ${CATALOG_COLUMNS} FROM products WHERE ${VISIBLE}
+      AND ${effectivePrice('products')} > 0 AND ${effectivePrice('products')} < retail_price_kobo
+      ORDER BY ${CATALOG_SORTS.relevance} LIMIT 10`),
+    exec.queryAll(`SELECT ${CATALOG_COLUMNS} FROM products WHERE ${VISIBLE} ORDER BY ${CATALOG_SORTS.popular} LIMIT 12`),
+    exec.queryAll(`SELECT ${CATALOG_COLUMNS}, (${lastRestock}) AS last_restock FROM products
+      WHERE ${VISIBLE} AND (${lastRestock}) IS NOT NULL ORDER BY last_restock DESC, id ASC LIMIT 12`),
+    exec.queryAll(`SELECT ${CATALOG_COLUMNS}, (${history}) AS last_purchase FROM products
+      WHERE ${VISIBLE} AND (${history}) IS NOT NULL ORDER BY last_purchase DESC, id ASC LIMIT 10`, [session, session]),
+  ]);
+  return json({ flashSales: flash.map(publicProduct), topSellers: top.map(publicProduct),
+    newArrivals: newest.map(publicProduct), buyAgain: again.map(publicProduct) });
 }
 
 async function getProduct(exec: MallExecutor, id: string) {
@@ -578,6 +630,11 @@ async function routeMallApi(request: Request, exec: MallExecutor): Promise<Respo
   if (pathname.startsWith('/orders')) {
     if (methodName !== 'GET') return json({ error: 'Only GET is supported.' }, 405);
     return await getOrdersByPhone(exec, new URL(request.url, 'http://localhost'));
+  }
+
+  if (pathname === '/home') {
+    if (methodName !== 'GET') return json({ error: 'Only GET is supported.' }, 405);
+    return await getHomeSections(exec, sessionFrom(request));
   }
 
   if (pathname.startsWith('/products/')) {

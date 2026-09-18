@@ -9,8 +9,10 @@ crons = ["*/5 * * * *"]
 [observability]
 enabled = true
 
-[site]
-bucket = "./dist"
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+run_worker_first = true
 
 [[r2_buckets]]
 binding = "MALL_IMAGES"
@@ -21,11 +23,15 @@ binding = "DB"
 database_name = "idofera-d1"
 database_id = "3e95a550-a091-490b-819d-f0acb7ea8dd8"
 
-# Unified Mall branch preview env -> new proper relational D1 `idofera`.
+# Live Mall target: shortened public name, backed by relational D1 `idofera`.
 # Usage: `npx wrangler dev --env mall` / `npx wrangler deploy --env mall`
-# NOTE: replace database_id with the real id after `npx wrangler d1 create idofera`.
 [env.mall]
-name = "idofera-mall-preview"
+name = "idomall"
+
+[env.mall.assets]
+directory = "./dist"
+binding = "ASSETS"
+run_worker_first = true
 
 [env.mall.triggers]
 crons = ["*/5 * * * *"]
@@ -35,9 +41,8 @@ binding = "DB"
 database_name = "idofera"
 database_id = "3a3eb157-5aa5-419a-a8ce-2eade2afc436"
 
-# #14 — durable product images. Create the preview bucket before deploying:
-#   npx wrangler r2 bucket create idofera-mall-images-preview
+# Live product-image bucket. This environment is no longer disposable preview.
 [[env.mall.r2_buckets]]
 binding = "MALL_IMAGES"
-bucket_name = "idofera-mall-images-preview"
+bucket_name = "idomall"
 

@@ -145,11 +145,14 @@ export function clearBuyerProfile(): void {
 }
 
 export const mallClient = {
+  home: () => fetchMall('/home') as Promise<{
+    flashSales: MallProduct[]; topSellers: MallProduct[]; newArrivals: MallProduct[]; buyAgain: MallProduct[];
+  }>,
   health: () => fetchMall('/health') as Promise<{ ok: boolean; routes: string[] }>,
   configuration: () => fetchMall('/config'),
   product: (id: string) => fetchMall(`/products/${encodeURIComponent(id)}`) as Promise<{product:MallProduct}>,
 
-  products: (params?: { q?: string; category?: string; brand?: string; inStock?: 0 | 1; sort?: string; limit?: number; offset?: number }) => {
+  products: (params?: { q?: string; category?: string; brand?: string; inStock?: 0 | 1; sort?: string; limit?: number; offset?: number }, options?: { signal?: AbortSignal }) => {
     const qs = new URLSearchParams();
     if (params?.q) qs.set('q', params.q);
     if (params?.category) qs.set('category', params.category);
@@ -159,7 +162,8 @@ export const mallClient = {
     if (params?.limit != null) qs.set('limit', String(params.limit));
     if (params?.offset != null) qs.set('offset', String(params.offset));
     const q = qs.toString();
-    return fetchMall(`/products${q ? '?' + q : ''}`) as Promise<{
+    return fetchMall(`/products${q ? '?' + q : ''}`, options) as Promise<{
+      search?: { query: string; approximate: boolean };
       products: MallProduct[];
       categories: (string | { name: string; count: number })[];
       brands?: { name: string; count: number }[];
