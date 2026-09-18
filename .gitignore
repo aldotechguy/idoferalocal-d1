@@ -18,3 +18,5 @@ coverage/
 tmp_worker_build/
 tmp_*.txt
 *.err
+# Local wrangler/miniflare dev state (recreated by `wrangler dev`)
+.wrangler/

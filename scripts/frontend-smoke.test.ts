@@ -118,6 +118,14 @@ test('staff routes are deep-linkable', () => {
   assert.deepEqual(parseRoute('/labs', ''), { surface: 'staff', staffPage: undefined });
 });
 
+test('staff login opens the labs workspace via a full-page deep link', () => {
+  const footer = fs.readFileSync('src/mall-site/MallFooter.tsx', 'utf8');
+  // Full-page navigation (not client-side go()) so the staff app boots fresh;
+  // the worker/express SPA fallback must then serve index.html for /labs.
+  assert.match(footer, /window\.location\.href = '\/labs'/);
+  assert.deepEqual(parseRoute('/labs', ''), { surface: 'staff', staffPage: undefined });
+});
+
 test('legacy staff routes remain recognizable for canonical redirects', () => {
   assert.deepEqual(parseRoute('/app/pos', ''), { surface: 'staff', staffPage: 'pos', legacyPath: true });
   assert.deepEqual(parseRoute('/app', ''), { surface: 'staff', staffPage: undefined, legacyPath: true });
