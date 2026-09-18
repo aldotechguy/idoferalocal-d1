@@ -1,12 +1,12 @@
 /**
- * #10 — Staff Mall publishing workflow.
+ * #10 — Staff Mall merchandising. Active status controls visibility, not approval.
  *
- * Publish/unpublish, Mall price, Mall description, featured/display ordering and
+ * Mall price, Mall description, featured/display ordering and
  * an optional promotional window, all validated on the SERVER (never trusting the
  * editor) and previewed exactly as the storefront would render them.
  *
  * Price rules are enforced against `min_selling_price_kobo`, so a listing can never
- * be published below the product floor price. The promo window uses one normalized
+ * be saved below the product floor price. The promo window uses one normalized
  * ISO-8601 representation, which the catalog's parameter-free "now" compares against
  * lexically.
  */
@@ -79,7 +79,7 @@ function listingView(row: any) {
     mallPriceKobo: row.mall_price_kobo == null ? null : n(row.mall_price_kobo),
     minimumSellingPriceKobo: n(row.min_selling_price_kobo),
     publicPriceKobo: n(row.public_price_kobo), promoActive: n(row.promo_active) === 1,
-    listed: n(row.is_mall_listed) === 1, featured: n(row.mall_featured) === 1,
+    visibleOnMall: row.status === 'Active', featured: n(row.mall_featured) === 1,
     displayOrder: row.mall_display_order == null ? null : n(row.mall_display_order),
     promoPriceKobo: row.mall_promo_price_kobo == null ? null : n(row.mall_promo_price_kobo),
     promoStart: s(row.mall_promo_start) || null, promoEnd: s(row.mall_promo_end) || null,
@@ -96,16 +96,16 @@ function publicPreview(row: any) {
     description: listing.mallDescription || listing.internalDescription,
     category: listing.category, brand: listing.brand, unit: listing.unit,
     price: listing.publicPriceKobo, retailPriceKobo: listing.retailPriceKobo,
-    image: listing.images[0] || '', images: listing.images, available: listing.stock > 0,
+    image: listing.images[0] || '', images: listing.images, available: listing.productStatus === 'Active' && listing.stock > 0 && Number.isSafeInteger(listing.publicPriceKobo) && listing.publicPriceKobo > 0,
     featured: listing.featured, promoActive: listing.promoActive,
-    visibleOnMall: listing.productStatus !== 'Archived',
+    visibleOnMall: listing.productStatus === 'Active',
   };
 }
 
 /** Validation runs on the PROPOSED listing state so errors match exactly what staff typed. */
 function validateListing(row: any, input: ListingInput) {
   const fields: Record<string, string> = {};
-  const blockPublish: string[] = [];
+  const issues: string[] = [];
   const images = cleanImages(row.images_json);
   const retail = n(row.retail_price_kobo);
   const floor = n(row.min_selling_price_kobo);
@@ -159,29 +159,22 @@ function validateListing(row: any, input: ListingInput) {
     } else displayOrder = candidate;
   }
 
-  // --- Publish blockers: anything that would make a live listing unsafe -----
-  if (status !== 'Active') blockPublish.push('The product status must be Active.');
-  if (stock <= 0) blockPublish.push('The product needs stock available.');
-  if (!images.length) blockPublish.push('Add at least one product image.');
-  if (images.some((image) => image.startsWith('data:'))) blockPublish.push('Replace embedded images with uploaded image URLs.');
+  // Availability and content-quality notes; these do not gate merchandising saves.
+  if (status !== 'Active') issues.push('The product status must be Active.');
+  if (stock <= 0) issues.push('The product needs stock available.');
+  if (!images.length) issues.push('Add at least one product image.');
+  if (images.some((image) => image.startsWith('data:'))) issues.push('Replace embedded images with uploaded image URLs.');
 
   const nowMs = Date.now();
   const promoIsActive = promoPrice != null
     && (!promoStart || Date.parse(promoStart) <= nowMs)
     && (!promoEnd || Date.parse(promoEnd) >= nowMs);
   const publicPriceKobo = promoIsActive ? (promoPrice as number) : basePrice;
-  if (!(publicPriceKobo > 0)) blockPublish.push('Set a Mall price or retail price above zero.');
-  if (floor > 0 && publicPriceKobo > 0 && publicPriceKobo < floor) blockPublish.push("The storefront price is below this product's floor price.");
-
-  const publish = input.publish === true;
-  const canPublish = blockPublish.length === 0 && Object.keys(fields).length === 0;
-  if (publish && !canPublish) {
-    if (Object.keys(fields).length) fail(400, 'Validation failed', { fields, blockPublish });
-    fail(409, 'This product is not ready to publish.', { blockPublish });
-  }
+  if (!(publicPriceKobo > 0)) issues.push('Set a Mall price or retail price above zero.');
+  if (floor > 0 && publicPriceKobo > 0 && publicPriceKobo < floor) issues.push("The storefront price is below this product's floor price.");
 
   return {
-    fields, blockPublish, canPublish, publish, publicPriceKobo,
+    fields, issues, publicPriceKobo,
     mallPriceKobo: mallPrice, promoPriceKobo: promoPrice, promoStart, promoEnd,
     description: description || null, featured: input.featured === true, displayOrder,
   };
@@ -194,11 +187,10 @@ async function readRow(exec: MallExecutor, productId: string) {
 }
 
 /** Validates the listing exactly as it currently stands in the database.
- * Never throws: an already-published product may legitimately have new blockers
+ * Never throws: a product may legitimately have availability or content issues
  * (e.g. stock drained to zero); the list view must still render it with issues. */
 function validateCurrent(row: any) {
   return validateListing(row, {
-    publish: false,
     mallPriceKobo: row.mall_price_kobo ?? '', mallDescription: row.mall_description,
     featured: n(row.mall_featured) === 1, displayOrder: row.mall_display_order ?? '',
     promoPriceKobo: row.mall_promo_price_kobo ?? '', promoStart: row.mall_promo_start, promoEnd: row.mall_promo_end,
@@ -210,7 +202,7 @@ async function listListings(exec: MallExecutor, url: URL) {
   const view = s(url.searchParams.get('view'), 'all');
   const limit = Math.min(Math.max(n(url.searchParams.get('limit'), 50), 1), 200);
   const offset = Math.max(n(url.searchParams.get('offset'), 0), 0);
-  if (!['all', 'listed', 'unlisted', 'blocked'].includes(view)) fail(400, 'view must be all, listed, unlisted or blocked.');
+  if (!['all', 'active', 'hidden'].includes(view)) fail(400, 'view must be all, active or hidden.');
 
   const filters: string[] = [];
   const params: unknown[] = [];
@@ -219,25 +211,26 @@ async function listListings(exec: MallExecutor, url: URL) {
     filters.push(`(name LIKE ? ESCAPE '\\' OR sku LIKE ? ESCAPE '\\' OR brand LIKE ? ESCAPE '\\')`);
     params.push(like, like, like);
   }
-  if (view === 'listed') filters.push('is_mall_listed = 1');
-  if (view === 'unlisted') filters.push('is_mall_listed = 0');
+  if (view === 'active') filters.push("status = 'Active'");
+  if (view === 'hidden') filters.push("status <> 'Active'");
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
 
   const rows = await exec.queryAll(
-    `SELECT ${LISTING_COLUMNS} FROM products ${where} ORDER BY is_mall_listed DESC, mall_featured DESC, name ASC LIMIT ? OFFSET ?`,
+    `SELECT ${LISTING_COLUMNS} FROM products ${where} ORDER BY mall_featured DESC, name ASC LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );
   const mapped = rows.map((row) => {
     const validation = validateCurrent(row);
-    return { ...listingView(row), blockPublish: validation.blockPublish, canPublish: validation.canPublish };
+    return { ...listingView(row), issues: validation.issues };
   });
-  const listings = view === 'blocked' ? mapped.filter((listing) => listing.blockPublish.length) : mapped;
+  const listings = mapped;
+  const total = (await exec.queryAll(`SELECT COUNT(*) AS n FROM products ${where}`, params))[0];
   const counts = (await exec.queryAll(`SELECT
-    SUM(CASE WHEN is_mall_listed = 1 THEN 1 ELSE 0 END) AS listed,
-    SUM(CASE WHEN is_mall_listed = 0 THEN 1 ELSE 0 END) AS unlisted FROM products`))[0];
+    SUM(CASE WHEN status = 'Active' THEN 1 ELSE 0 END) AS active,
+    SUM(CASE WHEN status <> 'Active' THEN 1 ELSE 0 END) AS hidden FROM products`))[0];
   return json({
-    listings, total: listings.length, limit, offset, view,
-    counts: { listed: n(counts?.listed), unlisted: n(counts?.unlisted) },
+    listings, total: n(total?.n), limit, offset, view,
+    counts: { active: n(counts?.active), hidden: n(counts?.hidden) },
   });
 }
 
@@ -245,16 +238,17 @@ async function getListing(exec: MallExecutor, productId: string) {
   const row = await readRow(exec, productId);
   const validation = validateCurrent(row);
   return json({
-    listing: { ...listingView(row), blockPublish: validation.blockPublish, canPublish: validation.canPublish },
+    listing: { ...listingView(row), issues: validation.issues },
     preview: publicPreview(row),
   });
 }
 
 async function saveListing(exec: MallExecutor, productId: string, actor: StaffActor, input: ListingInput) {
+  if ('publish' in input) fail(400, 'Publishing approval is no longer supported. Product Active status controls Mall visibility.');
   const row = await readRow(exec, productId);
   const decision = validateListing(row, input);
+  if (Object.keys(decision.fields).length) fail(400, 'Validation failed', { fields: decision.fields });
   const at = new Date().toISOString();
-  const wasListed = n(row.is_mall_listed) === 1;
 
   const statements: MallStmt[] = [
     // Optimistic concurrency: if another staff member changed this listing while the
@@ -265,19 +259,18 @@ async function saveListing(exec: MallExecutor, productId: string, actor: StaffAc
     [productId, n(row.is_mall_listed), row.mall_price_kobo, row.mall_description, n(row.mall_featured),
       row.mall_display_order, row.mall_promo_price_kobo, row.mall_promo_start, row.mall_promo_end]),
     {
-      sql: `UPDATE products SET is_mall_listed = ?, mall_price_kobo = ?, mall_description = ?, mall_featured = ?,
+      sql: `UPDATE products SET mall_price_kobo = ?, mall_description = ?, mall_featured = ?,
               mall_display_order = ?, mall_promo_price_kobo = ?, mall_promo_start = ?, mall_promo_end = ?, updated_at = ?
             WHERE id = ?`,
-      params: [decision.publish ? 1 : 0, decision.mallPriceKobo, decision.description, decision.featured ? 1 : 0,
+      params: [decision.mallPriceKobo, decision.description, decision.featured ? 1 : 0,
         decision.displayOrder, decision.promoPriceKobo, decision.promoStart, decision.promoEnd, at, productId],
     },
     {
       sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, ?, 'Product', ?, ?, ?)`,
       params: [crypto.randomUUID(), actor.id,
-        decision.publish && !wasListed ? 'PUBLISH_MALL_LISTING'
-          : !decision.publish && wasListed ? 'UNPUBLISH_MALL_LISTING' : 'UPDATE_MALL_LISTING',
+        'UPDATE_MALL_LISTING',
         productId,
-        `${actor.displayName} ${decision.publish ? 'published' : 'unpublished'} "${s(row.name)}" on the Mall` +
+        `${actor.displayName} updated Mall merchandising for "${s(row.name)}"` +
         ` (storefront price ${decision.publicPriceKobo} kobo${decision.featured ? ', featured' : ''}).`,
         at],
     },
@@ -290,7 +283,7 @@ async function saveListing(exec: MallExecutor, productId: string, actor: StaffAc
   }
   const updated = await readRow(exec, productId);
   return json({
-    listing: { ...listingView(updated), blockPublish: decision.blockPublish, canPublish: decision.canPublish },
+    listing: { ...listingView(updated), issues: decision.issues },
     preview: publicPreview(updated),
   });
 }
@@ -318,7 +311,7 @@ export async function handleStaffMallListingApi(request: Request, exec: MallExec
     if (request.method === 'GET' && parts.length === 0) return await listListings(exec, url);
     if (request.method === 'GET' && parts.length === 1) return await getListing(exec, decodeURIComponent(parts[0]));
     if (request.method === 'PUT' && parts.length === 1) {
-      if (!WRITE_ROLES.includes(actor.role)) fail(403, 'Only an Administrator or Store Manager can publish Mall listings.');
+      if (!WRITE_ROLES.includes(actor.role)) fail(403, 'Only an Administrator or Store Manager can edit Mall merchandising.');
       return await saveListing(exec, decodeURIComponent(parts[0]), actor, await parseBody(request));
     }
     return json({ error: 'Unknown staff Mall listing route.' }, 404);

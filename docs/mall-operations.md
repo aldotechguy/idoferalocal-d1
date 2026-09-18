@@ -146,34 +146,38 @@ window wins, then `mall_price_kobo`, then `retail_price_kobo`. The promo window 
 stored as ISO-8601 UTC millisecond strings and compared against a parameter-free
 `strftime('now')` expression so results do not depend on request-supplied clocks.
 
-## Staff Mall publishing workflow (Mall Listings)
+## Staff Mall merchandising (Mall Listings)
 
-Staff manage storefront visibility in **Products & Stock → "Mall Listings"**.
+Policy (decided): **Active product status is the single visibility rule.** Every
+Active product appears on the Mall automatically; there is no separate publish
+approval. Hiding a product means setting its status to Inactive/Archived in
+product management. Legacy `is_mall_listed` values are ignored by the storefront.
+Purchasing additionally requires stock and a valid price (active promo -> Mall
+price -> retail price, always above the product floor).
 
 API (staff session required):
 
-- `GET /api/staff/mall-listings?q=&view=all|listed|unlisted&limit=&offset=` —
-  listings with per-item `blockPublish` issues and `canPublish`. Readable by
-  Administrator/Store Manager/Sales Staff/Accountant.
-- `GET /api/staff/mall-listings/:id` — single listing plus a preview of exactly
-  how the public catalog renders it right now (`visibleOnMall`, effective price).
-- `PUT /api/staff/mall-listings/:id` — Administrator or Store Manager only.
-  Body: `publish`, `mallPriceKobo`, `mallDescription`, `featured`, `displayOrder`,
-  `promoPriceKobo`, `promoStart`, `promoEnd`.
+- `GET /api/staff/mall-listings?q=&view=all|active|hidden&limit=&offset=` -
+  listings with advisory per-item `issues` (missing image, no stock, `data:`
+  images, unpriced). Readable by Administrator/Store Manager/Sales Staff/Accountant.
+- `GET /api/staff/mall-listings/:id` - single listing plus a preview of exactly
+  how the public catalog renders it right now (`visibleOnMall`, effective price,
+  availability).
+- `PUT /api/staff/mall-listings/:id` - Administrator or Store Manager only.
+  Body: `mallPriceKobo`, `mallDescription`, `featured`, `displayOrder`,
+  `promoPriceKobo`, `promoStart`, `promoEnd`. Sending `publish` returns 400.
 
-Server-enforced publish rules: product status Active, stock > 0, at least one
-image, no `data:` embedded images, price > 0 and never below the product floor
-(`min_selling_price_kobo`). A promo price must be lower than the normal Mall
-price, within the floor, and its window must end after it starts. Mall
-description is capped (2,000 chars, control characters rejected). Saves use
-optimistic concurrency (`mall_write_guards`-style assertion): if another editor
-changed the listing first, the second writer gets `409` and must reload. Every
-publish/unpublish/update writes an audit log entry
-(`PUBLISH_MALL_LISTING` / `UNPUBLISH_MALL_LISTING` / `UPDATE_MALL_LISTING`).
+Server-enforced merchandising rules: Mall price must be a positive whole number
+of kobo and never below the product floor (`min_selling_price_kobo`). A promo
+price must be lower than the normal Mall price, within the floor, and its window
+must end after it starts. Mall description is capped (2,000 chars, control
+characters rejected). Saves use optimistic concurrency: if another editor changed
+the listing first, the second writer gets `409` and must reload. Every save
+writes an `UPDATE_MALL_LISTING` audit entry.
 
-Auditing an already-published product never throws: if it develops new blockers
-(e.g. stock drains to zero), the list still renders it with the issues shown so
-staff can unpublish or restock. The legacy hero seed no longer runs by default;
+Auditing never throws for advisory issues: the list still renders products that
+lack images or stock so staff can fix or restock them; buying is blocked by the
+stock/price rules regardless. The legacy hero seed no longer runs by default;
 set `MALL_SEED_HEROES=true` to opt in (any other value logs a warning and skips).
 
 ## Durable product image storage
@@ -213,8 +217,9 @@ databases and buckets. Build frontend assets with `npx vite build` before deploy
 do not upload the Node server bundle as a public static asset.
 
 Images uploaded before this change (base64 in `images_json`) remain renderable,
-but a listing that still contains any `data:` URL is blocked from publishing
-until staff re-upload those images through the new flow.
+but a listing that still contains any `data:` URL is flagged in Mall Listings
+until staff re-upload those images through the new flow; buying separately
+requires an Active status, stock, and a valid price.
 
 ## Verification boundary
 

@@ -357,13 +357,14 @@ for (const runtime of ['node', 'worker'] as const) {
     assert.equal(new Set(ids).size, 25);
   });
 
-  test(`${runtime}: catalog includes sold-out and unpublished products but excludes archives`, async (t) => {
+  test(`${runtime}: catalog shows only Active products regardless of legacy listing approval`, async (t) => {
     const f = await fixture(runtime); t.after(() => f.db.close());
     const insert = f.db.prepare(`INSERT INTO products(id,sku,name,stock_qty,status,is_mall_listed,retail_price_kobo,category_name,brand,created_at,updated_at)
       VALUES(?,?,?,?,?,?,10000,'Catalog','Catalog Brand','now','now')`);
-    insert.run('sold-out', 'OUT', 'Sold out product', 0, 'Out of Stock', 0);
-    insert.run('low-stock', 'LOW', 'Low stock product', 2, 'Low Stock', 0);
+    insert.run('sold-out', 'OUT', 'Sold out product', 0, 'Active', 0);
+    insert.run('low-stock', 'LOW', 'Low stock product', 2, 'Active', 0);
     insert.run('archived', 'ARC', 'Archived product', 10, 'Archived', 1);
+    insert.run('inactive', 'INA', 'Inactive product', 10, 'Inactive', 1);
     const catalog = await (await f.send(new Request('http://test/api/mall/products?category=Catalog'))).json() as any;
     assert.equal(catalog.total, 2);
     assert.deepEqual(catalog.products.map((p: any) => p.id).sort(), ['low-stock', 'sold-out']);
@@ -382,7 +383,15 @@ for (const runtime of ['node', 'worker'] as const) {
     }));
     assert.equal((await add('sold-out')).status, 409);
     assert.equal((await add('archived')).status, 404);
+    assert.equal((await add('inactive')).status, 404);
+    assert.equal((await f.send(new Request('http://test/api/mall/products/inactive'))).status, 404);
     assert.equal((await add('low-stock')).status, 200);
+    f.db.exec("UPDATE products SET status='Inactive' WHERE id='low-stock'");
+    const inactiveCart = await (await f.send(new Request('http://test/api/mall/cart', { headers: { 'x-mall-session': session } }))).json() as any;
+    assert.equal(inactiveCart.items.find((p: any) => p.productId === 'low-stock').available, false);
+    assert.equal((await f.checkout()).status, 409);
+    assert.equal(f.scalar('SELECT COUNT(*) FROM mall_orders'), 0);
+    f.db.exec("UPDATE products SET status='Active' WHERE id='low-stock'");
     f.db.exec("UPDATE products SET stock_qty=0 WHERE id='low-stock'");
     const cart = await (await f.send(new Request('http://test/api/mall/cart', { headers: { 'x-mall-session': session } }))).json() as any;
     assert.equal(cart.items.find((p: any) => p.productId === 'low-stock').available, false);
@@ -550,7 +559,7 @@ test('administrator bootstrap is disabled without explicit secrets and rejects i
 });
 
 test('checkout revalidates price and eligibility inside the write batch', async (t) => {
-  for (const mutation of ["UPDATE products SET status='Archived'", 'UPDATE products SET retail_price_kobo=20000', 'UPDATE mall_cart_items SET qty=3']) {
+  for (const mutation of ["UPDATE products SET status='Inactive'", "UPDATE products SET status='Archived'", 'UPDATE products SET retail_price_kobo=20000', 'UPDATE mall_cart_items SET qty=3']) {
     const f = await fixture('node'); t.after(() => f.db.close());
     const executor: MallExecutor = { ...f.exec, runBatch: async (statements) => {
       f.db.exec(mutation);
@@ -566,59 +575,67 @@ test('checkout revalidates price and eligibility inside the write batch', async 
   }
 });
 
-test('staff listing publish validation, promotion windows, concurrency and roles', async (t) => {
+test('staff merchandising validation, promotion windows, concurrency and roles', async (t) => {
   const f = await fixture('node'); t.after(() => f.db.close());
   const base = 'http://test/api/staff/mall-listings';
   const read = async (path: string) => handleStaffMallListingApi(new Request(`${base}${path}`), f.exec, actor);
   const write = async (id: string, body: Record<string, unknown>, role = 'Administrator') =>
     handleStaffMallListingApi(new Request(`${base}/${id}`, { method: 'PUT', body: JSON.stringify(body) }), f.exec, { ...actor, role });
 
-  // The fixture product has no images, so it cannot publish.
+  // Missing images are advisory; Active products do not need publishing approval.
   const db = f.db;
-  const listed = (await (await read('?view=listed')).json()) as any;
+  const listed = (await (await read('?view=active')).json()) as any;
   assert.equal(listed.total, 1);
   const all = (await (await read('?view=all&limit=200')).json()) as any;
   assert.equal(all.total, 1);
-  assert.ok(all.listings.some((item: any) => item.id === 'p' && item.blockPublish.some((issue: string) => /image/i.test(issue))));
+  assert.ok(all.listings.some((item: any) => item.id === 'p' && item.issues.some((issue: string) => /image/i.test(issue))));
   assert.equal((await read('?view=inventory')).status, 400);
   assert.equal((await read('/missing')).status, 404);
-  assert.equal((await write('p', { publish: true, mallPriceKobo: 12000 })).status, 409);
-  assert.equal((await write('p', { publish: false }, 'Sales Staff')).status, 403);
+  assert.equal((await write('p', { mallPriceKobo: 12000 })).status, 200);
+  assert.equal((await write('p', { publish: false })).status, 400);
+  assert.equal((await write('p', {}, 'Sales Staff')).status, 403);
 
-  // A well-formed product publishes; optimistic concurrency holds across writers.
+  // Merchandising saves retain optimistic concurrency without changing approval flags.
   db.prepare(`INSERT INTO products(id,sku,name,stock_qty,status,is_mall_listed,retail_price_kobo,created_at,updated_at,images_json,min_selling_price_kobo)
     VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run('sell','S','Sellable',5,'Active',0,20000,'now','now','["http://img/x.png"]',5000);
-  const publish = { publish: true, mallPriceKobo: 15000, mallDescription: 'Fresh copy', featured: true, displayOrder: 2 };
-  const first = await write('sell', publish);
+  const merchandising = { mallPriceKobo: 15000, mallDescription: 'Fresh copy', featured: true, displayOrder: 2 };
+  const first = await write('sell', merchandising);
   assert.equal(first.status, 200);
   const saved = (await first.json()) as any;
-  assert.equal(saved.listing.listed, true);
+  assert.equal(saved.listing.visibleOnMall, true);
   assert.equal(saved.preview.description, 'Fresh copy');
   assert.equal(saved.preview.visibleOnMall, true);
+  assert.equal(f.scalar("SELECT is_mall_listed FROM products WHERE id='sell'"), 0);
+  assert.equal((await write('sell', { publish: false })).status, 400);
+  const hidden = await (await read('?view=hidden')).json() as any;
+  assert.equal(hidden.total, 0);
+  const onePage = await (await read('?limit=1')).json() as any;
+  assert.equal(onePage.total, 2);
+  assert.equal(onePage.listings.length, 1);
   const racing = await Promise.all([
-    write('sell', { ...publish, mallDescription: 'Writer A' }),
-    write('sell', { ...publish, mallDescription: 'Writer B' }),
+    write('sell', { ...merchandising, mallDescription: 'Writer A' }),
+    write('sell', { ...merchandising, mallDescription: 'Writer B' }),
   ]);
   assert.deepEqual(racing.map((r) => r.status).sort(), [200, 409]);
-  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM audit_logs WHERE action = ?').get('PUBLISH_MALL_LISTING') as any).n, 1);
-  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM audit_logs WHERE action = ?').get('UPDATE_MALL_LISTING') as any).n, 1);
+  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM audit_logs WHERE action = ?').get('PUBLISH_MALL_LISTING') as any).n, 0);
+  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM audit_logs WHERE action = ?').get('UPDATE_MALL_LISTING') as any).n, 3);
   // Floor-price and promotion rules reject unsafe pricing.
-  assert.equal((await write('sell', { publish: true, mallPriceKobo: 4000 })).status, 400);
+  assert.equal((await write('sell', { mallPriceKobo: 4000 })).status, 400);
 
   // Floor-price and promotion rules reject unsafe pricing.
-  assert.equal((await write('sell', { publish: true, mallPriceKobo: 4000 })).status, 400);
-  assert.equal((await write('sell', { publish: true, mallPriceKobo: 15000, promoPriceKobo: 16000 })).status, 400);
-  assert.equal((await write('sell', { publish: true, mallPriceKobo: 15000, promoPriceKobo: 4000 })).status, 400);
-  assert.equal((await write('sell', { publish: true, mallPriceKobo: 15000, promoPriceKobo: 12000, promoStart: 'not-a-date' })).status, 400);
-  assert.equal((await write('sell', { publish: true, mallPriceKobo: 15000, promoPriceKobo: 12000, promoStart: '2026-09-20T00:00:00.000Z', promoEnd: '2026-09-10T00:00:00.000Z' })).status, 400);
+  assert.equal((await write('sell', { mallPriceKobo: 4000 })).status, 400);
+  assert.equal((await write('sell', { mallPriceKobo: 15000, promoPriceKobo: 16000 })).status, 400);
+  assert.equal((await write('sell', { mallPriceKobo: 15000, promoPriceKobo: 4000 })).status, 400);
+  assert.equal((await write('sell', { mallPriceKobo: 15000, promoPriceKobo: 12000, promoStart: 'not-a-date' })).status, 400);
+  assert.equal((await write('sell', { mallPriceKobo: 15000, promoPriceKobo: 12000, promoStart: '2026-09-20T00:00:00.000Z', promoEnd: '2026-09-10T00:00:00.000Z' })).status, 400);
   const past: any = await (await write('sell', {
-    publish: true, mallPriceKobo: 15000, promoPriceKobo: 12000,
+    mallPriceKobo: 15000, promoPriceKobo: 12000,
     promoStart: '2020-01-01T00:00:00.000Z', promoEnd: '2020-02-01T00:00:00.000Z',
   })).json();
   assert.equal(past.listing.publicPriceKobo, 15000);
   assert.equal(past.listing.promoActive, false);
   const active: any = await (await write('sell', {
-    publish: true, mallPriceKobo: 15000, promoPriceKobo: 12000,
+    mallPriceKobo: 15000, promoPriceKobo: 12000,
     promoStart: '2020-01-01T00:00:00.000Z', promoEnd: '2999-01-01T00:00:00.000Z',
   })).json();
   assert.equal(active.listing.publicPriceKobo, 12000);
@@ -626,7 +643,7 @@ test('staff listing publish validation, promotion windows, concurrency and roles
   const catalog: any = await (await f.send(new Request('http://test/api/mall/products?q=Sellable'))).json();
   assert.equal(catalog.products[0].price, 12000);
   assert.equal(catalog.products[0].promoActive, true);
-  assert.equal((await write('sell', { publish: false })).status, 200);
+  assert.equal((await write('sell', {})).status, 200);
   assert.equal(((await (await f.send(new Request('http://test/api/mall/products?q=Sellable'))).json()) as any).total, 1);
 });
 

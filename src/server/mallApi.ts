@@ -9,7 +9,7 @@
  * Rules that keep the storefront safe:
  *  - Prices are ALWAYS resolved from `products` (COALESCE(mall_price_kobo,
  *    retail_price_kobo)); client-sent prices are never trusted.
- *  - Every non-archived catalog product is visible; purchasing also requires stock.
+ *  - Every Active product is visible; purchasing also requires stock and a valid price.
  *  - Oversell is physically impossible: trg_products_no_oversell ABORTs any
  *    UPDATE that would push stock_qty below zero, which atomically rolls back
  *    the whole checkout batch.
@@ -43,7 +43,7 @@ BEGIN
   SELECT RAISE(ABORT, 'INSUFFICIENT_STOCK');
 END;`;
 
-const VISIBLE = `status <> 'Archived'`;
+const VISIBLE = `status = 'Active'`;
 
 /**
  * Parameter-free "now" so promotional windows are evaluated identically in the
@@ -286,7 +286,7 @@ async function readCart(exec: MallExecutor, cartId: string) {
     [cartId],
   );
   const items = rows.map((r) => {
-    const sellable = s(r.status) !== 'Archived' && n(r.stock_qty) > 0 && hasMallPrice(n(r.price_kobo));
+    const sellable = s(r.status) === 'Active' && n(r.stock_qty) > 0 && hasMallPrice(n(r.price_kobo));
     return {
       productId: s(r.product_id),
       name: s(r.name),
@@ -450,7 +450,7 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
   }));
   for (const it of items) {
     const row = rows.find((r) => s(r.product_id) === it.productId) as any;
-    if (row.status === 'Archived') fail(409, `"${it.name}" is no longer available on the mall. Remove it to continue.`, { productId: it.productId });
+    if (row.status !== 'Active') fail(409, `"${it.name}" is no longer available on the mall. Remove it to continue.`, { productId: it.productId });
     if (!Number.isSafeInteger(it.qty) || it.qty < 1 || it.qty > 1000) fail(409, `"${it.name}" has an invalid quantity.`, { productId: it.productId });
     if (!Number.isSafeInteger(it.unitPriceKobo) || it.unitPriceKobo <= 0) fail(409, `"${it.name}" has an invalid price.`, { productId: it.productId });
     if (n(row.stock_qty) < it.qty) fail(409, `Only the remaining stock of "${it.name}" can be ordered. Reduce the quantity to continue.`, { productId: it.productId });
@@ -467,7 +467,7 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
     ...assertSql('(SELECT COUNT(*) FROM mall_cart_items WHERE cart_id = ?) = ?', [cartId, rows.length]),
     ...rows.flatMap((r) => assertSql(`EXISTS (SELECT 1 FROM mall_cart_items ci JOIN products p ON p.id = ci.product_id
       WHERE ci.id = ? AND ci.cart_id = ? AND ci.product_id = ? AND ci.qty = ?
-      AND p.status <> 'Archived' AND p.stock_qty >= ?
+      AND p.status = 'Active' AND p.stock_qty >= ?
       AND ${effectivePrice('p')} = ?)`,
     [r.cart_line_id, cartId, r.product_id, r.qty, r.qty, r.price_kobo])),
     {

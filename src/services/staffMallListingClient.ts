@@ -1,13 +1,13 @@
-/** #10 — staff client for the Mall publishing workflow. */
+/** Staff Mall merchandising; Active product status controls visibility. */
 export type StaffMallListing = {
   id: string; sku: string; name: string; category: string; brand: string; unit: string;
   productStatus: string; stock: number; internalDescription: string; mallDescription: string;
   images: string[]; imageCount: number;
   retailPriceKobo: number; mallPriceKobo: number | null; basePriceKobo: number;
   minimumSellingPriceKobo: number; publicPriceKobo: number; promoActive: boolean;
-  listed: boolean; featured: boolean; displayOrder: number | null;
+  visibleOnMall: boolean; featured: boolean; displayOrder: number | null;
   promoPriceKobo: number | null; promoStart: string | null; promoEnd: string | null;
-  blockPublish: string[]; canPublish: boolean;
+  issues: string[];
 };
 
 export type MallListingPreview = {
@@ -17,7 +17,7 @@ export type MallListingPreview = {
 };
 
 export type MallListingSave = {
-  publish: boolean; mallPriceKobo: number | null; mallDescription: string;
+  mallPriceKobo: number | null; mallDescription: string;
   featured: boolean; displayOrder: number | null;
   promoPriceKobo: number | null; promoStart: string | null; promoEnd: string | null;
 };
@@ -37,10 +37,9 @@ async function request(path: string, options: RequestInit = {}) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error || `Request failed (${response.status})`) as Error & {
-      fields?: Record<string, string>; blockPublish?: string[];
+      fields?: Record<string, string>;
     };
     error.fields = data.fields;
-    error.blockPublish = data.blockPublish;
     throw error;
   }
   return data;
@@ -55,7 +54,7 @@ export const staffMallListingClient = {
     if (params.offset) query.set('offset', String(params.offset));
     return request(`?${query}`) as Promise<{
       listings: StaffMallListing[]; total: number;
-      counts: { listed: number; unlisted: number };
+      counts: { active: number; hidden: number };
     }>;
   },
   detail: (productId: string) => request(`/${encodeURIComponent(productId)}`) as Promise<{

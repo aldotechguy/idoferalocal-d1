@@ -9,6 +9,16 @@ import { mallStockLabel } from '../src/shared/mallProductPresentation.ts';
 import { mallClient } from '../src/services/mallClient.ts';
 import { createMallSearchMatcher, mallOneTypo } from '../src/shared/mallSearch.ts';
 
+test('Mall merchandising explains Active visibility without publishing controls', () => {
+  const editor = fs.readFileSync(new URL('../src/components/products/MallListingsView.tsx', import.meta.url), 'utf8');
+  const client = fs.readFileSync(new URL('../src/services/staffMallListingClient.ts', import.meta.url), 'utf8');
+  assert.match(editor, /All Active products appear automatically/);
+  assert.doesNotMatch(editor, /draft\.publish|Publish on|Not published|canPublish/);
+  assert.doesNotMatch(client, /publish: boolean|blockPublish|canPublish/);
+  assert.match(editor, /Mall price/);
+  assert.match(editor, /Optional promotion/);
+});
+
 test('forgiving search handles spacing, word order and conservative typos', () => {
   const product = { name: 'Spray Bottle 500 ml', category_name: 'Packaging', brand: 'Acme' };
   for (const query of ['spraybottle', 'spray   bottle', 'bot tle', 'bottle spray', '500ml bottle', 'spray-bottle']) {
