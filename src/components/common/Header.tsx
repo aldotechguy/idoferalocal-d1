@@ -323,7 +323,12 @@ export const Header: React.FC<HeaderProps> = ({
             <Search className="w-4 h-4 absolute left-3 sm:left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
             <input
               ref={searchInputRef}
-              type="text"
+              id="global_search_input"
+              name="search"
+              type="search"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
               placeholder="Search products, invoices, customers... (Cmd + K)"
               value={searchQuery}
               onChange={(e) => {

@@ -1605,12 +1605,19 @@ export const SettingsView: React.FC = () => {
             </div>
 
             {/* Input Box Form */}
-            <div className="space-y-4">
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleSaveD1Token();
+              }}
+              autoComplete="off"
+              className="space-y-4"
+            >
               <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
                 {/* Cloudflare API Token Input Box */}
                 <div className="md:col-span-12 space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                    <label htmlFor="cloudflare_d1_api_token" className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                       <Key className="w-3.5 h-3.5 text-amber-500" />
                       <span>Cloudflare API Token</span>
                       {d1Config?.hasToken && (
@@ -1631,7 +1638,12 @@ export const SettingsView: React.FC = () => {
 
                   <div className="relative">
                     <input
+                      id="cloudflare_d1_api_token"
+                      name="cloudflare_d1_api_token"
                       type={showD1Token ? 'text' : 'password'}
+                      autoComplete="new-password"
+                      data-1p-ignore="true"
+                      data-lpignore="true"
                       value={d1TokenInput}
                       onChange={(e) => setD1TokenInput(e.target.value)}
                       placeholder={d1Config?.hasToken ? `Current: ${d1Config.maskedToken} (enter new token to replace)` : 'Paste Cloudflare API token here...'}
@@ -1665,11 +1677,14 @@ export const SettingsView: React.FC = () => {
 
                 {/* Cloudflare Account ID & Database ID (Expandable / Advanced) */}
                 <div className="md:col-span-6 space-y-1">
-                  <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  <label htmlFor="cloudflare_account_id" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                     Cloudflare Account ID
                   </label>
                   <input
+                    id="cloudflare_account_id"
+                    name="cloudflare_account_id"
                     type="text"
+                    autoComplete="off"
                     value={d1AccountIdInput}
                     onChange={(e) => setD1AccountIdInput(e.target.value)}
                     placeholder="e.g. 35b307711376954341708cbea8080dcc"
@@ -1678,11 +1693,14 @@ export const SettingsView: React.FC = () => {
                 </div>
 
                 <div className="md:col-span-6 space-y-1">
-                  <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  <label htmlFor="cloudflare_database_id" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                     D1 Database ID
                   </label>
                   <input
+                    id="cloudflare_database_id"
+                    name="cloudflare_database_id"
                     type="text"
+                    autoComplete="off"
                     value={d1DbIdInput}
                     onChange={(e) => setD1DbIdInput(e.target.value)}
                     placeholder="e.g. 3e95a550-a091-490b-819d-f0acb7ea8dd8"
@@ -1738,8 +1756,7 @@ export const SettingsView: React.FC = () => {
 
                 <div className="flex items-center gap-2">
                   <button
-                    type="button"
-                    onClick={handleSaveD1Token}
+                    type="submit"
                     disabled={isSavingD1Token || (!d1TokenInput.trim() && !d1AccountIdInput && !d1DbIdInput)}
                     className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-sm shadow-amber-600/20"
                   >
@@ -1752,7 +1769,7 @@ export const SettingsView: React.FC = () => {
                   </button>
                 </div>
               </div>
-            </div>
+            </form>
           </div>
 
           {/* Google Drive Local-First Dedicated Folder Backup & Restore Card */}
