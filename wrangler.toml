@@ -3,8 +3,18 @@ main = "sites-worker.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
+[triggers]
+crons = ["*/5 * * * *"]
+
+[observability]
+enabled = true
+
 [site]
 bucket = "./dist"
+
+[[r2_buckets]]
+binding = "MALL_IMAGES"
+bucket_name = "idofera-mall-images"
 
 [[d1_databases]]
 binding = "DB"
@@ -17,8 +27,17 @@ database_id = "3e95a550-a091-490b-819d-f0acb7ea8dd8"
 [env.mall]
 name = "idofera-mall-preview"
 
+[env.mall.triggers]
+crons = ["*/5 * * * *"]
+
 [[env.mall.d1_databases]]
 binding = "DB"
 database_name = "idofera"
 database_id = "3a3eb157-5aa5-419a-a8ce-2eade2afc436"
+
+# #14 — durable product images. Create the preview bucket before deploying:
+#   npx wrangler r2 bucket create idofera-mall-images-preview
+[[env.mall.r2_buckets]]
+binding = "MALL_IMAGES"
+bucket_name = "idofera-mall-images-preview"
 

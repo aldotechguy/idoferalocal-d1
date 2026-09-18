@@ -25,6 +25,25 @@ export type {
 };
 const SESSION_KEY = 'idofera_mall_session';
 const BASE = '/api/mall';
+const ATTEMPT_KEY = 'idofera_mall_checkout_attempt';
+let pendingAttempt: { key: string; body: string } | null = null;
+
+function checkoutAttempt(body: MallCheckoutBody) {
+  const serialized = JSON.stringify(body);
+  if (!pendingAttempt) {
+    try { pendingAttempt = JSON.parse(localStorage.getItem(ATTEMPT_KEY) || 'null'); } catch { /* storage unavailable */ }
+  }
+  if (!pendingAttempt || pendingAttempt.body !== serialized) {
+    pendingAttempt = { key: crypto.randomUUID(), body: serialized };
+    try { localStorage.setItem(ATTEMPT_KEY, JSON.stringify(pendingAttempt)); } catch { /* memory fallback */ }
+  }
+  return pendingAttempt;
+}
+
+function clearCheckoutAttempt() {
+  pendingAttempt = null;
+  try { localStorage.removeItem(ATTEMPT_KEY); } catch { /* storage unavailable */ }
+}
 
 function getSession(): string | undefined {
   if (typeof window === 'undefined') return undefined;
@@ -50,11 +69,7 @@ function clearSession(): void {
 }
 
 function newSession(): string {
-  const segs = [];
-  for (let i = 0; i < 4; i += 1) {
-    segs.push(Math.random().toString(36).slice(2, 10));
-  }
-  return 'mall-' + segs.join('-');
+  return 'mall-' + crypto.randomUUID();
 }
 
 async function fetchMall(
@@ -131,20 +146,27 @@ export function clearBuyerProfile(): void {
 
 export const mallClient = {
   health: () => fetchMall('/health') as Promise<{ ok: boolean; routes: string[] }>,
+  configuration: () => fetchMall('/config'),
+  product: (id: string) => fetchMall(`/products/${encodeURIComponent(id)}`) as Promise<{product:MallProduct}>,
 
-  products: (params?: { q?: string; category?: string; limit?: number; offset?: number }) => {
+  products: (params?: { q?: string; category?: string; brand?: string; inStock?: 0 | 1; sort?: string; limit?: number; offset?: number }) => {
     const qs = new URLSearchParams();
     if (params?.q) qs.set('q', params.q);
     if (params?.category) qs.set('category', params.category);
+    if (params?.brand) qs.set('brand', params.brand);
+    if (params?.inStock != null) qs.set('inStock', String(params.inStock));
+    if (params?.sort) qs.set('sort', params.sort);
     if (params?.limit != null) qs.set('limit', String(params.limit));
     if (params?.offset != null) qs.set('offset', String(params.offset));
     const q = qs.toString();
     return fetchMall(`/products${q ? '?' + q : ''}`) as Promise<{
       products: MallProduct[];
       categories: (string | { name: string; count: number })[];
+      brands?: { name: string; count: number }[];
       total: number;
       limit: number;
       offset: number;
+      sort?: string;
     }>;
   },
 
@@ -162,14 +184,19 @@ export const mallClient = {
       body: JSON.stringify({ productId, qty }),
     }) as Promise<MallCart>,
 
-  checkout: (body: MallCheckoutBody) =>
-    fetchMall('/checkout', {
+  checkout: async (body: MallCheckoutBody): Promise<MallOrder> => {
+    const attempt = checkoutAttempt(body);
+    const order = await fetchMall('/checkout', {
       method: 'POST',
+      headers: { 'Idempotency-Key': attempt.key },
       body: JSON.stringify(body),
-    }) as Promise<MallOrder>,
+    });
+    clearCheckoutAttempt();
+    return order;
+  },
 
-  ordersByPhone: (phone: string) => {
-    const qs = new URLSearchParams({ phone });
+  ordersByPhone: (phone: string, orderNo: string) => {
+    const qs = new URLSearchParams({ phone, orderNo });
     return fetchMall(`/orders?${qs.toString()}`) as Promise<{
       orders: MallOrderLookup[];
       total: number;
@@ -184,6 +211,7 @@ export const mallClient = {
   },
 
   resetSession: () => {
+    clearCheckoutAttempt();
     clearSession();
     const session = newSession();
     setSession(session);

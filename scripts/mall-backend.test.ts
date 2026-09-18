@@ -24,7 +24,7 @@ function fixture() {
 
 async function checkout(exec: ReturnType<typeof makeNodeMallExecutor>, session: string, overrides: Record<string, unknown> = {}) {
   const response = await handleMallApi(new Request('http://test/api/mall/checkout', {
-    method: 'POST', headers: { 'content-type': 'application/json', 'x-mall-session': session },
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-mall-session': session, 'idempotency-key': `test-attempt-${session}` },
     body: JSON.stringify({ customerName: 'Ada', customerPhone: '08031234567', paymentMethod: 'pay_on_pickup', deliveryFeeNaira: 99999, ...overrides }),
   }), exec);
   return { response, body: await response.json() as any };
@@ -46,14 +46,8 @@ test('checkout is server-priced, pending, fee-safe and idempotent', async () => 
 
 test('fixed delivery zones are server-priced and require an address', async () => {
   const central = fixture();
-  await assert.rejects(
-    () => checkout(central.exec, central.session, { deliveryZone: 'invented_free_zone' }),
-    (error: any) => error?.mallStatus === 400 && /valid delivery zone/i.test(error.message),
-  );
-  await assert.rejects(
-    () => checkout(central.exec, central.session, { deliveryZone: 'uyo_central' }),
-    (error: any) => error?.mallStatus === 400 && /delivery address/i.test(error.message),
-  );
+  assert.equal((await checkout(central.exec, central.session, { deliveryZone: 'invented_free_zone' })).response.status, 400);
+  assert.equal((await checkout(central.exec, central.session, { deliveryZone: 'uyo_central' })).response.status, 400);
   const outer = fixture();
   const placed = await checkout(outer.exec, outer.session, { deliveryZone: 'uyo_outer', deliveryAddress: 'Shelter Afrique, Uyo', deliveryFeeNaira: 1 });
   assert.equal(placed.response.status, 201);
@@ -68,7 +62,7 @@ test('other locations require a manager quote before confirmation or payment', a
   const { db, exec, session } = fixture();
   const placed = await checkout(exec, session, { deliveryZone: 'other', deliveryAddress: 'Calabar, Cross River' });
   assert.equal(placed.body.quoteRequired, true);
-  const id = `mo-${session}`;
+  const id = (db.prepare('SELECT id FROM mall_orders LIMIT 1').get() as any).id;
   const unauthorizedQuote = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/quote-delivery`, { method: 'POST', body: JSON.stringify({ feeKobo: 1 }) }), exec, { ...actor, role: 'Sales Staff' });
   assert.equal(unauthorizedQuote.status, 403);
   const confirmBeforeQuote = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/confirm`, { method: 'POST', body: '{}' }), exec, actor);
@@ -81,13 +75,14 @@ test('other locations require a manager quote before confirmation or payment', a
   assert.equal(row.delivery_fee_kobo, 300000);
   assert.equal(row.total_kobo, 320000);
   assert.equal((db.prepare('SELECT amount_kobo FROM payments WHERE order_id = ?').get(id) as any).amount_kobo, 320000);
+  assert.equal((await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/review-delivery`, {method:'POST',body:JSON.stringify({confirmed:true})}),exec,actor)).status,200);
   assert.equal((await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/confirm`, { method: 'POST', body: '{}' }), exec, actor)).status, 200);
 });
 
 test('staff payment creates one canonical sale without deducting stock twice', async () => {
   const { db, exec, session } = fixture();
   await checkout(exec, session);
-  const id = `mo-${session}`;
+  const id = (db.prepare('SELECT id FROM mall_orders LIMIT 1').get() as any).id;
   await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/confirm`, { method: 'POST', body: '{}' }), exec, actor);
   const paid = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/collect-payment`, {
     method: 'POST', body: JSON.stringify({ paymentMethod: 'Cash', amountKobo: 20000 }),
@@ -106,7 +101,7 @@ test('staff payment creates one canonical sale without deducting stock twice', a
 test('staff cancellation restores committed stock exactly once', async () => {
   const { db, exec, session } = fixture();
   await checkout(exec, session);
-  const id = `mo-${session}`;
+  const id = (db.prepare('SELECT id FROM mall_orders LIMIT 1').get() as any).id;
   const cancel = () => handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/cancel`, {
     method: 'POST', body: JSON.stringify({ reason: 'Test cancellation' }),
   }), exec, actor);
@@ -119,7 +114,7 @@ test('staff cancellation restores committed stock exactly once', async () => {
 test('paid orders follow the guarded fulfilment state machine', async () => {
   const { db, exec, session } = fixture();
   await checkout(exec, session);
-  const id = `mo-${session}`;
+  const id = (db.prepare('SELECT id FROM mall_orders LIMIT 1').get() as any).id;
   await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/confirm`, { method: 'POST', body: '{}' }), exec, actor);
   const unpaid = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/start-processing`, { method: 'POST', body: '{}' }), exec, actor);
   assert.equal(unpaid.status, 409);
@@ -138,13 +133,15 @@ test('paid orders follow the guarded fulfilment state machine', async () => {
 test('delivery fulfilment links into deliveries and refunds restore stock once', async () => {
   const { db, exec, session } = fixture();
   await checkout(exec, session);
-  const id = `mo-${session}`;
+  const id = (db.prepare('SELECT id FROM mall_orders LIMIT 1').get() as any).id;
+  db.exec(`UPDATE mall_orders SET delivery_address_json=json_set(delivery_address_json,'$.zone','uyo_central')`);
+  assert.equal((await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/review-delivery`, {method:'POST',body:JSON.stringify({confirmed:true})}),exec,actor)).status,200);
   await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/confirm`, { method: 'POST', body: '{}' }), exec, actor);
   await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/collect-payment`, { method: 'POST', body: JSON.stringify({ paymentMethod: 'Card', amountKobo: 20000 }) }), exec, actor);
   await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/mark-packed`, { method: 'POST', body: '{}' }), exec, actor);
-  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/mark-out-for-delivery`, { method: 'POST', body: '{}' }), exec, actor);
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/mark-out-for-delivery`, { method: 'POST', body: JSON.stringify({courier:'Test courier'}) }), exec, actor);
   assert.equal((db.prepare('SELECT COUNT(*) AS n FROM delivery_orders WHERE sale_id = ?').get(`sale-${id}`) as any).n, 1);
-  const refund = () => handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/refund`, { method: 'POST', body: JSON.stringify({ reason: 'Returned goods', returnStock: true }) }), exec, actor);
+  const refund = () => handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/refund`, { method: 'POST', body: JSON.stringify({ reason: 'Returned goods', returnStock: true, returnReference:'GRN-TEST' }) }), exec, actor);
   assert.equal((await refund()).status, 200);
   assert.equal((db.prepare(`SELECT stock_qty FROM products WHERE id = 'prod-1'`).get() as any).stock_qty, 10);
   assert.equal((db.prepare(`SELECT status FROM sales WHERE id = ?`).get(`sale-${id}`) as any).status, 'Refunded');

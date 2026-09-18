@@ -53,7 +53,9 @@ export const MallCheckout: React.FC = () => {
             </button>
           </div>
         </div>
-        <div className="lg:sticky lg:top-24 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-3">
+        {/* Not sticky: a sticky customer card scrolled over the Payment method
+            fieldset below it on large screens. */}
+        <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-3">
           <FormField label="Full name" required error={fieldErrors.name}><input name="name" autoComplete="name" value={f.name} onChange={(e) => f.setName(e.target.value)} placeholder="e.g. Mfoniso Okon" className={input} /></FormField>
           <FormField label="Phone number" required error={fieldErrors.phone}><input name="phone" type="tel" inputMode="tel" autoComplete="tel" value={f.phone} onChange={(e) => f.setPhone(e.target.value)} placeholder="0803…" className={input} /></FormField>
           <fieldset>

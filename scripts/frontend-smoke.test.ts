@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 import { parseRoute } from '../src/hooks/useRoute.ts';
+import { computeMenuStyle, PORTAL_DROPDOWN_Z } from '../src/components/common/PortalDropdown.tsx';
 import { validateBuyer } from '../src/mall-site/useBuyerForm.ts';
 import { mallDeliveryFeeKobo, mallDeliveryZone } from '../src/shared/mallDelivery.ts';
 
@@ -48,4 +49,50 @@ test('development bootstrap prevents stale service workers from mixing React mod
   assert.match(pwaHook, /import\.meta\.env\.PROD/);
   assert.match(worker, /node_modules\/\.vite/);
   assert.match(worker, /cached \|\| new Response/);
+});
+
+test('portal dropdown menus stack above every modal layer', () => {
+  // AccessibleOverlay renders modals at z-[9999]; plain modals use z-50.
+  assert.ok(PORTAL_DROPDOWN_Z > 9999, `portal dropdown z-index ${PORTAL_DROPDOWN_Z} must exceed the modal layer`);
+});
+
+test('dropdown menus flip above the anchor when they do not fit below it', () => {
+  const viewport = { width: 1024, height: 800 };
+  // Anchor near the viewport bottom: 58px free below, 694px above → flip up.
+  const flipped = computeMenuStyle({ left: 24, top: 700, width: 300, height: 36 }, viewport, 192);
+  assert.equal(flipped.top, undefined);
+  assert.equal(flipped.bottom, 106); // viewport.height - anchor.top + gap
+  assert.equal(flipped.maxHeight, 192);
+  // Anchor near the top: plenty of room below → open downward.
+  const below = computeMenuStyle({ left: 24, top: 10, width: 300, height: 36 }, viewport, 192);
+  assert.equal(below.bottom, undefined);
+  assert.equal(below.top, 52); // anchor.top + anchor.height + gap
+  assert.equal(below.maxHeight, 192);
+});
+
+test('dropdown menus clamp to the viewport and keep a usable minimum height', () => {
+  const viewport = { width: 1024, height: 800 };
+  // Anchor poking past the right edge: the menu must not overflow the viewport.
+  const clamped = computeMenuStyle({ left: 1000, top: 100, width: 300, height: 36 }, viewport, 192);
+  assert.equal(clamped.left, 724); // viewport.width - anchor.width
+  assert.equal(clamped.width, 300);
+  // Squeezed between viewport edges: the menu never collapses below 96px.
+  const squeezed = computeMenuStyle({ left: 0, top: 86, width: 300, height: 36 }, { width: 1024, height: 200 }, 192);
+  assert.equal(squeezed.maxHeight, 96);
+});
+
+test('in-modal dropdown menus render through portals instead of clipped absolute layers', () => {
+  const portal = fs.readFileSync('src/components/common/PortalDropdown.tsx', 'utf8');
+  assert.match(portal, /createPortal\(/);
+  for (const file of ['src/components/modals/AddProductModal.tsx', 'src/components/purchases/ProductSearchPicker.tsx', 'src/mall-site/MallCategoryNav.tsx']) {
+    const source = fs.readFileSync(file, 'utf8');
+    assert.match(source, /PortalDropdown/, `${file} must render its dropdown through PortalDropdown`);
+    assert.doesNotMatch(source, /top-full/, `${file} must not anchor dropdowns with clipped absolute positioning`);
+  }
+});
+
+test('checkout customer card does not scroll over the payment method fieldset', () => {
+  const checkout = fs.readFileSync('src/mall-site/MallCheckout.tsx', 'utf8');
+  assert.match(checkout, /Payment method/);
+  assert.doesNotMatch(checkout, /lg:sticky/);
 });

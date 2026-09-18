@@ -2,6 +2,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { RELATIONAL_DDL, RELATIONAL_INDEXES } from './relationalDdl.js';
 import { MALL_OVERSELL_TRIGGER_SQL, type MallExecutor } from './mallApi.js';
+import { MALL_SAFETY_DDL } from './mallSafety.js';
+import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, isDuplicateColumnError, type MallConfig } from './mallOperations.js';
 
 
 export type Tx = {
@@ -27,6 +29,18 @@ export function makeNodeAdapter(db: DatabaseSync): Tx {
 /** Create the relational tables in a local node:sqlite database (idempotent). */
 export function ensureRelationalSchemaNode(db: DatabaseSync): number {
   for (const ddl of RELATIONAL_DDL) db.exec(ddl.endsWith(';') ? ddl : `${ddl};`);
+  for (const ddl of MALL_SAFETY_DDL) db.exec(ddl);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const ddl of MALL_OPERATIONS_DDL) db.exec(ddl);
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+  // #10 merchandising columns: additive, and a duplicate-column error on restart
+  // is the expected no-op rather than a failure.
+  for (const column of MALL_MERCH_COLUMNS) {
+    try { db.exec(`${column.ddl};`); }
+    catch (error) { if (!isDuplicateColumnError(error)) throw error; }
+  }
   for (const index of RELATIONAL_INDEXES) {
     try {
       db.exec(index.endsWith(';') ? index : `${index};`);
@@ -35,11 +49,7 @@ export function ensureRelationalSchemaNode(db: DatabaseSync): number {
     }
   }
   // Phase 5: oversell is impossible store-wide once this trigger exists.
-  try {
-    db.exec(MALL_OVERSELL_TRIGGER_SQL.endsWith(';') ? MALL_OVERSELL_TRIGGER_SQL : `${MALL_OVERSELL_TRIGGER_SQL};`);
-  } catch {
-    // trigger already present — safe to continue
-  }
+  db.exec(MALL_OVERSELL_TRIGGER_SQL.endsWith(';') ? MALL_OVERSELL_TRIGGER_SQL : `${MALL_OVERSELL_TRIGGER_SQL};`);
   return RELATIONAL_DDL.length;
 }
 
@@ -48,8 +58,11 @@ export function ensureRelationalSchemaNode(db: DatabaseSync): number {
  * (BEGIN IMMEDIATE takes the write lock up front, so concurrent checkouts
  * serialize and the oversell trigger can never race).
  */
-export function makeNodeMallExecutor(db: DatabaseSync): MallExecutor {
+export function makeNodeMallExecutor(db: DatabaseSync, config?: MallConfig, clientIp?: string): MallExecutor {
   return {
+    config, clientIp,
+    // #14 — the Node disk store is always available.
+    imagesConfigured: true,
     queryAll: async (sql, params = []) => db.prepare(sql).all(...params) as any[],
     runBatch: async (stmts) => {
       db.exec('BEGIN IMMEDIATE;');
@@ -71,5 +84,5 @@ export function makeNodeMallExecutor(db: DatabaseSync): MallExecutor {
 
 /** Same bootstrap for Cloudflare D1 (statement-per-call, tolerant). */
 export function relationalSchemaStatements(): string[] {
-  return [...RELATIONAL_DDL, ...RELATIONAL_INDEXES].map((s) => (s.endsWith(';') ? s : `${s};`));
+  return [...RELATIONAL_DDL, ...RELATIONAL_INDEXES, ...MALL_SAFETY_DDL, ...MALL_OPERATIONS_DDL, MALL_OVERSELL_TRIGGER_SQL].map((s) => (s.endsWith(';') ? s : `${s};`));
 }

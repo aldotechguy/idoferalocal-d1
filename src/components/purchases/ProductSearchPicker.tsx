@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { Product, Sale } from '../../types';
 import { useApp } from '../../context/AppContext';
+import { PortalDropdown } from '../common/PortalDropdown';
 
 export interface POItemFormState {
   productId: string;
@@ -73,6 +74,7 @@ export const ProductSearchPicker: React.FC<ProductSearchPickerProps> = ({
   const [sortBy, setSortBy] = useState<SortOption>('urgency');
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const menuPortalRef = useRef<HTMLDivElement | null>(null);
 
   // 1. Calculate historical sales demand per product
   const demandMap = useMemo(() => {
@@ -276,10 +278,16 @@ export const ProductSearchPicker: React.FC<ProductSearchPickerProps> = ({
       });
   }, [productProfiles, searchTerm, selectedCategory, quickFilter, sortBy]);
 
-  // Click outside to close results dropdown
+  // Click outside to close results dropdown (the portal menu lives outside
+  // containerRef in the DOM, so it must be excluded explicitly)
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(target) &&
+        !menuPortalRef.current?.contains(target)
+      ) {
         setIsOpen(false);
       }
     };
@@ -469,9 +477,15 @@ export const ProductSearchPicker: React.FC<ProductSearchPickerProps> = ({
         )}
       </div>
 
-      {/* Product Results Popover / Dropdown */}
-      {isOpen && (
-        <div className="absolute z-30 left-0 right-0 top-full mt-1.5 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-2xl max-h-80 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 p-1.5 animate-in fade-in slide-in-from-top-1 duration-150">
+      {/* Product Results Popover / Dropdown — portal layer, so the PO modal's
+          overflow-y-auto container can no longer clip it */}
+      <PortalDropdown
+        anchorRef={containerRef}
+        open={isOpen}
+        desiredHeight={320}
+        portalRef={menuPortalRef}
+        className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-2xl divide-y divide-slate-100 dark:divide-slate-800 p-1.5 animate-in fade-in slide-in-from-top-1 duration-150"
+      >
           {/* Subheader summary bar */}
           <div className="px-3 py-2 flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-wider bg-slate-50/80 dark:bg-slate-800/60 rounded-xl mb-1 sticky top-0 backdrop-blur-md z-10">
             <span className="flex items-center gap-1.5">
@@ -637,8 +651,7 @@ export const ProductSearchPicker: React.FC<ProductSearchPickerProps> = ({
               );
             })
           )}
-        </div>
-      )}
+      </PortalDropdown>
     </div>
   );
 };

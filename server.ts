@@ -54,7 +54,11 @@ let db = createDatabaseInstance();
 import { makeNodeAdapter } from "./src/server/nodeAdapter";
 import { ensureRelationalSchemaNode, makeNodeMallExecutor } from "./src/server/nodeAdapter";
 import { handleMallApi } from "./src/server/mallApi";
-import { handleStaffMallApi } from "./src/server/mallOrderAdminApi";
+import { handleStaffMallApi, maintainMall } from "./src/server/mallOrderAdminApi";
+import { handleStaffMallListingApi } from "./src/server/mallListingApi";
+import { handleStaffProductImageApi, handlePublicImageRequest } from "./src/server/productImageApi";
+import { makeNodeImageStore } from "./src/server/nodeImageStore";
+import { bootstrapAdmin } from "./src/server/adminBootstrap";
 import { buildSnapshot } from "./src/server/relationalSnapshot.js";
 import {
   upsertToStatements,
@@ -68,7 +72,7 @@ try {
   const created = ensureRelationalSchemaNode(db);
   console.log(`Relational schema ready (${created} tables, backend=relational).`);
 } catch (e) {
-  console.warn("Relational schema init:", (e as Error)?.message || e);
+  throw new Error('Relational schema initialization failed; resolve migration conflicts before accepting orders.', {cause:e});
 }
 
 /**
@@ -308,24 +312,9 @@ async function seedUser(user: { id: string; email: string; username: string; dis
 }
 
 async function ensureAuthSeed() {
-  await seedUser({
-    id: "usr-superadmin-idofera",
-    email: "michaelidongesit5@gmail.com",
-    username: "idofera",
-    displayName: "Aidy Mike",
-    password: "aidy2800",
-    superAdmin: true,
-  });
-  // Ensure existing record display_name is updated to Aidy Mike
-  db.prepare("UPDATE app_users SET display_name = 'Aidy Mike' WHERE id = 'usr-superadmin-idofera' OR username = 'idofera'").run();
-  await seedUser({
-    id: "usr-admin-1",
-    email: "admin@idoferapackaging.com",
-    username: "admin",
-    displayName: "Administrator",
-    password: "admin123",
-    superAdmin: false,
-  });
+  if (db.prepare('SELECT id FROM app_users LIMIT 1').get()) return;
+  const admin = bootstrapAdmin(process.env);
+  if (admin) await seedUser(admin);
 }
 
 // Initial seed
@@ -744,6 +733,18 @@ async function syncFromCloudflareD1WithLock(): Promise<{ success: boolean; count
 }
 
 // =================== MALL STOREFRONT API (Phase 5) ===================
+// #14 — durable image storage. Node writes to disk; the edge writes to R2.
+const mallImageStore = makeNodeImageStore(process.env.MALL_IMAGE_DIR || path.join(process.cwd(), 'data', 'mall-images'));
+
+let mallMaintenanceRunning = false;
+const mallMaintenanceTimer = setInterval(async () => {
+  if (mallMaintenanceRunning) return;
+  mallMaintenanceRunning = true;
+  try { await maintainMall(makeNodeMallExecutor(db,process.env)); }
+  catch { console.error('[mall-maintenance] Failed; check staff operations/readiness.'); }
+  finally { mallMaintenanceRunning = false; }
+}, 60_000);
+mallMaintenanceTimer.unref();
 // Same shared handler the edge worker uses; serves the public storefront from
 // local dev so `npm run dev` + /mall behaves exactly like production.
 app.all("/api/mall/*", async (req, res) => {
@@ -752,14 +753,16 @@ app.all("/api/mall/*", async (req, res) => {
     const headers = new Headers({ "content-type": "application/json" });
     const session = req.headers["x-mall-session"];
     if (typeof session === "string" && session) headers.set("x-mall-session", session);
+    const attemptKey = req.headers['idempotency-key'];
+    if (typeof attemptKey === 'string') headers.set('idempotency-key', attemptKey);
     const request = new Request(url, {
       method: req.method,
       headers,
       body: ["GET", "HEAD"].includes(req.method) ? undefined : JSON.stringify(req.body ?? {}),
     });
-    const response = await handleMallApi(request, makeNodeMallExecutor(db));
+    const response = await handleMallApi(request, makeNodeMallExecutor(db, process.env, req.ip || req.socket.remoteAddress || 'unknown'));
     if (!response) return res.status(404).json({ error: "Not found" });
-    return res.status(response.status).set("content-type", "application/json").send(await response.text());
+    return res.status(response.status).set(Object.fromEntries(response.headers)).send(await response.text());
   } catch (error: any) {
     const status = error?.mallStatus ?? 500;
     const body: any = { error: error?.message || "Mall API error" };
@@ -779,7 +782,7 @@ app.all("/api/staff/mall-orders*", async (req, res) => {
       headers,
       body: ["GET", "HEAD"].includes(req.method) ? undefined : JSON.stringify(req.body ?? {}),
     });
-    const response = await handleStaffMallApi(request, makeNodeMallExecutor(db), {
+    const response = await handleStaffMallApi(request, makeNodeMallExecutor(db, process.env), {
       id: actor.id,
       displayName: actor.display_name,
       role: actor.role,
@@ -787,6 +790,66 @@ app.all("/api/staff/mall-orders*", async (req, res) => {
     return res.status(response.status).set("content-type", "application/json").send(await response.text());
   } catch (error: any) {
     return res.status(500).json({ error: error?.message || "Mall order operation failed." });
+  }
+});
+
+app.all("/api/staff/mall-listings*", async (req, res) => {
+  try {
+    const actor = await requireAppUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required." });
+    const url = new URL(req.originalUrl || req.url, "http://localhost:3000");
+    const headers = new Headers({ "content-type": "application/json" });
+    const request = new globalThis.Request(url, {
+      method: req.method,
+      headers,
+      body: ["GET", "HEAD"].includes(req.method) ? undefined : JSON.stringify(req.body ?? {}),
+    });
+    const response = await handleStaffMallListingApi(request, makeNodeMallExecutor(db, process.env), {
+      id: actor.id,
+      displayName: actor.display_name,
+      role: actor.role,
+    });
+    return res.status(response.status).set("content-type", "application/json").send(await response.text());
+  } catch (error: any) {
+    return res.status(500).json({ error: error?.message || "Mall listing operation failed." });
+  }
+});
+
+app.all("/api/staff/product-images", async (req, res) => {
+  try {
+    const actor = await requireAppUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required." });
+    const url = new URL(req.originalUrl || req.url, "http://localhost:3000");
+    const request = new globalThis.Request(url, {
+      method: req.method,
+      headers: new Headers({ "content-type": "application/json" }),
+      body: ["GET", "HEAD", "DELETE"].includes(req.method) ? undefined : JSON.stringify(req.body ?? {}),
+    });
+    const response = await handleStaffProductImageApi(request, mallImageStore, makeNodeMallExecutor(db, process.env), {
+      id: actor.id,
+      displayName: actor.display_name,
+      role: actor.role,
+    });
+    return res.status(response.status).set("content-type", "application/json").send(await response.text());
+  } catch (error: any) {
+    return res.status(500).json({ error: error?.message || "Image operation failed." });
+  }
+});
+
+// #14 — public, immutable delivery of stored product images.
+app.get("/mall-images/*", async (req, res) => {
+  try {
+    const key = decodeURIComponent(String(req.path).replace(/^\/mall-images\//, ""));
+    const response = await handlePublicImageRequest(
+      new globalThis.Request(new URL(req.originalUrl || req.url, "http://localhost:3000"), { method: "GET" }),
+      mallImageStore,
+      key,
+    );
+    if (response.status !== 200) return res.status(response.status).send(await response.text());
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return res.status(200).set(Object.fromEntries(response.headers)).send(buffer);
+  } catch {
+    return res.status(404).send("Not found");
   }
 });
 
@@ -2147,6 +2210,14 @@ Sample Products: ${JSON.stringify((products || []).slice(0, 5), null, 2)}`;
     res.status(500).json({ error: error.message || "Failed to generate forecasting" });
   }
 });
+/**
+ * LEGACY one-time merchandising seed, now opt-in only (MALL_SEED_HEROES=true).
+ *
+ * Publishing is the maintained workflow: use the staff Mall Listings screen
+ * (PUT /api/staff/mall-listings/:productId). This exists solely to bootstrap an
+ * existing deployment that already depends on these specific hero products, and
+ * it never runs during normal startup. New deployments should not use it.
+ */
 const MALL_HERO_IDS = [
   { id: 'prod-imp-1785576583554-82', name: 'Large Travel Nylon Bag', mallPrice: 300000 },
   { id: 'prod-imp-1785576583547-0', name: 'Translucent 1L Bucket', mallPrice: 40000 },
@@ -2226,11 +2297,15 @@ async function startServer() {
         console.warn("Background startup hydration warning:", syncErr?.message || syncErr);
       }
 
-      const heroSeed = seedMallHeroes(db);
-      if (heroSeed.warnings.length) {
-        for (const warning of heroSeed.warnings) console.warn(`[mall-init] ${warning}`);
+      if (process.env.MALL_SEED_HEROES === 'true') {
+        const heroSeed = seedMallHeroes(db);
+        if (heroSeed.warnings.length) {
+          for (const warning of heroSeed.warnings) console.warn(`[mall-init] ${warning}`);
+        }
+        console.log(`[mall-init] mall-listed rows: ${heroSeed.existingCount} -> ${heroSeed.afterCount}; heroes updated: ${heroSeed.updated}`);
+      } else if (process.env.MALL_SEED_HEROES !== undefined) {
+        console.warn('[mall-init] MALL_SEED_HEROES must be exactly "true" to run the legacy seed; skipping.');
       }
-      console.log(`[mall-init] mall-listed rows: ${heroSeed.existingCount} -> ${heroSeed.afterCount}; heroes updated: ${heroSeed.updated}`);
     })();
   });
 }

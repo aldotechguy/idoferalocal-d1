@@ -10,6 +10,8 @@ export const MallOrderSuccess: React.FC = () => {
   const { order, newSession } = useMall();
   const go = useNavigateMall();
   const [copied, setCopied] = React.useState(false);
+  const [configuration,setConfiguration]=React.useState<any>(null);
+  React.useEffect(()=>{mallClient.configuration().then(setConfiguration).catch(()=>setConfiguration(null));},[]);
   if (!order) {
     return (
       <div className="text-center py-16 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
@@ -31,6 +33,8 @@ export const MallOrderSuccess: React.FC = () => {
         {order.customerName && <div className="mt-1 flex justify-between"><span className="text-slate-500">Customer</span><strong>{order.customerName}</strong></div>}
       </div>
       <p className="mt-3 text-xs text-slate-500">{order.quoteRequired ? 'Staff will confirm your delivery fee before the order can be confirmed or paid.' : 'Payment is confirmed by staff during fulfilment.'}</p>
+      {order.paymentMethod === 'bank_transfer' && configuration?.bank && <div className="mt-3 rounded-xl border p-3 text-left text-sm"><h2 className="font-bold">Bank transfer instructions</h2><p>{configuration.bank.name}</p><p>{configuration.bank.accountName} — {configuration.bank.accountNumber}</p><p>Use reference: <strong>{order.paymentReference}</strong></p><p>{order.quoteRequired?'Wait for the delivery quote before transferring.':`Transfer ${formatNaira(order.amountDueKobo || 0)}. Staff will confirm receipt; do not pay twice.`}</p></div>}
+      {configuration?.pickup && order.deliveryZone==='pickup' && <p className="mt-3 text-sm">Pickup: {configuration.pickup.address}. Hours: {configuration.pickup.hours}</p>}
       <div className="mt-4 flex gap-2">
         <button type="button" onClick={() => { newSession(); go('/'); }} className="flex-1 h-11 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-extrabold">Continue Shopping</button>
         <button type="button" onClick={() => go('/orders')} className="flex-1 h-11 rounded-xl bg-blue-600 text-white text-sm font-extrabold">Track Order</button>
@@ -41,19 +45,20 @@ export const MallOrderSuccess: React.FC = () => {
 
 export const MallOrders: React.FC = () => {
   const [phone, setPhone] = React.useState('');
+  const [orderNo,setOrderNo]=React.useState('');
   const [rows, setRows] = React.useState<MallOrderLookup[]>([]);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState('');
   React.useEffect(() => {
     const b = getBuyerProfile();
-    if (b?.phone) { setPhone(b.phone); lookup(b.phone); }
+    if (b?.phone) setPhone(b.phone);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const lookup = async (p: string) => {
     if (p.replace(/\D/g, '').length < 7) { setErr('Enter the phone number used at checkout.'); return; }
     setErr(''); setBusy(true);
     try {
-      const r = await mallClient.ordersByPhone(p);
+      const r = await mallClient.ordersByPhone(p,orderNo.trim());
       setRows(r.orders);
       if (!r.orders.length) setErr('No orders found for that phone number yet.');
     } catch (e) { setErr(String(e)); } finally { setBusy(false); }
@@ -62,7 +67,8 @@ export const MallOrders: React.FC = () => {
     <div className="max-w-xl mx-auto space-y-4">
       <div className="liquid-glass rounded-2xl text-slate-900 p-4">
         <h1 className="text-lg font-black">Track My Orders</h1>
-        <p className="text-xs text-slate-400">Enter the phone number used at checkout.</p>
+        <p className="text-xs text-slate-400">Enter your order number and the phone number used at checkout.</p>
+        <label className="block mt-3 text-sm">Order number<input value={orderNo} onChange={e=>setOrderNo(e.target.value)} autoComplete="off" className="block w-full h-11 px-3 rounded-xl border" /></label>
         <form onSubmit={(event) => { event.preventDefault(); lookup(phone); }} className="mt-3 flex gap-2">
           <label htmlFor="order-phone" className="sr-only">Checkout phone number</label>
           <input id="order-phone" name="phone" type="tel" inputMode="tel" autoComplete="tel" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="0803…" className="flex-1 h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm" />
@@ -80,6 +86,8 @@ export const MallOrders: React.FC = () => {
               </div>
               <div className="text-right shrink-0">
                 <p className="text-sm font-black">{formatNaira(o.totalKobo)}</p>
+                <p className="text-xs">Payment: {o.paymentStatus || 'pending'}</p>
+                {o.updatedAt && <p className="text-xs">Updated {new Date(o.updatedAt).toLocaleString()}</p>}
                 <span className="text-xs font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300">{o.status}</span>
               </div>
             </div>

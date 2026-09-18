@@ -6,6 +6,7 @@ import { formatNaira } from './mallUi';
 import { MallQuantityControl } from './MallQuantityControl';
 import { ProductImage } from '../components/common/ProductImage';
 import { useToast } from '../context/ToastContext';
+import { mallClient, type MallProduct } from '../services/mallClient';
 
 export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
   const { products, cart, addToCart, refreshProducts } = useMall();
@@ -17,26 +18,36 @@ export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
   React.useEffect(() => { if (!products) refreshProducts(); }, [products, refreshProducts]);
 
   const key = decodeURIComponent(id);
-  const product = products?.products.find((p) => p.id === id || p.id === key);
+  const [product, setProduct] = React.useState<MallProduct | null>(null);
+  const [detailLoading,setDetailLoading] = React.useState(true);
+  const [detailError,setDetailError] = React.useState('');
+  React.useEffect(()=>{
+    let active=true;
+    setDetailLoading(true); setDetailError(''); setProduct(null);
+    mallClient.product(key).then(result=>{if(active) setProduct(result.product);})
+      .catch(error=>{if(active) setDetailError(error instanceof Error?error.message:'Unable to load product.');})
+      .finally(()=>{if(active) setDetailLoading(false);});
+    return ()=>{active=false;};
+  },[key]);
   React.useEffect(() => {
     if (product) document.title = `${product.name} — IdoferaMall`;
   }, [product]);
 
-  if (!products) {
+  if (detailLoading) {
     return <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 animate-pulse"><div className="h-48 rounded-xl bg-slate-100 dark:bg-slate-800" /></div>;
   }
   if (!product) {
     return (
       <div className="text-center py-16 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900">
         <Package className="w-9 h-9 mx-auto text-slate-300 dark:text-slate-600" />
-        <p className="mt-2 text-sm font-extrabold text-slate-700 dark:text-slate-200">Product not found</p>
+        <p className="mt-2 text-sm font-extrabold text-slate-700 dark:text-slate-200">{detailError || 'Product not found'}</p>
         <button type="button" onClick={() => go('/')} className="mt-3 h-10 px-5 rounded-xl bg-blue-600 text-white text-sm font-extrabold hover:bg-blue-500">Back to Mall</button>
       </div>
     );
   }
 
   const inCart = cart?.items.find((i) => i.productId === product.id);
-  const related = products.products.filter((p) => p.id !== product.id && (p.category || '') === (product.category || '')).slice(0, 6);
+  const related = (products?.products || []).filter((p) => p.id !== product.id && (p.category || '') === (product.category || '')).slice(0, 6);
   const share = async () => {
     const data = { title: product.name, text: `${product.name} on IdoferaMall`, url: window.location.href };
     try {

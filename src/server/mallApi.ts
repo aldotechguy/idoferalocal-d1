@@ -16,10 +16,17 @@
  */
 import { KoboToNaira, parseJsonArray, s, n } from './relationalMapper.js';
 import { MALL_DELIVERY_ZONE_IDS, mallDeliveryFeeKobo, mallDeliveryLabel, mallDeliveryZone } from '../shared/mallDelivery.js';
+import { assertSql } from './mallSafety.js';
+import { normalizeMallPhone, normalizedPhoneSql } from '../shared/mallPhone.js';
+import { mallReadiness, mallRateLimit, publicMallConfig, type MallConfig } from './mallOperations.js';
 
 export type MallStmt = { sql: string; params?: any[] };
 
 export type MallExecutor = {
+  config?: MallConfig;
+  clientIp?: string;
+  /** #14 — whether durable image storage exists in this runtime. */
+  imagesConfigured?: boolean;
   queryAll: (sql: string, params?: any[]) => Promise<any[]>;
   /** Runs statements atomically; returns per-statement `changes` counts. */
   runBatch: (stmts: MallStmt[]) => Promise<number[]>;
@@ -35,8 +42,27 @@ BEGIN
 END;`;
 
 const SELLABLE = `is_mall_listed = 1 AND status = 'Active' AND stock_qty > 0`;
-const CATALOG_COLUMNS = `id, sku, name, description, category_name, brand, unit, images_json, stock_qty,
-  retail_price_kobo, COALESCE(mall_price_kobo, retail_price_kobo) AS price_kobo,
+
+/**
+ * Parameter-free "now" so promotional windows are evaluated identically in the
+ * catalog, the cart, the detail endpoint AND the checkout batch assertion.
+ * Promo columns are always stored as millisecond ISO-8601 UTC, so the lexical
+ * comparison is also a chronological one.
+ */
+export const NOW_SQL = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
+export const promoActive = (alias: string) => `${alias}.mall_promo_price_kobo IS NOT NULL
+    AND (${alias}.mall_promo_start IS NULL OR ${alias}.mall_promo_start <= ${NOW_SQL})
+    AND (${alias}.mall_promo_end IS NULL OR ${alias}.mall_promo_end >= ${NOW_SQL})`;
+/** THE definition of the public mall price: active promo -> mall price -> retail price. */
+export const effectivePrice = (alias: string) =>
+  `COALESCE(CASE WHEN ${promoActive(alias)} THEN ${alias}.mall_promo_price_kobo END, ${alias}.mall_price_kobo, ${alias}.retail_price_kobo)`;
+
+const CATALOG_COLUMNS = `id, sku, name, COALESCE(NULLIF(mall_description, ''), description) AS description, category_name, brand, unit, images_json, stock_qty,
+  created_at,
+  retail_price_kobo, mall_price_kobo, mall_featured, mall_display_order,
+  mall_promo_price_kobo, mall_promo_start, mall_promo_end,
+  CASE WHEN ${promoActive('products')} THEN 1 ELSE 0 END AS promo_active,
+  ${effectivePrice('products')} AS price_kobo,
   COALESCE((
     SELECT SUM(si.qty)
     FROM sale_items si
@@ -44,6 +70,16 @@ const CATALOG_COLUMNS = `id, sku, name, description, category_name, brand, unit,
     WHERE si.product_id = products.id
       AND LOWER(COALESCE(sale.status, '')) IN ('completed', 'paid', 'fulfilled', 'delivered')
   ), 0) AS sold_qty`;
+
+/** Whitelisted server-side sorts. Select aliases (price_kobo, sold_qty) are valid ORDER BY keys. */
+const CATALOG_SORTS: Record<string, string> = {
+  relevance: `mall_featured DESC, (mall_display_order IS NULL) ASC, mall_display_order ASC, updated_at DESC, id ASC`,
+  popular: `sold_qty DESC, mall_featured DESC, updated_at DESC, id ASC`,
+  price_asc: `price_kobo ASC, name ASC, id ASC`,
+  price_desc: `price_kobo DESC, name ASC, id ASC`,
+  newest: `created_at DESC, id DESC`,
+};
+const MAX_CATALOG_OFFSET = 10_000;
 
 const uuid = () => crypto.randomUUID();
 const nowIso = () => new Date().toISOString();
@@ -82,6 +118,9 @@ function publicProduct(r: any) {
     image: images[0] || '',
     images,
     available: stock > 0,
+    createdAt: s(r.created_at),
+    featured: n(r.mall_featured) === 1,
+    promoActive: n(r.promo_active) === 1,
   };
 }
 
@@ -89,37 +128,66 @@ function publicProduct(r: any) {
 async function getCatalog(exec: MallExecutor, url: URL) {
   const q = s(url.searchParams.get('q')).trim().slice(0, 80);
   const category = s(url.searchParams.get('category')).trim().slice(0, 80);
+  const brandFilter = s(url.searchParams.get('brand')).trim().slice(0, 80);
+  const sortKey = s(url.searchParams.get('sort'), 'relevance').trim();
+  const sort = CATALOG_SORTS[sortKey];
   const limitParam = url.searchParams.get('limit');
   const limit = Math.min(Math.max(limitParam === null ? 24 : n(limitParam, 24), 1), 60);
   const offset = Math.max(n(url.searchParams.get('offset'), 0), 0);
 
-  const filters: string[] = [SELLABLE];
-  const params: any[] = [];
+  if (!sort) fail(400, `Unsupported sort. Use one of: ${Object.keys(CATALOG_SORTS).join(', ')}.`);
+  if (offset > MAX_CATALOG_OFFSET) fail(400, 'Pagination offset is too large. Narrow the search instead.');
+
+  const rawInStock = url.searchParams.get('inStock');
+  if (rawInStock !== null && !['0', '1'].includes(rawInStock)) fail(400, 'inStock must be 0 or 1.');
+
+  // Base scope: everything the storefront may show, minus brand/inStock. The brand
+  // list is derived from this scope so the filter reflects the WHOLE catalog page
+  // set (search + category), not just the current page.
+  const base: string[] = [SELLABLE];
+  const baseParams: any[] = [];
   if (q) {
-    filters.push('(name LIKE ? OR description LIKE ? OR brand LIKE ?)');
-    const like = `%${q}%`;
-    params.push(like, like, like);
+    const like = `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+    base.push(`(name LIKE ? ESCAPE '\\' OR COALESCE(NULLIF(mall_description, ''), description) LIKE ? ESCAPE '\\' OR brand LIKE ? ESCAPE '\\')`);
+    baseParams.push(like, like, like);
   }
   if (category) {
-    filters.push('category_name = ?');
-    params.push(category);
+    base.push('category_name = ?');
+    baseParams.push(category);
   }
+  const whereBase = base.join(' AND ');
+
+  const filters = [...base];
+  const params = [...baseParams];
+  if (brandFilter) {
+    filters.push('brand = ?');
+    params.push(brandFilter);
+  }
+  // The public catalog is sellable-only, so stock_qty > 0 already holds; this keeps
+  // the documented contract explicit without ever exposing unpurchasable items.
+  if (rawInStock === '1') filters.push('stock_qty > 0');
   const where = filters.join(' AND ');
 
   const rows = await exec.queryAll(
-    `SELECT ${CATALOG_COLUMNS} FROM products WHERE ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+    `SELECT ${CATALOG_COLUMNS} FROM products WHERE ${where} ORDER BY ${sort} LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );
   const totalRow = await exec.queryAll(`SELECT COUNT(*) AS n FROM products WHERE ${where}`, params);
   const catRows = await exec.queryAll(
     `SELECT category_name AS name, COUNT(*) AS count FROM products WHERE ${SELLABLE} GROUP BY category_name ORDER BY count DESC, name ASC`,
   );
+  const brandRows = await exec.queryAll(
+    `SELECT brand AS name, COUNT(*) AS count FROM products WHERE ${whereBase} AND brand <> '' GROUP BY brand ORDER BY count DESC, name ASC`,
+    baseParams,
+  );
   return json({
     products: rows.map(publicProduct),
     categories: catRows.map((c) => ({ name: s(c.name, 'Uncategorized'), count: n(c.count) })),
+    brands: brandRows.map((b) => ({ name: s(b.name), count: n(b.count) })),
     total: n((totalRow[0] as any)?.n),
     limit,
     offset,
+    sort: sortKey,
   });
 }
 
@@ -140,7 +208,7 @@ async function getOrCreateCartId(exec: MallExecutor, sessionId: string): Promise
   const existing = await exec.queryAll('SELECT id, status FROM mall_carts WHERE id = ? LIMIT 1', [cartId]);
   if (!existing.length) {
     await exec.runBatch([{
-      sql: 'INSERT INTO mall_carts (id, customer_id, session_id, status, updated_at) VALUES (?, NULL, ?, ?, ?)',
+      sql: 'INSERT OR IGNORE INTO mall_carts (id, customer_id, session_id, status, updated_at) VALUES (?, NULL, ?, ?, ?)',
       params: [cartId, sessionId, 'active', Date.now()],
     }]);
     return cartId;
@@ -156,7 +224,7 @@ async function getOrCreateCartId(exec: MallExecutor, sessionId: string): Promise
 
 const CART_ITEM_COLUMNS = `ci.product_id AS product_id, ci.qty AS qty, p.name AS name, p.unit AS unit,
   p.stock_qty AS stock_qty, p.images_json AS images_json, p.is_mall_listed AS is_mall_listed,
-  p.status AS status, COALESCE(p.mall_price_kobo, p.retail_price_kobo) AS price_kobo`;
+  p.status AS status, ${effectivePrice('p')} AS price_kobo`;
 
 async function readCart(exec: MallExecutor, cartId: string) {
   const rows = await exec.queryAll(
@@ -192,7 +260,7 @@ async function addToCart(exec: MallExecutor, sessionId: string, body: any) {
   const productId = s(body?.productId);
   const qty = n(body?.qty, 1);
   if (!productId) fail(400, 'productId is required.');
-  if (!Number.isSafeInteger(qty) || qty < 1) fail(400, 'qty must be a positive whole number.');
+  if (!Number.isSafeInteger(qty) || qty < 1 || qty > 1000) fail(400, 'qty must be a whole number between 1 and 1000.');
 
   const rows = await exec.queryAll(
     `SELECT ${CATALOG_COLUMNS} FROM products WHERE id = ? AND ${SELLABLE} LIMIT 1`,
@@ -202,15 +270,11 @@ async function addToCart(exec: MallExecutor, sessionId: string, body: any) {
   if (n((rows[0] as any).stock_qty) < 1) fail(409, 'Product is out of stock.');
 
   const cartId = await getOrCreateCartId(exec, sessionId);
-  const current = await exec.queryAll(
-    'SELECT qty FROM mall_cart_items WHERE cart_id = ? AND product_id = ? LIMIT 1',
-    [cartId, productId],
-  );
   const stock = n((rows[0] as any).stock_qty);
-  const nextQty = Math.min(n((current[0] as any)?.qty) + qty, Math.max(stock, 1));
+  if (qty > stock) fail(409, 'Quantity exceeds available stock.');
   await exec.runBatch([
-    { sql: 'DELETE FROM mall_cart_items WHERE cart_id = ? AND product_id = ?', params: [cartId, productId] },
-    { sql: 'INSERT INTO mall_cart_items (id, cart_id, product_id, variant_id, qty, unit_price_kobo) VALUES (?, ?, ?, NULL, ?, ?)', params: [`mci-${uuid()}`, cartId, productId, nextQty, n((rows[0] as any).price_kobo)] },
+    ...assertSql(`COALESCE((SELECT qty FROM mall_cart_items WHERE cart_id=? AND product_id=?),0)+? <= MIN(1000,(SELECT stock_qty FROM products WHERE id=?))`,[cartId,productId,qty,productId]),
+    { sql: 'INSERT INTO mall_cart_items (id, cart_id, product_id, qty, unit_price_kobo) VALUES (?, ?, ?, ?, ?) ON CONFLICT(cart_id,product_id) DO UPDATE SET qty=mall_cart_items.qty+excluded.qty,unit_price_kobo=excluded.unit_price_kobo', params: [uuid(), cartId, productId, qty, n((rows[0] as any).price_kobo)] },
     { sql: 'UPDATE mall_carts SET updated_at = ? WHERE id = ?', params: [Date.now(), cartId] },
   ]);
   return respondWithCart(exec, sessionId);
@@ -220,7 +284,7 @@ async function setCartQty(exec: MallExecutor, sessionId: string, body: any) {
   const productId = s(body?.productId);
   const qty = n(body?.qty, -1);
   if (!productId) fail(400, 'productId is required.');
-  if (!Number.isSafeInteger(qty) || qty < 0) fail(400, 'qty must be a non-negative whole number.');
+  if (!Number.isSafeInteger(qty) || qty < 0 || qty > 1000) fail(400, 'qty must be a whole number between 0 and 1000.');
 
   const cartId = await getOrCreateCartId(exec, sessionId);
   const stmts: MallStmt[] = [{ sql: 'DELETE FROM mall_cart_items WHERE cart_id = ? AND product_id = ?', params: [cartId, productId] }];
@@ -244,7 +308,7 @@ const PAYMENT_PROVIDERS = new Set(['pay_on_pickup', 'bank_transfer']);
 function orderNumber(): string {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let rand = '';
-  for (let i = 0; i < 8; i++) rand += alphabet[Math.floor(Math.random() * alphabet.length)];
+  for (const byte of crypto.getRandomValues(new Uint8Array(12))) rand += alphabet[byte % alphabet.length];
   const day = new Date().toISOString().slice(0, 10).replaceAll('-', '');
   return `MALL-${day}-${rand}`;
 }
@@ -256,40 +320,63 @@ function orderNumber(): string {
  * The oversell trigger aborts the whole batch if any line would push stock
  * below zero, so the storefront can never oversell the POS.
  */
-async function checkout(exec: MallExecutor, sessionId: string, body: any) {
-  const customerName = s(body?.customerName).trim().slice(0, 120) || 'Walk-in customer';
-  const customerPhone = s(body?.customerPhone).trim().slice(0, 32) || '08000000000';
-  const deliveryAddress = s(body?.deliveryAddress).trim().slice(0, 400);
-  const note = s(body?.note).trim().slice(0, 400);
+async function checkout(exec: MallExecutor, sessionId: string, body: any, attemptKey: string) {
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(attemptKey)) fail(400, 'A valid Idempotency-Key is required.');
+  const fields: Record<string, string> = {};
+  const text = (key: string, max: number, required = false) => {
+    const value = body?.[key];
+    if ((value != null && typeof value !== 'string') || (typeof value === 'string' && (value.length > max || /[\x00-\x1f\x7f]/.test(value)))) fields[key] = `Use plain text up to ${max} characters.`;
+    const result = typeof value === 'string' ? value.trim() : '';
+    if (required && !result) fields[key] = 'This field is required.';
+    return result;
+  };
+  const customerName = text('customerName', 120, true);
+  const rawPhone = text('customerPhone', 32, true);
+  const customerPhone = normalizeMallPhone(rawPhone);
+  if (!customerPhone) fields.customerPhone = 'Enter a Nigerian mobile number or an international number starting with +.';
+  const deliveryAddress = text('deliveryAddress', 400);
+  const note = text('note', 400);
   const rawMethod = s(body?.paymentMethod);
-  const paymentMethod = PAYMENT_PROVIDERS.has(rawMethod) ? rawMethod : 'pay_on_pickup';
-  if (body?.deliveryZone != null && !MALL_DELIVERY_ZONE_IDS.has(body.deliveryZone)) fail(400, 'Select a valid delivery zone.');
+  if (!PAYMENT_PROVIDERS.has(rawMethod)) fields.paymentMethod = 'Select pay_on_pickup or bank_transfer.';
+  if (Object.keys(fields).length) fail(400, 'Validation failed', { fields });
+  const paymentMethod = rawMethod;
+  if (body?.deliveryZone != null && !MALL_DELIVERY_ZONE_IDS.has(body.deliveryZone)) fail(400, 'Select a valid delivery zone.',{fields:{deliveryZone:'Select a supported zone or request a staff quote.'}});
   const deliveryZone = mallDeliveryZone(body?.deliveryZone);
   const fixedDeliveryFeeKobo = mallDeliveryFeeKobo(deliveryZone);
   const quoteRequired = fixedDeliveryFeeKobo === null;
   // Fixed fees are resolved from the trusted zone policy. Public clients never provide an amount.
   const deliveryFeeKobo = fixedDeliveryFeeKobo ?? 0;
-  if (deliveryZone !== 'pickup' && !deliveryAddress) fail(400, 'Enter a delivery address for the selected zone.');
+  if (deliveryZone !== 'pickup' && deliveryAddress.length<10) fail(400, 'Enter a delivery address for the selected zone.',{fields:{deliveryAddress:'Enter at least 10 characters including street and area.'}});
 
-  const cartId = await getOrCreateCartId(exec, sessionId);
-  const orderId = `mo-${sessionId}`;
+  const requestJson = JSON.stringify({ customerName, customerPhone, deliveryAddress, note, paymentMethod, deliveryZone });
+  const attempt = (await exec.queryAll('SELECT * FROM mall_checkout_attempts WHERE attempt_key = ?', [attemptKey]))[0];
+  if (attempt && (attempt.session_id !== sessionId || attempt.request_json !== requestJson)) fail(409, 'Idempotency key was already used for a different checkout.');
+  const orderId = attempt?.order_id || `mo-${uuid()}`;
   const existingOrder = await exec.queryAll('SELECT * FROM mall_orders WHERE id = ? LIMIT 1', [orderId]);
   if (existingOrder.length) {
     const existingItems = await exec.queryAll('SELECT product_id, product_name, qty, unit_price_kobo FROM mall_order_items WHERE mall_order_id = ? ORDER BY rowid', [orderId]);
     const existing = existingOrder[0];
+    const payment = (await exec.queryAll('SELECT status, provider, reference FROM payments WHERE order_id = ? LIMIT 1', [orderId]))[0];
+    const paid = payment?.status === 'paid' ? n(existing.total_kobo) : 0;
     let existingDelivery: Record<string, any> = {};
     try { existingDelivery = existing.delivery_address_json ? JSON.parse(existing.delivery_address_json) : {}; } catch { /* malformed legacy data */ }
     return json({
       ok: true, orderNo: s(existing.order_no), status: s(existing.status, 'pending'),
       items: existingItems.map((item) => ({ productId: s(item.product_id), name: s(item.product_name), unit: 'pcs', price: n(item.unit_price_kobo), qty: n(item.qty) })),
-      customerName: s(existing.customer_name), subtotalKobo: n(existing.subtotal_kobo), deliveryFeeKobo: n(existing.delivery_fee_kobo), totalKobo: n(existing.total_kobo), paymentStatus: 'pending',
+      customerName: s(existing.customer_name), subtotalKobo: n(existing.subtotal_kobo), deliveryFeeKobo: n(existing.delivery_fee_kobo), totalKobo: n(existing.total_kobo), paymentStatus: payment?.status, paymentMethod: payment?.provider, paymentReference: payment?.reference,
       deliveryZone: mallDeliveryZone(existingDelivery.zone), deliveryLabel: s(existingDelivery.zoneLabel, mallDeliveryLabel(mallDeliveryZone(existingDelivery.zone))), quoteRequired: existingDelivery.quoteRequired === true && existingDelivery.quoteConfirmed !== true,
-      paidKobo: 0, amountDueKobo: n(existing.total_kobo), createdAt: s(existing.created_at),
+      paidKobo: paid, amountDueKobo: ['cancelled', 'refunded'].includes(existing.status) ? 0 : n(existing.total_kobo) - paid, createdAt: s(existing.created_at),
+      instructions: publicMallConfig(exec.config),
       subtotal: KoboToNaira(existing.subtotal_kobo), deliveryFee: KoboToNaira(existing.delivery_fee_kobo), total: KoboToNaira(existing.total_kobo),
     });
   }
+  const cartId = await getOrCreateCartId(exec, sessionId);
+  if (exec.config) {
+    const configuration = publicMallConfig(exec.config);
+    if (!configuration.checkoutEnabled || !configuration.pickup || (paymentMethod === 'bank_transfer' && !configuration.bank)) fail(503, 'Checkout is not configured. Please contact the store.');
+  }
   const rows = await exec.queryAll(
-    `SELECT ci.product_id AS product_id, ci.qty AS qty, p.name AS name, p.stock_qty AS stock_qty,
+    `SELECT ci.id AS cart_line_id, ci.product_id AS product_id, ci.qty AS qty, p.name AS name, p.stock_qty AS stock_qty,
             p.is_mall_listed AS is_mall_listed, p.status AS status,
             COALESCE(p.mall_price_kobo, p.retail_price_kobo) AS price_kobo
      FROM mall_cart_items ci JOIN products p ON p.id = ci.product_id
@@ -297,6 +384,8 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any) {
     [cartId],
   );
   if (!rows.length) fail(400, 'Your cart is empty.');
+  if (rows.length > 100) fail(400, 'An order may contain at most 100 items.');
+  if (new Set(rows.map((r) => r.product_id)).size !== rows.length) fail(409, 'Duplicate cart lines. Refresh your cart.');
 
   const items = rows.map((r) => ({
     productId: s(r.product_id),
@@ -307,17 +396,27 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any) {
   }));
   for (const it of items) {
     const row = rows.find((r) => s(r.product_id) === it.productId) as any;
-    if (n(row.is_mall_listed) !== 1) fail(409, `"${it.name}" is no longer available on the mall. Remove it to continue.`, { productId: it.productId });
-    if (it.qty < 1) fail(409, `"${it.name}" has an invalid quantity.`, { productId: it.productId });
+    if (n(row.is_mall_listed) !== 1 || row.status !== 'Active') fail(409, `"${it.name}" is no longer available on the mall. Remove it to continue.`, { productId: it.productId });
+    if (!Number.isSafeInteger(it.qty) || it.qty < 1 || it.qty > 1000) fail(409, `"${it.name}" has an invalid quantity.`, { productId: it.productId });
+    if (!Number.isSafeInteger(it.unitPriceKobo) || it.unitPriceKobo <= 0) fail(409, `"${it.name}" has an invalid price.`, { productId: it.productId });
     if (n(row.stock_qty) < it.qty) fail(409, `Only the remaining stock of "${it.name}" can be ordered. Reduce the quantity to continue.`, { productId: it.productId });
   }
 
   const subtotalKobo = items.reduce((sum, it) => sum + it.totalKobo, 0);
   const totalKobo = subtotalKobo + deliveryFeeKobo;
+  if (!Number.isSafeInteger(totalKobo) || totalKobo > 1_000_000_000) fail(400, 'Order total exceeds the supported maximum.');
   const orderNo = orderNumber();
   const createdAt = nowIso();
 
-  const stmts: MallStmt[] = [{
+  const stmts: MallStmt[] = [
+    { sql: 'INSERT INTO mall_checkout_attempts (attempt_key, session_id, request_json, order_id, created_at) VALUES (?, ?, ?, ?, ?)', params: [attemptKey, sessionId, requestJson, orderId, createdAt] },
+    ...assertSql('(SELECT COUNT(*) FROM mall_cart_items WHERE cart_id = ?) = ?', [cartId, rows.length]),
+    ...rows.flatMap((r) => assertSql(`EXISTS (SELECT 1 FROM mall_cart_items ci JOIN products p ON p.id = ci.product_id
+      WHERE ci.id = ? AND ci.cart_id = ? AND ci.product_id = ? AND ci.qty = ?
+      AND p.status = 'Active' AND p.is_mall_listed = 1 AND p.stock_qty >= ?
+      AND ${effectivePrice('p')} = ?)`,
+    [r.cart_line_id, cartId, r.product_id, r.qty, r.qty, r.price_kobo])),
+    {
     sql: `INSERT INTO mall_orders (id, order_no, customer_id, customer_name, customer_phone, status,
             subtotal_kobo, delivery_fee_kobo, discount_kobo, total_kobo, payment_ref, delivery_address_json, linked_sale_id, created_at)
           VALUES (?, ?, NULL, ?, ?, 'pending', ?, ?, 0, ?, NULL, ?, NULL, ?)`,
@@ -355,7 +454,13 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any) {
   stmts.push({ sql: 'DELETE FROM mall_cart_items WHERE cart_id = ?', params: [cartId] });
   stmts.push({ sql: "UPDATE mall_carts SET status = 'converted', updated_at = ? WHERE id = ?", params: [Date.now(), cartId] });
 
-  await exec.runBatch(stmts);
+  try { await exec.runBatch(stmts); }
+  catch (error) {
+    const committed = await exec.queryAll('SELECT attempt_key FROM mall_checkout_attempts WHERE attempt_key = ?', [attemptKey]);
+    if (committed.length) return await checkout(exec, sessionId, body, attemptKey);
+    if (/mall_state_conflict|INSUFFICIENT_STOCK/.test(String(error))) fail(409, 'Cart, price, or availability changed. Refresh your cart and retry.');
+    throw error;
+  }
   return json({
     ok: true,
     orderNo,
@@ -375,6 +480,9 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any) {
     deliveryLabel: mallDeliveryLabel(deliveryZone),
     quoteRequired,
     paymentStatus: 'pending',
+    paymentMethod,
+    paymentReference: `MALL-${orderNo}`,
+    instructions: publicMallConfig(exec.config),
     paidKobo: 0,
     amountDueKobo: totalKobo,
     createdAt,
@@ -390,18 +498,18 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any) {
  * be >= 7 digits; only latest 20 orders returned, no PII beyond order totals.
  */
 async function getOrdersByPhone(exec: MallExecutor, url: URL) {
-  const rawPhone = s(url.searchParams.get('phone')).trim().slice(0, 32);
-  const digits = rawPhone.replace(/\D/g, '');
-  if (digits.length < 7) fail(400, 'Enter the phone number used at checkout to track orders.');
-  const like = `%${digits.slice(-10)}%`;
+  const phone = normalizeMallPhone(url.searchParams.get('phone'));
+  const orderNo = s(url.searchParams.get('orderNo')).trim();
+  if (!phone || !orderNo || orderNo.length>80) fail(400, 'Enter both the order number and checkout phone number.', {fields:{orderNo:'Order number is required.',phone:'Valid checkout phone is required.'}});
   const rows = await exec.queryAll(
     `SELECT o.order_no AS order_no, o.status AS status, o.total_kobo AS total_kobo,
+            (SELECT status FROM payments WHERE order_id=o.id LIMIT 1) AS payment_status,
+            (SELECT MAX(created_at) FROM mall_order_events WHERE order_id=o.id) AS updated_at,
             o.created_at AS created_at, COUNT(oi.id) AS item_count
      FROM mall_orders o LEFT JOIN mall_order_items oi ON oi.mall_order_id = o.id
-     WHERE REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(o.customer_phone,''),' ',''),'-',''),'(',''),')','') LIKE ?
-        OR o.customer_phone LIKE ?
-     GROUP BY o.id ORDER BY o.created_at DESC LIMIT 20`,
-    [like, like],
+      WHERE ${normalizedPhoneSql('o.customer_phone')} = ? AND o.order_no = ?
+      GROUP BY o.id LIMIT 1`,
+    [phone, orderNo],
   );
   return json({
     orders: rows.map((r: any) => ({
@@ -410,6 +518,8 @@ async function getOrdersByPhone(exec: MallExecutor, url: URL) {
       totalKobo: n(r.total_kobo),
       createdAt: s(r.created_at),
       itemCount: n(r.item_count),
+      paymentStatus: s(r.payment_status),
+      updatedAt: s(r.updated_at),
     })),
     total: rows.length,
   });
@@ -425,18 +535,28 @@ async function parseMallBody(request: Request): Promise<any> {
   try {
     const body = await request.text();
     if (!body) return {};
-    return JSON.parse(body);
-  } catch {
-    return {};
+    if (body.length>16_384) fail(413,'Request body is too large.');
+    const parsed = JSON.parse(body);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail(400, 'Expected a JSON object.');
+    return parsed;
+  } catch (error) {
+    if ((error as MallError)?.mallStatus) throw error;
+    fail(400, 'Invalid JSON request body.');
   }
 }
 
-export async function handleMallApi(request: Request, exec: MallExecutor): Promise<Response> {
+async function routeMallApi(request: Request, exec: MallExecutor): Promise<Response> {
   try {
   const methodName = request.method;
   const rawPath = new URL(request.url, 'http://localhost').pathname;
   if (rawPath !== '/api/mall' && !rawPath.startsWith('/api/mall/')) return json({ error: 'Not found' }, 404);
   const pathname = rawPath.replace(/^\/api\/mall/, '');
+  if (pathname === '/ready') {
+    const readiness = await mallReadiness(exec);
+    return json(readiness,readiness.ready?200:503);
+  }
+  if (pathname === '/config') return json(publicMallConfig(exec.config));
+  if (!pathname.startsWith('/health')) await mallRateLimit(exec,request);
 
   if (pathname.startsWith('/health')) {
     return json({
@@ -455,56 +575,71 @@ export async function handleMallApi(request: Request, exec: MallExecutor): Promi
 
   if (pathname.startsWith('/orders')) {
     if (methodName !== 'GET') return json({ error: 'Only GET is supported.' }, 405);
-    return getOrdersByPhone(exec, new URL(request.url, 'http://localhost'));
+    return await getOrdersByPhone(exec, new URL(request.url, 'http://localhost'));
   }
 
   if (pathname.startsWith('/products/')) {
     if (methodName !== 'GET') return json({ error: 'Only GET is supported.' }, 405);
-    return getProduct(exec, decodeURIComponent(pathname.slice('/products/'.length)));
+    return await getProduct(exec, decodeURIComponent(pathname.slice('/products/'.length)));
   }
 
   if (pathname.startsWith('/products')) {
     if (methodName !== 'GET') return json({ error: 'Only GET is supported.' }, 405);
-    return getCatalog(exec, new URL(request.url, 'http://localhost'));
+    return await getCatalog(exec, new URL(request.url, 'http://localhost'));
   }
 
   if (pathname.startsWith('/cart/total')) {
     if (methodName !== 'GET') return json({ error: 'Only GET is supported.' }, 405);
-    const session = s(request.headers.get('x-mall-session'));
+    const session = sessionFrom(request);
     if (!session) return json({ error: 'Session is required. Send x-mall-session header or cookie.' }, 400);
-    return respondWithCart(exec, session);
+    return await respondWithCart(exec, session);
   }
 
   if (pathname.startsWith('/cart/qty')) {
     if (methodName !== 'POST') return json({ error: 'Only POST is supported.' }, 405);
-    const session = s(request.headers.get('x-mall-session'));
+    const session = sessionFrom(request);
     if (!session) return json({ error: 'Session is required. Send x-mall-session header or cookie.' }, 400);
-    return setCartQty(exec, session, await parseMallBody(request));
+    return await setCartQty(exec, session, await parseMallBody(request));
   }
 
   if (pathname.startsWith('/cart')) {
-    const session = s(request.headers.get('x-mall-session'));
+    const session = sessionFrom(request);
     if (methodName === 'GET') {
       if (!session) return json({ error: 'Session is required. Send x-mall-session header or cookie.' }, 400);
-      return respondWithCart(exec, session);
+      return await respondWithCart(exec, session);
     }
     if (methodName === 'POST') {
       if (!session) return json({ error: 'Session is required. Send x-mall-session header or cookie.' }, 400);
-      return addToCart(exec, session, await parseMallBody(request));
+      return await addToCart(exec, session, await parseMallBody(request));
     }
     return json({ error: 'Only GET or POST is supported.' }, 405);
   }
 
   if (pathname.startsWith('/checkout')) {
     if (methodName !== 'POST') return json({ error: 'Only POST is supported.' }, 405);
-    const session = s(request.headers.get('x-mall-session'));
+    const session = sessionFrom(request);
     if (!session) return json({ error: 'Session is required. Send x-mall-session header or cookie.' }, 400);
-    return checkout(exec, session, await parseMallBody(request));
+    return await checkout(exec, session, await parseMallBody(request), s(request.headers.get('idempotency-key')));
   }
 
   return json({ error: 'Unknown /api/mall route.' }, 404);
   } catch (error) {
     const known = error as MallError;
-    return json({ error: error instanceof Error ? error.message : 'Mall API error', payload: known.mallPayload }, known.mallStatus || 500);
+    if (/mall_state_conflict|MALL_INVALID_CART_LINE/.test(String(error))) return json({error:'Cart changed or quantity exceeds stock. Refresh and retry.'},409);
+    return json({ error: known.mallStatus ? known.message : 'Mall API error', payload: known.mallPayload,
+      ...(known.mallPayload && typeof known.mallPayload === 'object' && 'fields' in known.mallPayload ? { fields: known.mallPayload.fields } : {}) }, known.mallStatus || 500);
   }
+}
+
+export async function handleMallApi(request:Request,exec:MallExecutor):Promise<Response> {
+  const response=await routeMallApi(request,exec);
+  const path=new URL(request.url).pathname;
+  if(path.includes('/checkout') || response.status>=500) {
+    const metric=path.includes('/checkout') ? `checkout.${response.status===201?'created':response.status===200?'replayed':response.status===409?'conflict':response.status===429?'limited':'failed'}` : 'api.error';
+    try { await exec.runBatch([{sql:'INSERT INTO mall_metrics(day,metric,count) VALUES (?,?,1) ON CONFLICT(day,metric) DO UPDATE SET count=count+1',params:[new Date().toISOString().slice(0,10),metric]}]); }
+    catch { console.error('[mall-metrics] unavailable'); }
+  }
+  response.headers.set('cache-control','no-store');
+  if(response.status===429) response.headers.set('retry-after','60');
+  return response;
 }

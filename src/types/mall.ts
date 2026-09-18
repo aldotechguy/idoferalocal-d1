@@ -16,6 +16,10 @@ export type MallProduct = {
   image: string;
   images?: string[];
   available: boolean;
+  createdAt?: string;
+  /** Merchandising flags supplied by the server. */
+  featured?: boolean;
+  promoActive?: boolean;
 };
 
 export type MallCartItem = {
@@ -57,6 +61,8 @@ export type MallOrder = {
   paidKobo?: number;
   amountDueKobo?: number;
   paymentStatus?: string;
+  paymentMethod?: string;
+  paymentReference?: string;
   createdAt?: string;
 };
 
@@ -77,6 +83,8 @@ export type MallBuyerProfile = {
 };
 
 export type MallOrderLookup = {
+  paymentStatus?: string;
+  updatedAt?: string;
   orderNo: string;
   status: string;
   totalKobo: number;
@@ -97,9 +105,12 @@ export type MallCategory = {
 export type MallProductsResponse = {
   products: MallProduct[];
   categories: (string | MallCategory)[];
+  /** Brand facets for the current search/category scope (full set, not just this page). */
+  brands?: MallCategory[];
   total: number;
   limit: number;
   offset: number;
+  sort?: string;
 };
 
 

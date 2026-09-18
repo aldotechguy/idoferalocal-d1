@@ -67,6 +67,12 @@ export function productRow(r: any) {
     unit: r.unit || 'pcs', expiryDate: r.expiry_date || undefined, status: r.status || 'Active',
     isMallListed: n(r.is_mall_listed) === 1,
     mallPrice: r.mall_price_kobo != null ? KoboToNaira(r.mall_price_kobo) : undefined,
+    mallDescription: r.mall_description || undefined,
+    mallFeatured: n(r.mall_featured) === 1,
+    mallDisplayOrder: r.mall_display_order != null ? n(r.mall_display_order) : undefined,
+    mallPromoPrice: r.mall_promo_price_kobo != null ? KoboToNaira(r.mall_promo_price_kobo) : undefined,
+    mallPromoStart: r.mall_promo_start || undefined,
+    mallPromoEnd: r.mall_promo_end || undefined,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
@@ -180,6 +186,12 @@ export function productToRow(p: any, now: string) {
     unit: s(p.unit, 'pcs'), expiry_date: p.expiryDate ? s(p.expiryDate) : null,
     status: s(p.status, 'Active'), is_mall_listed: b01(p.isMallListed),
     mall_price_kobo: p.mallPrice != null ? NairaToKobo(p.mallPrice) : null,
+    mall_description: s(p.mallDescription) || null,
+    mall_featured: p.mallFeatured ? 1 : 0,
+    mall_display_order: p.mallDisplayOrder != null && Number.isFinite(Number(p.mallDisplayOrder)) ? Math.trunc(Number(p.mallDisplayOrder)) : null,
+    mall_promo_price_kobo: p.mallPromoPrice != null ? NairaToKobo(p.mallPromoPrice) : null,
+    mall_promo_start: p.mallPromoStart ? s(p.mallPromoStart) : null,
+    mall_promo_end: p.mallPromoEnd ? s(p.mallPromoEnd) : null,
     created_at: s(p.createdAt, now), updated_at: s(p.updatedAt, now),
   };
 }

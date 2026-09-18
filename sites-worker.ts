@@ -1,7 +1,21 @@
-interface Env {
+interface R2ObjectBody {
+  arrayBuffer(): Promise<ArrayBuffer>;
+  httpMetadata?: { contentType?: string };
+}
+interface R2BucketLike {
+  put(key: string, value: Uint8Array, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
+  get(key: string): Promise<R2ObjectBody | null>;
+  delete(key: string): Promise<unknown>;
+}
+
+interface Env extends MallConfig {
   ASSETS: {fetch(request: Request): Promise<Response>};
   DB: D1Database;
+  MALL_IMAGES?: R2BucketLike;
   GEMINI_API_KEY?: string;
+  BOOTSTRAP_ADMIN_EMAIL?: string;
+  BOOTSTRAP_ADMIN_USERNAME?: string;
+  BOOTSTRAP_ADMIN_PASSWORD?: string;
 }
 
 interface D1PreparedStatement {
@@ -28,7 +42,13 @@ import {
   backfillStatementsFromDocumentRows,
 } from './src/server/relationalWrites.js';
 import { handleMallApi, MALL_OVERSELL_TRIGGER_SQL } from './src/server/mallApi.js';
-import { handleStaffMallApi } from './src/server/mallOrderAdminApi.js';
+import { handleStaffMallApi, maintainMall } from './src/server/mallOrderAdminApi.js';
+import { handleStaffMallListingApi } from './src/server/mallListingApi.js';
+import { handleStaffProductImageApi, handlePublicImageRequest } from './src/server/productImageApi.js';
+import type { ImageStore } from './src/server/imageStore.js';
+import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, isDuplicateColumnError, type MallConfig } from './src/server/mallOperations.js';
+import { MALL_SAFETY_DDL } from './src/server/mallSafety.js';
+import { bootstrapAdmin } from './src/server/adminBootstrap.js';
 import type { QueryAll } from './src/server/relationalMapper.js';
 
 /** Rows out of D1 -> the QueryAll shape the shared mapper expects. */
@@ -36,6 +56,24 @@ function makeD1QueryAll(env: Env): QueryAll {
   return async (sql: string, params: any[] = []) => {
     const res = await env.DB.prepare(sql).bind(...params).all<any>();
     return res.results || [];
+  };
+}
+
+/** #14 — R2-backed image store for the edge runtime. */
+function makeR2ImageStore(env: Env): ImageStore | undefined {
+  const bucket = env.MALL_IMAGES;
+  if (!bucket) return undefined;
+  return {
+    async put(key, image) {
+      await bucket.put(key, image.bytes, { httpMetadata: { contentType: image.contentType } });
+    },
+    async get(key) {
+      const object = await bucket.get(key);
+      if (!object) return null;
+      const bytes = new Uint8Array(await object.arrayBuffer());
+      return { bytes, contentType: object.httpMetadata?.contentType || 'application/octet-stream' };
+    },
+    async remove(key) { await bucket.delete(key); },
   };
 }
 
@@ -127,11 +165,11 @@ function publicUser(user: AppUserRow) {
   };
 }
 
-let schemaReady = false;
+const schemaReady = new WeakSet<D1Database>();
 let relationalBackfilled = false;
 
 async function ensureSchema(env: Env) {
-  if (schemaReady) return;
+  if (schemaReady.has(env.DB)) return;
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS app_documents (
       owner_id TEXT NOT NULL,
@@ -175,13 +213,21 @@ async function ensureSchema(env: Env) {
     // Phase 4: the 30 relational tables + 23 indexes, same DDL as drizzle/0000.
     ...RELATIONAL_DDL.map((ddl) => env.DB.prepare(ddl.endsWith(';') ? ddl.slice(0, -1) : ddl)),
     ...RELATIONAL_INDEXES.map((sql) => env.DB.prepare(sql.endsWith(';') ? sql.slice(0, -1) : sql)),
+    ...MALL_SAFETY_DDL.map((sql) => env.DB.prepare(sql)),
     // Phase 5: oversell is impossible store-wide once this trigger exists.
     env.DB.prepare(MALL_OVERSELL_TRIGGER_SQL.endsWith(';') ? MALL_OVERSELL_TRIGGER_SQL.slice(0, -1) : MALL_OVERSELL_TRIGGER_SQL),
   ];
   for (let offset = 0; offset < statements.length; offset += 50) {
     await env.DB.batch(statements.slice(offset, offset + 50));
   }
-  schemaReady = true;
+  await env.DB.batch(MALL_OPERATIONS_DDL.map(sql=>env.DB.prepare(sql)));
+  // #10 merchandising columns: additive guarded ALTERs; a duplicate column is the
+  // expected no-op on every start after the first.
+  for (const column of MALL_MERCH_COLUMNS) {
+    try { await env.DB.prepare(column.ddl).run(); }
+    catch (error) { if (!isDuplicateColumnError(error)) throw error; }
+  }
+  schemaReady.add(env.DB);
 }
 
 /** D1 only reports on tables it has; empty relational store + documents means we backfill once. */
@@ -226,8 +272,10 @@ async function seedUser(env: Env, user: {id: string; email: string; username: st
 }
 
 async function ensureAuthSeed(env: Env) {
-  await seedUser(env, {id: 'usr-superadmin-idofera', email: 'michaelidongesit5@gmail.com', username: 'idofera', displayName: 'Super Admin', password: 'aidy2800', superAdmin: true});
-  await seedUser(env, {id: 'usr-admin-1', email: 'admin@idoferapackaging.com', username: 'admin', displayName: 'Administrator', password: 'admin123', superAdmin: false});
+  await ensureSchema(env);
+  if (await d1Get(env, 'SELECT id FROM app_users LIMIT 1')) return;
+  const admin = bootstrapAdmin(env);
+  if (admin) await seedUser(env, admin);
 }
 
 async function ensureBusinessDataOwner(env: Env) {
@@ -681,6 +729,13 @@ async function serveAsset(request: Request, env: Env) {
 }
 
 export default {
+  async scheduled(_controller: unknown, env: Env): Promise<void> {
+    await ensureSchema(env);
+    await maintainMall({config:env,queryAll:makeD1QueryAll(env),runBatch:async stmts=>{
+      const result=await env.DB.batch(toD1Statements(env,stmts));
+      return result.map((row:any)=>Number(row?.meta?.changes ?? 0));
+    }});
+  },
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     try {
@@ -734,10 +789,38 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/ai/business-assistant') return await businessAssistant(request, env);
       if (request.method === 'POST' && url.pathname === '/api/ai/pricing-assistant') return await pricingAssistant(request, env);
       if (request.method === 'POST' && url.pathname === '/api/ai/sales-forecasting') return await salesForecast(request, env);
-      if (url.pathname === '/api/staff/mall-orders' || url.pathname.startsWith('/api/staff/mall-orders/')) {
+      if (url.pathname === '/api/staff/product-images') {
         const actor = await requireAppUser(request, env);
         if (!actor) return json({error: 'Authentication required.'}, 401);
-        return handleStaffMallApi(request, {
+        await ensureSchema(env);
+        return await handleStaffProductImageApi(request, makeR2ImageStore(env), {
+          config: env,
+          queryAll: makeD1QueryAll(env),
+          runBatch: async (stmts) => {
+            const results = await env.DB.batch(toD1Statements(env, stmts));
+            return results.map((result: any) => Number(result?.meta?.changes ?? 0));
+          },
+        }, {id: actor.id, displayName: actor.display_name, role: actor.role});
+      }
+      if (url.pathname === '/api/staff/mall-listings' || url.pathname.startsWith('/api/staff/mall-listings/')) {
+        const actor = await requireAppUser(request, env);
+        if (!actor) return json({error: 'Authentication required.'}, 401);
+        await ensureSchema(env);
+        return await handleStaffMallListingApi(request, {
+          config: env,
+          queryAll: makeD1QueryAll(env),
+          runBatch: async (stmts) => {
+            const results = await env.DB.batch(toD1Statements(env, stmts));
+            return results.map((result: any) => Number(result?.meta?.changes ?? 0));
+          },
+        }, {id: actor.id, displayName: actor.display_name, role: actor.role});
+      }
+      if (url.pathname === '/api/staff/mall-orders' || url.pathname.startsWith('/api/staff/mall-orders/')) {
+        await ensureSchema(env);
+        const actor = await requireAppUser(request, env);
+        if (!actor) return json({error: 'Authentication required.'}, 401);
+        return await handleStaffMallApi(request, {
+          config: env,
           queryAll: makeD1QueryAll(env),
           runBatch: async (stmts) => {
             const results = await env.DB.batch(toD1Statements(env, stmts));
@@ -747,7 +830,10 @@ export default {
       }
       // Phase 5: mall storefront API (public catalog/cart/checkout/track).
       if (url.pathname === '/api/mall' || url.pathname.startsWith('/api/mall/')) {
-        return handleMallApi(request, {
+        await ensureSchema(env);
+        return await handleMallApi(request, {
+          config: env,
+          clientIp: request.headers.get('cf-connecting-ip') || 'unknown',
           queryAll: makeD1QueryAll(env),
           runBatch: async (stmts) => {
             const results = await env.DB.batch(toD1Statements(env, stmts));
@@ -756,6 +842,10 @@ export default {
         });
       }
       if (url.pathname.startsWith('/api/')) return json({error: 'Not found'}, 404);
+      // #14 — public, immutable product images (served from R2, never the asset bucket).
+      if (url.pathname.startsWith('/mall-images/')) {
+        return await handlePublicImageRequest(request, makeR2ImageStore(env), decodeURIComponent(url.pathname.slice('/mall-images/'.length)));
+      }
       return await serveAsset(request, env);
     } catch (error) {
       return json({error: error instanceof Error ? error.message : 'Unexpected server error'}, 500);

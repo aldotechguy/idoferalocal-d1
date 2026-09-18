@@ -45,6 +45,14 @@ export interface Product {
   /** Phase 5 — mall listing. */
   isMallListed?: boolean;
   mallPrice?: number;
+  /** Mall-specific storefront copy; falls back to `description` when blank. */
+  mallDescription?: string;
+  /** Merchandising: promoted position, manual ordering, and optional promo window. */
+  mallFeatured?: boolean;
+  mallDisplayOrder?: number;
+  mallPromoPrice?: number;
+  mallPromoStart?: string;
+  mallPromoEnd?: string;
   createdAt: string;
   updatedAt: string;
 }

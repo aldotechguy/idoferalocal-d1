@@ -7,7 +7,10 @@ export type StaffMallOrder = {
   id: string; orderNo: string; customerId?: string; customerName: string; customerPhone: string;
   status: string; subtotalKobo: number; deliveryFeeKobo: number; discountKobo: number; totalKobo: number;
   linkedSaleId?: string; createdAt: string; itemCount: number; items: StaffMallOrderItem[];
-  delivery: { address?: string; note?: string; paymentMethod?: string; zone?: string; zoneLabel?: string; quoteRequired?: boolean; quoteConfirmed?: boolean };
+  timeline?: {action:string;actorId:string;details:string;status:string;createdAt:string}[];
+  dispatch?: {courier:string;status:string;updatedAt:string};
+  returnRecord?: {disposition:string;receipt_reference:string;created_at:string};
+  delivery: { address?: string; note?: string; paymentMethod?: string; zone?: string; zoneLabel?: string; quoteRequired?: boolean; quoteConfirmed?: boolean; addressVerified?:boolean };
   payment: { id: string; provider: string; reference: string; amountKobo: number; status: string; metadata?: Record<string, unknown> };
 };
 
@@ -29,6 +32,10 @@ async function request(path: string, options: RequestInit = {}) {
 }
 
 export const staffMallClient = {
+  operations: () => request('/operations'),
+  retryNotifications: () => request('/retry-notifications',{method:'POST',body:'{}'}),
+  reviewDelivery: (id:string) => request(`/${encodeURIComponent(id)}/review-delivery`,{method:'POST',body:JSON.stringify({confirmed:true})}) as Promise<{order:StaffMallOrder}>,
+  rejectPayment: (id:string,reason:string) => request(`/${encodeURIComponent(id)}/reject-payment`,{method:'POST',body:JSON.stringify({reason})}) as Promise<{order:StaffMallOrder}>,
   list: (params: { status?: string; q?: string; limit?: number; offset?: number } = {}) => {
     const query = new URLSearchParams();
     if (params.status && params.status !== 'all') query.set('status', params.status);
@@ -46,7 +53,7 @@ export const staffMallClient = {
     request(`/${encodeURIComponent(id)}/collect-payment`, { method: 'POST', body: JSON.stringify(body) }) as Promise<{ order: StaffMallOrder }>,
   verifyPayment: (id: string, body: { amountKobo: number; reference: string }) =>
     request(`/${encodeURIComponent(id)}/verify-payment`, { method: 'POST', body: JSON.stringify(body) }) as Promise<{ order: StaffMallOrder }>,
-  transition: (id: string, action: 'start-processing' | 'mark-packed' | 'mark-ready' | 'mark-out-for-delivery' | 'complete') =>
-    request(`/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: '{}' }) as Promise<{ order: StaffMallOrder }>,
-  refund: (id: string, reason: string, returnStock = true) => request(`/${encodeURIComponent(id)}/refund`, { method: 'POST', body: JSON.stringify({ reason, returnStock }) }) as Promise<{ order: StaffMallOrder }>,
+  transition: (id: string, action: 'start-processing' | 'mark-packed' | 'mark-ready' | 'mark-out-for-delivery' | 'complete', courier?: string) =>
+    request(`/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: JSON.stringify({courier}) }) as Promise<{ order: StaffMallOrder }>,
+  refund: (id: string, reason: string, returnStock: boolean, returnReference?:string) => request(`/${encodeURIComponent(id)}/refund`, { method: 'POST', body: JSON.stringify({ reason, returnStock, returnReference }) }) as Promise<{ order: StaffMallOrder }>,
 };

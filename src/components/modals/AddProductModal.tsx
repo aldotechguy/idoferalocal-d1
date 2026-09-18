@@ -4,6 +4,8 @@ import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { Product, ProductStatus } from '../../types';
 import { useInteractions } from '../../context/InteractionContext';
+import { uploadProductImage, deleteProductImage } from '../../services/productImageClient';
+import { PortalDropdown } from '../common/PortalDropdown';
 
 interface AddProductModalProps {
   isOpen: boolean;
@@ -58,6 +60,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
   const { products, addProduct, updateProduct, suppliers, settings } = useApp();
   const { currentUser } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const categoryFieldRef = useRef<HTMLDivElement>(null);
 
   const getInitialState = () => {
     if (editingProduct) {
@@ -117,6 +120,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
   const [formData, setFormData] = useState(getInitialState);
   const [imageUrlInput, setImageUrlInput] = useState('');
   const [imageUploadError, setImageUploadError] = useState('');
+  const [imageUploading, setImageUploading] = useState(false);
   const [activeTab, setActiveTab] = useState<'upload' | 'url' | 'presets'>('upload');
 
   // Category Auto Prediction state
@@ -164,8 +168,8 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Handle local file upload
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // #14 — upload to durable storage instead of embedding base64 in the database.
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     setImageUploadError('');
     if (!file) return;
@@ -180,18 +184,19 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
+    setImageUploading(true);
+    try {
+      const url = await uploadProductImage(file);
       setFormData((prev) => ({
         ...prev,
-        images: [result, ...prev.images.filter((img) => !img.startsWith('data:'))],
+        images: [url, ...prev.images.filter((img) => !img.startsWith('data:'))],
       }));
-    };
-    reader.onerror = () => {
-      setImageUploadError('Error reading file. Please try another image.');
-    };
-    reader.readAsDataURL(file);
+    } catch (error) {
+      setImageUploadError(error instanceof Error ? error.message : 'Image upload failed. Please try again.');
+    } finally {
+      setImageUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
   };
 
   const handleAddUrlImage = () => {
@@ -211,6 +216,10 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
   };
 
   const handleRemoveImage = (index: number) => {
+    // #14 — replacement behaviour: removing a stored image also deletes the object
+    // so replaced photos do not accumulate unused bytes in object storage.
+    const removed = formData.images[index];
+    if (removed) void deleteProductImage(removed);
     setFormData((prev) => {
       const updated = prev.images.filter((_, i) => i !== index);
       return {
@@ -353,10 +362,10 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
                   >
                     <Upload className="w-5 h-5 text-blue-600 dark:text-blue-400 mx-auto mb-1.5" />
                     <p className="font-bold text-slate-900 dark:text-white text-xs">
-                      Click to upload image from your device
+                      {imageUploading ? 'Uploading…' : 'Click to upload image from your device'}
                     </p>
                     <p className="text-[10px] text-slate-400 mt-0.5">
-                      Supports PNG, JPG, WEBP up to 5MB
+                      Supports PNG, JPG, WEBP up to 5MB — stored durably and resized automatically
                     </p>
                     <input
                       ref={fileInputRef}
@@ -475,7 +484,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
                   )}
                 </div>
 
-                <div className="relative">
+                <div ref={categoryFieldRef} className="relative">
                   <input
                     type="text"
                     placeholder="Start typing category..."
@@ -499,9 +508,13 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
                   ))}
                 </datalist>
 
-                {/* Auto-Predict Dropdown Menu */}
-                {showCategoryDropdown && formData.category.trim().length > 0 && filteredCategoryPredictions.length > 0 && (
-                  <div className="absolute left-0 right-0 top-full mt-1.5 z-30 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-xl max-h-48 overflow-y-auto p-1.5 space-y-0.5">
+                {/* Auto-Predict Dropdown Menu — portal layer, so the form's
+                    overflow-y-auto scroll container can no longer clip it */}
+                <PortalDropdown
+                  anchorRef={categoryFieldRef}
+                  open={showCategoryDropdown && formData.category.trim().length > 0 && filteredCategoryPredictions.length > 0}
+                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-xl p-1.5 space-y-0.5"
+                >
                     <div className="px-2.5 py-1 text-[10px] font-extrabold text-slate-400 uppercase tracking-wider flex items-center gap-1 border-b border-slate-100 dark:border-slate-800 mb-1">
                       <Tag className="w-3 h-3 text-blue-500" />
                       <span>Predicted Categories</span>
@@ -530,8 +543,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
                         </button>
                       );
                     })}
-                  </div>
-                )}
+                </PortalDropdown>
               </div>
 
               <div>
