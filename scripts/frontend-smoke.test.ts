@@ -5,6 +5,19 @@ import { parseRoute } from '../src/hooks/useRoute.ts';
 import { computeMenuStyle, PORTAL_DROPDOWN_Z } from '../src/components/common/PortalDropdown.tsx';
 import { validateBuyer } from '../src/mall-site/useBuyerForm.ts';
 import { mallDeliveryFeeKobo, mallDeliveryZone } from '../src/shared/mallDelivery.ts';
+import { mallStockLabel } from '../src/shared/mallProductPresentation.ts';
+
+test('Mall cards always show catalog stock independently of purchase eligibility', () => {
+  assert.equal(mallStockLabel(250), '250 left');
+  assert.equal(mallStockLabel(1000), '1,000 left');
+  assert.equal(mallStockLabel(11), '11 left');
+  assert.equal(mallStockLabel(10), 'Only 10 left');
+  assert.equal(mallStockLabel(1), 'Only 1 left');
+  assert.equal(mallStockLabel(0), 'Out of stock');
+  const card = fs.readFileSync('src/mall-site/MallProductCard.tsx', 'utf8');
+  assert.match(card, /\{product.unit\}.*\{mallStockLabel\(product.stock\)\}/);
+  assert.doesNotMatch(card, /product.available && product.stock <= 10/);
+});
 
 test('public routes preserve category, product and search parameters', () => {
   assert.deepEqual(parseRoute('/category/Bottles', ''), { surface: 'mall', page: 'category', param: 'Bottles' });
@@ -89,6 +102,29 @@ test('in-modal dropdown menus render through portals instead of clipped absolute
     assert.match(source, /PortalDropdown/, `${file} must render its dropdown through PortalDropdown`);
     assert.doesNotMatch(source, /top-full/, `${file} must not anchor dropdowns with clipped absolute positioning`);
   }
+});
+
+test('Mall exposes the paginated catalog and disables sold-out purchase controls', () => {
+  const grid = fs.readFileSync('src/mall-site/MallBrowseGrid.tsx', 'utf8');
+  assert.match(grid, /const PAGE_SIZE = 10/);
+  assert.match(grid, /Showing \{items.length\} of \{total\}/);
+  assert.match(grid, /xl:grid-cols-5/);
+  assert.match(grid, /Retry loading more/);
+  assert.match(grid, /setMoreError\(reason/);
+  assert.match(grid, /request\(nextOffset.current\)/);
+  assert.match(grid, /currentGeneration !== generation.current/);
+  assert.match(grid, /You’ve viewed all/);
+  const home = fs.readFileSync('src/mall-site/MallHome.tsx', 'utf8');
+  const card = fs.readFileSync('src/mall-site/MallProductCard.tsx', 'utf8');
+  const detail = fs.readFileSync('src/mall-site/MallProductPage.tsx', 'utf8');
+  assert.match(home, /MallBrowseGrid title="Explore the Mall"/);
+  assert.match(home, /fetchFn=\{fetchSearch\(''\)\}/);
+  assert.match(card, /qty > 0 && purchasable/);
+  assert.match(card, /disabled=\{adding \|\| !purchasable\}/);
+  assert.match(card, /purchasable \? 'Add to Cart' : mallUnavailableLabel\(product\)/);
+  assert.match(detail, /MallQuantityControl[^\n]*disabled=\{adding \|\| !purchasable\}/);
+  for (const source of [card, detail]) assert.match(source, /hasMallPrice\(product.price\) \? formatNaira\(product.price\) : 'Price unavailable'/);
+  assert.match(detail, /Product description has not been provided yet/);
 });
 
 test('checkout customer card does not scroll over the payment method fieldset', () => {

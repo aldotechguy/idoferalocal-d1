@@ -1,12 +1,13 @@
 import React from 'react';
 import { ShoppingCart, Truck, ShieldCheck, RotateCcw, Headset, Zap, BadgePercent } from 'lucide-react';
+import { hasMallPrice } from '../shared/mallProductPresentation';
 
 export function formatNaira(kobo: number): string {
   return '₦' + Number((kobo / 100).toFixed(2)).toLocaleString('en-NG');
 }
 
 export function discountPct(p: { price: number; retailPriceKobo?: number }): number | null {
-  if (p.retailPriceKobo == null || p.retailPriceKobo <= p.price || p.price <= 0) return null;
+  if (p.retailPriceKobo == null || !hasMallPrice(p.retailPriceKobo) || p.retailPriceKobo <= p.price || !hasMallPrice(p.price)) return null;
   return Math.round(((p.retailPriceKobo - p.price) / p.retailPriceKobo) * 100);
 }
 

@@ -9,12 +9,13 @@
  * Rules that keep the storefront safe:
  *  - Prices are ALWAYS resolved from `products` (COALESCE(mall_price_kobo,
  *    retail_price_kobo)); client-sent prices are never trusted.
- *  - Only `is_mall_listed = 1 AND status = 'Active' AND stock_qty > 0` is sellable.
+ *  - Every non-archived catalog product is visible; purchasing also requires stock.
  *  - Oversell is physically impossible: trg_products_no_oversell ABORTs any
  *    UPDATE that would push stock_qty below zero, which atomically rolls back
  *    the whole checkout batch.
  */
 import { KoboToNaira, parseJsonArray, s, n } from './relationalMapper.js';
+import { hasMallPrice } from '../shared/mallProductPresentation.js';
 import { MALL_DELIVERY_ZONE_IDS, mallDeliveryFeeKobo, mallDeliveryLabel, mallDeliveryZone } from '../shared/mallDelivery.js';
 import { assertSql } from './mallSafety.js';
 import { normalizeMallPhone, normalizedPhoneSql } from '../shared/mallPhone.js';
@@ -41,7 +42,7 @@ BEGIN
   SELECT RAISE(ABORT, 'INSUFFICIENT_STOCK');
 END;`;
 
-const SELLABLE = `is_mall_listed = 1 AND status = 'Active' AND stock_qty > 0`;
+const VISIBLE = `status <> 'Archived'`;
 
 /**
  * Parameter-free "now" so promotional windows are evaluated identically in the
@@ -117,7 +118,7 @@ function publicProduct(r: any) {
     stock,
     image: images[0] || '',
     images,
-    available: stock > 0,
+    available: stock > 0 && hasMallPrice(n(r.price_kobo)),
     createdAt: s(r.created_at),
     featured: n(r.mall_featured) === 1,
     promoActive: n(r.promo_active) === 1,
@@ -144,7 +145,7 @@ async function getCatalog(exec: MallExecutor, url: URL) {
   // Base scope: everything the storefront may show, minus brand/inStock. The brand
   // list is derived from this scope so the filter reflects the WHOLE catalog page
   // set (search + category), not just the current page.
-  const base: string[] = [SELLABLE];
+  const base: string[] = [VISIBLE];
   const baseParams: any[] = [];
   if (q) {
     const like = `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
@@ -163,8 +164,7 @@ async function getCatalog(exec: MallExecutor, url: URL) {
     filters.push('brand = ?');
     params.push(brandFilter);
   }
-  // The public catalog is sellable-only, so stock_qty > 0 already holds; this keeps
-  // the documented contract explicit without ever exposing unpurchasable items.
+  // Stock filtering is opt-in; sold-out products remain visible by default.
   if (rawInStock === '1') filters.push('stock_qty > 0');
   const where = filters.join(' AND ');
 
@@ -174,7 +174,7 @@ async function getCatalog(exec: MallExecutor, url: URL) {
   );
   const totalRow = await exec.queryAll(`SELECT COUNT(*) AS n FROM products WHERE ${where}`, params);
   const catRows = await exec.queryAll(
-    `SELECT category_name AS name, COUNT(*) AS count FROM products WHERE ${SELLABLE} GROUP BY category_name ORDER BY count DESC, name ASC`,
+    `SELECT category_name AS name, COUNT(*) AS count FROM products WHERE ${VISIBLE} GROUP BY category_name ORDER BY count DESC, name ASC`,
   );
   const brandRows = await exec.queryAll(
     `SELECT brand AS name, COUNT(*) AS count FROM products WHERE ${whereBase} AND brand <> '' GROUP BY brand ORDER BY count DESC, name ASC`,
@@ -193,7 +193,7 @@ async function getCatalog(exec: MallExecutor, url: URL) {
 
 async function getProduct(exec: MallExecutor, id: string) {
   const rows = await exec.queryAll(
-    `SELECT ${CATALOG_COLUMNS} FROM products WHERE id = ? AND ${SELLABLE} LIMIT 1`,
+    `SELECT ${CATALOG_COLUMNS} FROM products WHERE id = ? AND ${VISIBLE} LIMIT 1`,
     [id],
   );
   if (!rows.length) return json({ error: 'Product not available' }, 404);
@@ -234,7 +234,7 @@ async function readCart(exec: MallExecutor, cartId: string) {
     [cartId],
   );
   const items = rows.map((r) => {
-    const sellable = n(r.is_mall_listed) === 1 && s(r.status) === 'Active';
+    const sellable = s(r.status) !== 'Archived' && n(r.stock_qty) > 0 && hasMallPrice(n(r.price_kobo));
     return {
       productId: s(r.product_id),
       name: s(r.name),
@@ -263,10 +263,11 @@ async function addToCart(exec: MallExecutor, sessionId: string, body: any) {
   if (!Number.isSafeInteger(qty) || qty < 1 || qty > 1000) fail(400, 'qty must be a whole number between 1 and 1000.');
 
   const rows = await exec.queryAll(
-    `SELECT ${CATALOG_COLUMNS} FROM products WHERE id = ? AND ${SELLABLE} LIMIT 1`,
+    `SELECT ${CATALOG_COLUMNS} FROM products WHERE id = ? AND ${VISIBLE} LIMIT 1`,
     [productId],
   );
   if (!rows.length) fail(404, 'Product is not available on the mall.');
+  if (!hasMallPrice(n(rows[0].price_kobo))) fail(409, 'Price unavailable. This product cannot be purchased yet.');
   if (n((rows[0] as any).stock_qty) < 1) fail(409, 'Product is out of stock.');
 
   const cartId = await getOrCreateCartId(exec, sessionId);
@@ -290,10 +291,11 @@ async function setCartQty(exec: MallExecutor, sessionId: string, body: any) {
   const stmts: MallStmt[] = [{ sql: 'DELETE FROM mall_cart_items WHERE cart_id = ? AND product_id = ?', params: [cartId, productId] }];
   if (qty > 0) {
     const rows = await exec.queryAll(
-      `SELECT ${CATALOG_COLUMNS} FROM products WHERE id = ? AND ${SELLABLE} LIMIT 1`,
+      `SELECT ${CATALOG_COLUMNS} FROM products WHERE id = ? AND ${VISIBLE} LIMIT 1`,
       [productId],
     );
     if (!rows.length) fail(404, 'Product is not available on the mall.');
+    if (!hasMallPrice(n(rows[0].price_kobo))) fail(409, 'Price unavailable. This product cannot be purchased yet.');
     if (n((rows[0] as any).stock_qty) < qty) fail(409, `Only ${n((rows[0] as any).stock_qty)} left in stock.`);
     stmts.push({ sql: 'INSERT INTO mall_cart_items (id, cart_id, product_id, variant_id, qty, unit_price_kobo) VALUES (?, ?, ?, NULL, ?, ?)', params: [`mci-${uuid()}`, cartId, productId, qty, n((rows[0] as any).price_kobo)] });
   }
@@ -378,7 +380,7 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
   const rows = await exec.queryAll(
     `SELECT ci.id AS cart_line_id, ci.product_id AS product_id, ci.qty AS qty, p.name AS name, p.stock_qty AS stock_qty,
             p.is_mall_listed AS is_mall_listed, p.status AS status,
-            COALESCE(p.mall_price_kobo, p.retail_price_kobo) AS price_kobo
+            ${effectivePrice('p')} AS price_kobo
      FROM mall_cart_items ci JOIN products p ON p.id = ci.product_id
      WHERE ci.cart_id = ? ORDER BY ci.rowid ASC`,
     [cartId],
@@ -396,7 +398,7 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
   }));
   for (const it of items) {
     const row = rows.find((r) => s(r.product_id) === it.productId) as any;
-    if (n(row.is_mall_listed) !== 1 || row.status !== 'Active') fail(409, `"${it.name}" is no longer available on the mall. Remove it to continue.`, { productId: it.productId });
+    if (row.status === 'Archived') fail(409, `"${it.name}" is no longer available on the mall. Remove it to continue.`, { productId: it.productId });
     if (!Number.isSafeInteger(it.qty) || it.qty < 1 || it.qty > 1000) fail(409, `"${it.name}" has an invalid quantity.`, { productId: it.productId });
     if (!Number.isSafeInteger(it.unitPriceKobo) || it.unitPriceKobo <= 0) fail(409, `"${it.name}" has an invalid price.`, { productId: it.productId });
     if (n(row.stock_qty) < it.qty) fail(409, `Only the remaining stock of "${it.name}" can be ordered. Reduce the quantity to continue.`, { productId: it.productId });
@@ -413,7 +415,7 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
     ...assertSql('(SELECT COUNT(*) FROM mall_cart_items WHERE cart_id = ?) = ?', [cartId, rows.length]),
     ...rows.flatMap((r) => assertSql(`EXISTS (SELECT 1 FROM mall_cart_items ci JOIN products p ON p.id = ci.product_id
       WHERE ci.id = ? AND ci.cart_id = ? AND ci.product_id = ? AND ci.qty = ?
-      AND p.status = 'Active' AND p.is_mall_listed = 1 AND p.stock_qty >= ?
+      AND p.status <> 'Archived' AND p.stock_qty >= ?
       AND ${effectivePrice('p')} = ?)`,
     [r.cart_line_id, cartId, r.product_id, r.qty, r.qty, r.price_kobo])),
     {

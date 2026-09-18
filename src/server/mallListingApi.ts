@@ -98,7 +98,7 @@ function publicPreview(row: any) {
     price: listing.publicPriceKobo, retailPriceKobo: listing.retailPriceKobo,
     image: listing.images[0] || '', images: listing.images, available: listing.stock > 0,
     featured: listing.featured, promoActive: listing.promoActive,
-    visibleOnMall: listing.listed && listing.productStatus === 'Active' && listing.stock > 0,
+    visibleOnMall: listing.productStatus !== 'Archived',
   };
 }
 

@@ -7,6 +7,7 @@ import { MallQuantityControl } from './MallQuantityControl';
 import { ProductImage } from '../components/common/ProductImage';
 import { useToast } from '../context/ToastContext';
 import { mallClient, type MallProduct } from '../services/mallClient';
+import { hasMallPrice, mallUnavailableLabel } from '../shared/mallProductPresentation';
 
 export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
   const { products, cart, addToCart, refreshProducts } = useMall();
@@ -47,6 +48,7 @@ export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
   }
 
   const inCart = cart?.items.find((i) => i.productId === product.id);
+  const purchasable = product.available && hasMallPrice(product.price);
   const related = (products?.products || []).filter((p) => p.id !== product.id && (p.category || '') === (product.category || '')).slice(0, 6);
   const share = async () => {
     const data = { title: product.name, text: `${product.name} on IdoferaMall`, url: window.location.href };
@@ -71,25 +73,25 @@ export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
           <div className="min-w-0">
             <p className="text-[11px] font-bold uppercase tracking-widest text-blue-600 dark:text-blue-400">{product.brand || product.category || 'Idofera Mall'}</p>
             <h1 className="mt-1 text-xl sm:text-2xl font-black text-slate-900 dark:text-white tracking-tight leading-tight">{product.name}</h1>
-            <p className="mt-2 text-sm leading-relaxed text-slate-600">{product.description || `Quality ${product.unit || 'product'} available for pickup from IdoferaMall.`}</p>
+            <p className="mt-2 text-sm leading-relaxed text-slate-600 dark:text-slate-400">{product.description?.trim() || 'Product description has not been provided yet.'}</p>
             <div className="mt-3 flex items-baseline gap-2">
-              <span className="text-2xl font-black text-slate-900 dark:text-white">{formatNaira(product.price)}</span>
-              {product.retailPriceKobo != null && product.retailPriceKobo > product.price && (
+              <span className="text-2xl font-black text-slate-900 dark:text-white">{hasMallPrice(product.price) ? formatNaira(product.price) : 'Price unavailable'}</span>
+              {hasMallPrice(product.price) && product.retailPriceKobo != null && product.retailPriceKobo > product.price && (
                 <span className="text-sm text-slate-400 line-through">{formatNaira(product.retailPriceKobo)}</span>
               )}
             </div>
             <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
               <div className="rounded-xl bg-white/60 p-2"><dt className="text-xs text-slate-500">Unit</dt><dd className="font-bold">{product.unit}</dd></div>
-              <div className="rounded-xl bg-white/60 p-2"><dt className="text-xs text-slate-500">Availability</dt><dd className="font-bold">{product.available ? `${product.stock.toLocaleString('en-NG')} in stock` : 'Out of stock'}</dd></div>
+              <div className="rounded-xl bg-white/60 p-2"><dt className="text-xs text-slate-500">Availability</dt><dd className="font-bold">{product.stock > 0 ? `${product.stock.toLocaleString('en-NG')} in stock` : 'Out of stock'}</dd></div>
             </dl>
             <div className="mt-4 flex items-center gap-2">
-              <MallQuantityControl value={qty} min={1} max={product.stock} onChange={setQty} label={`${product.name} quantity`} />
+              <MallQuantityControl value={qty} min={1} max={product.stock} onChange={setQty} disabled={adding || !purchasable} label={`${product.name} quantity`} />
               <button
-                type="button" disabled={adding || !product.available}
+                type="button" disabled={adding || !purchasable}
                 onClick={async () => { setAdding(true); try { await addToCart(product.id, qty); } finally { setAdding(false); } }}
                 className="flex-1 h-11 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-slate-200 text-white text-sm font-extrabold flex items-center justify-center gap-2"
               >
-                <ShoppingCart className="w-4 h-4" /> {adding ? 'Adding…' : inCart ? 'Add More' : 'Add to Cart'}
+                <ShoppingCart className="w-4 h-4" /> {!purchasable ? mallUnavailableLabel(product) : adding ? 'Adding…' : inCart ? 'Add More' : 'Add to Cart'}
               </button>
             </div>
             <div className="mt-3 flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
@@ -110,7 +112,7 @@ export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
                 </span>
                 <span className="block p-2">
                   <span className="block text-xs font-semibold line-clamp-2 min-h-[2.2em]">{p.name}</span>
-                  <span className="block mt-1 text-sm font-black">{formatNaira(p.price)}</span>
+                  <span className="block mt-1 text-sm font-black">{hasMallPrice(p.price) ? formatNaira(p.price) : 'Price unavailable'}</span>
                 </span>
               </button>
             ))}

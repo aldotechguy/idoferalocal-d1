@@ -6,7 +6,7 @@ import { MallProductCard } from './MallProductCard';
 import { ProductCardSkeleton } from './mallUi';
 import { AsyncState } from '../components/common/AsyncState';
 
-const PAGE_SIZE = 24;
+const PAGE_SIZE = 10;
 
 export type MallCatalogParams = { limit: number; offset: number; sort: string; brand?: string };
 export type MallCatalogFetcher = (params: MallCatalogParams) => Promise<{
@@ -40,6 +40,10 @@ export const MallBrowseGrid: React.FC<{
   const [loading, setLoading] = React.useState(true);
   const [loadingMore, setLoadingMore] = React.useState(false);
   const [error, setError] = React.useState('');
+  const [moreError, setMoreError] = React.useState('');
+  const nextOffset = React.useRef(0);
+  const generation = React.useRef(0);
+  const pendingMore = React.useRef(false);
   const [reload, setReload] = React.useState(0);
 
   // Callers pass a fresh fetcher each render; keep the latest without retriggering.
@@ -55,12 +59,18 @@ export const MallBrowseGrid: React.FC<{
 
   React.useEffect(() => {
     let alive = true;
+    generation.current += 1;
+    pendingMore.current = false;
+    setLoadingMore(false);
+    setMoreError('');
+    nextOffset.current = 0;
     setLoading(true);
     setError('');
     request(0)
       .then((result) => {
         if (!alive) return;
         setItems(result.products);
+        nextOffset.current = result.products.length;
         setTotal(result.total);
         setBrands(result.brands ?? []);
         setLoading(false);
@@ -70,13 +80,20 @@ export const MallBrowseGrid: React.FC<{
         setError(reason instanceof Error ? reason.message : String(reason));
         setLoading(false);
       });
-    return () => { alive = false; };
+    return () => { alive = false; generation.current += 1; };
   }, [fetchKey, request, reload]);
 
   const loadMore = async () => {
+    if (pendingMore.current || loading) return;
+    const currentGeneration = generation.current;
+    pendingMore.current = true;
     setLoadingMore(true);
+    setMoreError('');
     try {
-      const result = await request(items.length);
+      const result = await request(nextOffset.current);
+      if (currentGeneration !== generation.current) return;
+      nextOffset.current += result.products.length;
+      if (!result.products.length) nextOffset.current = result.total;
       // Guard against duplicates if the catalog shifted between page requests.
       setItems((previous) => {
         const seen = new Set(previous.map((product) => product.id));
@@ -85,27 +102,32 @@ export const MallBrowseGrid: React.FC<{
       setTotal(result.total);
       setBrands(result.brands ?? []);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally { setLoadingMore(false); }
+      if (currentGeneration === generation.current) setMoreError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      if (currentGeneration === generation.current) {
+        pendingMore.current = false;
+        setLoadingMore(false);
+      }
+    }
   };
 
-  const hasMore = !loading && !error && items.length > 0 && items.length < total;
+  const hasMore = !loading && !error && items.length > 0 && nextOffset.current < total;
 
   return (
     <section>
       <div className="mb-3">
         <h1 className="text-lg sm:text-xl font-black text-slate-900 dark:text-white tracking-tight">{title}</h1>
         {sub && <p className="text-xs sm:text-sm text-slate-400 font-medium">{sub}</p>}
-        {!loading && !error && <p className="text-[11px] text-slate-400 mt-0.5">{total} product{total === 1 ? '' : 's'}{items.length < total ? ` · showing ${items.length}` : ''}</p>}
+        {!loading && !error && <p role="status" className="text-[11px] text-slate-400 mt-0.5">Showing {items.length} of {total} product{total === 1 ? '' : 's'}</p>}
       </div>
       {!loading && !error && total > 0 && <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200 bg-white/75 p-3">
         <label className="text-xs font-bold text-slate-600">Sort <select value={sort} onChange={(event) => setSort(event.target.value)} className="ml-1 h-9 rounded-lg border px-2 text-sm">{SORT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
         {brands.length > 1 && <label className="text-xs font-bold text-slate-600">Brand <select value={brand} onChange={(event) => setBrand(event.target.value)} className="ml-1 h-9 rounded-lg border px-2 text-sm"><option value="all">All brands</option>{brands.map((option) => <option key={option.name} value={option.name}>{option.name} ({option.count})</option>)}</select></label>}
-        <span className="ml-auto text-[11px] font-semibold text-slate-400">Unavailable items are hidden automatically</span>
+        <span className="ml-auto text-[11px] font-semibold text-slate-400">Out-of-stock products stay visible but cannot be purchased</span>
       </div>}
       {loading ? (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2.5 sm:gap-3">
-          {Array.from({ length: 12 }).map((_, index) => <ProductCardSkeleton key={index} />)}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5 sm:gap-3">
+          {Array.from({ length: PAGE_SIZE }).map((_, index) => <ProductCardSkeleton key={index} />)}
         </div>
       ) : error ? (
         <AsyncState title="Products could not be loaded" message={error} onRetry={() => setReload((value) => value + 1)} />
@@ -116,15 +138,17 @@ export const MallBrowseGrid: React.FC<{
           <p className="text-xs text-slate-400 mt-1">Try a different search, brand or category.</p>
         </div>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2.5 sm:gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5 sm:gap-3" aria-busy={loadingMore}>
           {items.map((product) => <MallProductCard key={product.id} product={product} />)}
         </div>
       )}
       {hasMore && <div className="mt-5 text-center">
+        {moreError && <p role="alert" className="mb-2 text-sm text-red-600">Could not load more products. {moreError}</p>}
         <button type="button" onClick={loadMore} disabled={loadingMore} className="h-11 px-6 rounded-xl border border-amber-500 bg-white text-amber-700 text-sm font-extrabold disabled:opacity-50">
-          {loadingMore ? 'Loading…' : `Load more products (${total - items.length} left)`}
+          {loadingMore ? 'Loading…' : moreError ? 'Retry loading more' : 'Load more products'}
         </button>
       </div>}
+      {!loading && !error && !hasMore && items.length > 0 && <p className="mt-5 text-center text-sm text-slate-500">{items.length >= total ? `You’ve viewed all ${total} products.` : 'You’ve reached the end of this catalog. Refresh to see recent changes.'}</p>}
     </section>
   );
 };
