@@ -714,10 +714,12 @@ async function serveAsset(request: Request, env: Env) {
   const url = new URL(request.url);
   const acceptsHtml = request.method === 'GET' && (request.headers.get('accept') || '').includes('text/html');
   if (response.status === 404 && acceptsHtml) {
-    response = await env.ASSETS.fetch(new Request(new URL('/index.html', url), request));
+    // Fetch the canonical HTML internally: /index.html redirects to / in
+    // Workers Assets, which would otherwise discard the browser's staff route.
+    response = await env.ASSETS.fetch(new Request(new URL('/', url), request));
   }
   const headers = new Headers(response.headers);
-  if (url.pathname === '/' || url.pathname === '/index.html') {
+  if ((response.headers.get('content-type') || '').includes('text/html')) {
     headers.set('cache-control', 'no-cache, max-age=0');
     headers.delete('content-length');
     const html = (await response.text()).replaceAll('__SITE_ORIGIN__', url.origin);

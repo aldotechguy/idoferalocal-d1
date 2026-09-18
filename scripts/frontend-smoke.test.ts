@@ -8,6 +8,52 @@ import { mallDeliveryFeeKobo, mallDeliveryZone } from '../src/shared/mallDeliver
 import { mallStockLabel } from '../src/shared/mallProductPresentation.ts';
 import { mallClient } from '../src/services/mallClient.ts';
 import { createMallSearchMatcher, mallOneTypo } from '../src/shared/mallSearch.ts';
+import worker from '../sites-worker.ts';
+
+test('worker serves deep-link HTML without forwarding the index.html redirect', async () => {
+  for (const path of ['/labs', '/labs/dashboard', '/app/pos', '/checkout']) {
+    const requested: string[] = [];
+    const env = {
+      ASSETS: {
+        async fetch(request: Request) {
+          const pathname = new URL(request.url).pathname;
+          requested.push(pathname);
+          if (pathname === '/index.html') return Response.redirect('https://test/', 307);
+          if (pathname === '/') return new Response('<html>__SITE_ORIGIN__</html>', {
+            headers: { 'content-type': 'text/html', 'content-length': '33' },
+          });
+          return new Response(null, { status: 404 });
+        },
+      },
+    };
+    const response = await worker.fetch(new Request(`https://test${path}`, {
+      headers: { accept: 'text/html' },
+    }), env as Parameters<typeof worker.fetch>[1]);
+    assert.equal(response.status, 200, path);
+    assert.equal(response.headers.get('location'), null);
+    assert.equal(response.headers.get('cache-control'), 'no-cache, max-age=0');
+    assert.equal(response.headers.get('content-length'), null);
+    assert.equal(await response.text(), '<html>https://test</html>');
+    assert.deepEqual(requested, [path, '/']);
+  }
+});
+
+test('worker does not turn missing scripts or API routes into the app shell', async () => {
+  const requested: string[] = [];
+  const env = {
+    ASSETS: {
+      async fetch(request: Request) {
+        requested.push(new URL(request.url).pathname);
+        return new Response(null, { status: 404 });
+      },
+    },
+  };
+  for (const path of ['/assets/missing.js', '/api/missing']) {
+    const response = await worker.fetch(new Request(`https://test${path}`), env as Parameters<typeof worker.fetch>[1]);
+    assert.equal(response.status, 404);
+  }
+  assert.deepEqual(requested, ['/assets/missing.js']);
+});
 
 test('Mall merchandising explains Active visibility without publishing controls', () => {
   const editor = fs.readFileSync(new URL('../src/components/products/MallListingsView.tsx', import.meta.url), 'utf8');
