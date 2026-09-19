@@ -200,14 +200,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     fetch('/api/auth/session', {credentials: 'include', headers, cache: 'no-store'})
       .then(async (response) => response.ok ? response.json() : {user: null})
-      .then(async ({user}) => {
+      .then(async ({user, entranceAllowed}) => {
         if (!active) return;
+        if (!user && !entranceAllowed) {
+          window.location.replace('/');
+          return;
+        }
         setCurrentUser(user || null);
         if (user) await refreshServerUsers();
       })
       .catch(() => active && setCurrentUser(null))
       .finally(() => active && setLoading(false));
     return () => { active = false; };
+  }, []);
+
+  // Revalidate open workspaces/login screens after expiry or another-tab logout.
+  useEffect(() => {
+    let active = true;
+    const check = async () => {
+      try {
+        const token = localStorage.getItem('idofera_session_token') || sessionStorage.getItem('idofera_session_token');
+        const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
+        const response = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store', headers });
+        if (!response.ok) return;
+        const { user, entranceAllowed } = await response.json();
+        if (active && !user && !entranceAllowed) window.location.replace('/');
+      } catch { /* A transient network error is not a confirmed expired session. */ }
+    };
+    const timer = window.setInterval(check, 30000);
+    window.addEventListener('focus', check);
+    return () => { active = false; window.clearInterval(timer); window.removeEventListener('focus', check); };
   }, []);
 
   // Load users from IndexedDB and Central Cloud Firestore on boot
@@ -630,7 +652,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       headers['authorization'] = `Bearer ${token}`;
       headers['x-session-token'] = token;
     }
-    await fetch('/api/auth/logout', {method: 'POST', credentials: 'include', headers}).catch(() => null);
+    const response = await fetch('/api/auth/logout', {method: 'POST', credentials: 'include', headers});
+    if (!response.ok) throw new Error('Sign out failed. Please try again.');
     localStorage.removeItem('idofera_current_user_id');
     localStorage.removeItem('idofera_session_token');
     sessionStorage.removeItem('idofera_session_token');
@@ -640,6 +663,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       message: 'You have been safely signed out of your local workspace.',
       type: 'info',
     });
+    window.location.replace('/');
   };
 
   const hasPermission = (requiredRoles: UserRole[]) => {

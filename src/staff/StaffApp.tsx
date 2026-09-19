@@ -19,7 +19,7 @@ const SettingsHubView = React.lazy(() => import('../components/settings/Settings
 const PAGE_TITLES: Record<string, string> = { dashboard: 'Dashboard', pos: 'Point of Sale', sales: 'Sales & Orders', 'sales-orders': 'Sales & Orders', 'mall-orders': 'Mall Orders', deliveries: 'Deliveries', products: 'Products & Stock', 'products-stock': 'Products & Stock', inventory: 'Inventory', pricing: 'Pricing', archive: 'Archive', customers: 'Customers', purchases: 'Purchases', 'purchases-suppliers': 'Purchases', suppliers: 'Suppliers', expenses: 'Finance & Expenses', finance: 'Finance', 'money-movement': 'Money Movement', 'investment-planner': 'Investment Planner', reports: 'Reports', settings: 'Settings', 'settings-tools': 'Settings', import: 'Import', ai: 'AI Assistant' };
 
 export const StaffApp: React.FC = () => {
-  const { currentUser, hasPermission } = useAuth();
+  const { currentUser, hasPermission, loading } = useAuth();
   const route = useRoute();
   const activePage = route.surface === 'staff' ? (route.staffPage || 'dashboard') : 'dashboard';
   const setActivePage = React.useCallback((page: string) => navigateStaff(page), []);
@@ -53,6 +53,7 @@ export const StaffApp: React.FC = () => {
     }
   }, [activePage, route]);
 
+  if (loading) return <div role="status" className="p-8 text-center">Checking staff access…</div>;
   if (!currentUser) {
     return <LoginView />;
   }

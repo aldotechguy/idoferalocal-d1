@@ -1,15 +1,28 @@
-import React from 'react';
+import React, { useCallback } from 'react';
 import { ShoppingCart, User, Menu, Heart, Store } from 'lucide-react';
 import { MallHeaderSearch } from './MallHeaderSearch';
 import { useMall } from '../context/MallContext';
 import { useNavigateMall } from '../hooks/useRoute';
+import { useStaffCartHold } from '../hooks/useStaffCartHold';
+import { useToast } from '../context/ToastContext';
 
 export const MallHeader: React.FC<{ query: string; setQuery: (q: string) => void; onMenu: () => void }> = ({
   query, setQuery, onMenu,
 }) => {
   const { cart, setView } = useMall();
   const go = useNavigateMall();
+  const { showToast } = useToast();
   const count = cart?.items.reduce((a, i) => a + i.qty, 0) ?? 0;
+  const openCart = useCallback(() => { setView('cart'); go('/checkout'); }, [setView, go]);
+  const openStaff = useCallback(() => {
+    void fetch('/api/auth/entrance', { method: 'POST', credentials: 'include', headers: { 'x-staff-entrance': 'cart-hold' } })
+      .then(response => {
+        if (!response.ok) throw new Error('Entrance unavailable');
+        window.location.href = '/labs';
+      })
+      .catch(() => showToast({ title: 'Unable to open workspace', message: 'Check your connection and try again.', type: 'error' }));
+  }, [showToast]);
+  const cartHold = useStaffCartHold(openCart, openStaff);
 
 
   return (
@@ -51,7 +64,7 @@ export const MallHeader: React.FC<{ query: string; setQuery: (q: string) => void
           </button>
           <button
             type="button"
-            onClick={() => { setView('cart'); go('/checkout'); }}
+            {...cartHold}
             className="relative flex items-center gap-2 h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-extrabold transition-colors"
           >
             <ShoppingCart className="w-4 h-4" />
@@ -65,7 +78,7 @@ export const MallHeader: React.FC<{ query: string; setQuery: (q: string) => void
         </div>
         <button
           type="button" aria-label="Cart"
-          onClick={() => { setView('cart'); go('/checkout'); }}
+          {...cartHold}
           className="md:hidden relative p-2.5 rounded-xl bg-blue-600 text-white shrink-0"
         >
           <ShoppingCart className="w-5 h-5" />

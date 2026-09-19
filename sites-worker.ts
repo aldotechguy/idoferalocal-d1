@@ -50,6 +50,7 @@ import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, isDuplicateColumnError, type M
 import { MALL_SAFETY_DDL } from './src/server/mallSafety.js';
 import { bootstrapAdmin } from './src/server/adminBootstrap.js';
 import type { QueryAll } from './src/server/relationalMapper.js';
+import { isStaffPage, isPrivateApi, issueEntrance, hasEntrance, revokeEntrance, entranceCookie } from './src/server/staffEntrance.js';
 
 /** Rows out of D1 -> the QueryAll shape the shared mapper expects. */
 function makeD1QueryAll(env: Env): QueryAll {
@@ -328,6 +329,8 @@ async function authLogin(request: Request, env: Env) {
   await ensureBusinessDataOwner(env);
   const response = json({user: publicUser({...user, last_login: lastLogin})});
   response.headers.set('set-cookie', sessionCookie(session.token, session.maxAge));
+  await revokeEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
+  response.headers.append('set-cookie', entranceCookie());
   return response;
 }
 
@@ -349,20 +352,27 @@ async function authGoogle(request: Request, env: Env) {
   await ensureBusinessDataOwner(env);
   const response = json({user: publicUser({...user, last_login: lastLogin})});
   response.headers.set('set-cookie', sessionCookie(session.token, session.maxAge));
+  await revokeEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
+  response.headers.append('set-cookie', entranceCookie());
   return response;
 }
 
 async function authSession(request: Request, env: Env) {
   await ensureAuthSeed(env);
   const user = await requireAppUser(request, env);
-  return json({ user: user ? publicUser(user) : null, authenticated: Boolean(user) });
+  const entranceAllowed = !user && await hasEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
+  const response = json({ user: user ? publicUser(user) : null, authenticated: Boolean(user), entranceAllowed });
+  response.headers.set('cache-control', 'no-store');
+  return response;
 }
 
 async function authLogout(request: Request, env: Env) {
+  await revokeEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
   const token = readCookie(request, SESSION_COOKIE);
   if (token) await env.DB.prepare('DELETE FROM app_sessions WHERE token_hash = ?').bind(await sha256(token)).run();
   const response = json({ok: true});
   response.headers.set('set-cookie', sessionCookie('', 0));
+  response.headers.append('set-cookie', entranceCookie());
   return response;
 }
 
@@ -720,7 +730,7 @@ async function serveAsset(request: Request, env: Env) {
   }
   const headers = new Headers(response.headers);
   if ((response.headers.get('content-type') || '').includes('text/html')) {
-    headers.set('cache-control', 'no-cache, max-age=0');
+    headers.set('cache-control', isStaffPage(url.pathname) ? 'no-store' : 'no-cache, max-age=0');
     headers.delete('content-length');
     const html = (await response.text()).replaceAll('__SITE_ORIGIN__', url.origin);
     return new Response(html, {status: response.status, statusText: response.statusText, headers});
@@ -741,6 +751,24 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     try {
+      const query = makeD1QueryAll(env);
+      const cookie = request.headers.get('cookie') || '';
+      if (url.pathname === '/api/auth/entrance') {
+        if (request.method !== 'POST') return json({error: 'Method not allowed'}, 405);
+        if (request.headers.get('origin') !== url.origin || request.headers.get('x-staff-entrance') !== 'cart-hold') return json({error: 'Forbidden'}, 403);
+        const response = json({ok: true});
+        response.headers.set('cache-control', 'no-store');
+        response.headers.set('set-cookie', entranceCookie(await issueEntrance(query)));
+        return response;
+      }
+      const login = ['/api/auth/login', '/api/auth/google'].includes(url.pathname);
+      if (isStaffPage(url.pathname) || isPrivateApi(url.pathname) || login) {
+        const entrance = !isPrivateApi(url.pathname) && await hasEntrance(cookie, query);
+        if (!entrance && !await requireAppUser(request, env)) {
+          if (isStaffPage(url.pathname)) return new Response(null, {status: 302, headers: {location: '/', 'cache-control': 'no-store'}});
+          return json({error: 'Authentication required.'}, 401);
+        }
+      }
       if (url.pathname === '/api/health') return json({status: 'ok', app: 'IdoferaLabs API', timestamp: new Date().toISOString()});
       if (url.pathname === '/api/storage/d1/health') {
         await ensureSchema(env);

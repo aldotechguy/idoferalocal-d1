@@ -1,5 +1,5 @@
 import React from 'react';
-import { Home, LayoutGrid, ShoppingCart, User, Lock } from 'lucide-react';
+import { Home, LayoutGrid, ShoppingCart, User } from 'lucide-react';
 import { useMall } from '../context/MallContext';
 import { useNavigateMall, useRoute } from '../hooks/useRoute';
 
@@ -77,12 +77,6 @@ export const MallFooter: React.FC = () => {
               <span key={p} className="px-2 py-1 rounded-md bg-white/10 text-[11px] font-bold">{p}</span>
             ))}
           </div>
-          <button
-            type="button" onClick={() => { window.location.href = '/labs'; }}
-            className="mt-4 inline-flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 hover:text-slate-300"
-          >
-            <Lock className="w-3 h-3" /> Staff Login
-          </button>
         </div>
       </div>
       <div className="border-t border-white/10">

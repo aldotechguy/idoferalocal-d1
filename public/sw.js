@@ -1,4 +1,4 @@
-const CACHE_NAME = 'idofera-pos-v3';
+const CACHE_NAME = 'idofera-pos-v4';
 const STATIC_ASSETS = [
   '/manifest.json',
   '/icon.svg',
@@ -40,6 +40,11 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
+  // Staff navigation must always pass the server gate, including when offline.
+  if (/^\/(labs|app)(\/|$)/.test(url.pathname)) {
+    event.respondWith(fetch(request).catch(() => Response.redirect(new URL('/', url).href, 302)));
+    return;
+  }
 
   // Skip non-GET requests or external extensions
   if (request.method !== 'GET' || !url.protocol.startsWith('http')) {

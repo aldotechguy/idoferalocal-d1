@@ -9,11 +9,25 @@ import { mallStockLabel } from '../src/shared/mallProductPresentation.ts';
 import { mallClient } from '../src/services/mallClient.ts';
 import { createMallSearchMatcher, mallOneTypo } from '../src/shared/mallSearch.ts';
 import worker from '../sites-worker.ts';
+import { createStaffCartHold, STAFF_CART_HOLD_MS } from '../src/hooks/useStaffCartHold.ts';
+import { DatabaseSync } from 'node:sqlite';
+import { issueEntrance, hasEntrance, revokeEntrance, entranceCookie, isStaffPage, isPrivateApi } from '../src/server/staffEntrance.ts';
 
-test('worker serves deep-link HTML without forwarding the index.html redirect', async () => {
+function entranceFixture() {
+  const db = new DatabaseSync(':memory:');
+  const query = async (sql: string, params: any[]) => db.prepare(sql).all(...params);
+  const DB = { prepare: (sql: string) => ({ bind: (...params: any[]) => ({ all: async () => ({ results: await query(sql, params) }) }) }) };
+  return { db, query, DB };
+}
+
+test('worker serves deep-link HTML without forwarding the index.html redirect', async t => {
+  const fixture = entranceFixture();
+  t.after(() => fixture.db.close());
+  const cookie = entranceCookie(await issueEntrance(fixture.query)).split(';')[0];
   for (const path of ['/labs', '/labs/dashboard', '/app/pos', '/checkout']) {
     const requested: string[] = [];
     const env = {
+      DB: fixture.DB,
       ASSETS: {
         async fetch(request: Request) {
           const pathname = new URL(request.url).pathname;
@@ -27,11 +41,11 @@ test('worker serves deep-link HTML without forwarding the index.html redirect', 
       },
     };
     const response = await worker.fetch(new Request(`https://test${path}`, {
-      headers: { accept: 'text/html' },
+      headers: { accept: 'text/html', cookie },
     }), env as Parameters<typeof worker.fetch>[1]);
     assert.equal(response.status, 200, path);
     assert.equal(response.headers.get('location'), null);
-    assert.equal(response.headers.get('cache-control'), 'no-cache, max-age=0');
+    assert.equal(response.headers.get('cache-control'), isStaffPage(path) ? 'no-store' : 'no-cache, max-age=0');
     assert.equal(response.headers.get('content-length'), null);
     assert.equal(await response.text(), '<html>https://test</html>');
     assert.deepEqual(requested, [path, '/']);
@@ -50,9 +64,65 @@ test('worker does not turn missing scripts or API routes into the app shell', as
   };
   for (const path of ['/assets/missing.js', '/api/missing']) {
     const response = await worker.fetch(new Request(`https://test${path}`), env as Parameters<typeof worker.fetch>[1]);
-    assert.equal(response.status, 404);
+    assert.equal(response.status, path.startsWith('/api/') ? 401 : 404);
   }
   assert.deepEqual(requested, ['/assets/missing.js']);
+});
+
+test('staff entrance expires, can be revoked, and never authorizes private APIs', async t => {
+  const f = entranceFixture();
+  t.after(() => f.db.close());
+  const env = { DB: f.DB, ASSETS: { fetch: async () => new Response('shell', { headers: { 'content-type': 'text/html' } }) } } as unknown as Parameters<typeof worker.fetch>[1];
+  for (const path of ['/labs', '/labs/pos', '/app', '/app/reports']) {
+    const response = await worker.fetch(new Request(`https://test${path}`), env);
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get('location'), '/');
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+  }
+  const rejected = await worker.fetch(new Request('https://test/api/auth/entrance', { method: 'POST' }), env);
+  assert.equal(rejected.status, 403);
+  const entrance = await worker.fetch(new Request('https://test/api/auth/entrance', {
+    method: 'POST', headers: { origin: 'https://test', 'x-staff-entrance': 'cart-hold' },
+  }), env);
+  assert.equal(entrance.status, 200);
+  const cookie = entrance.headers.get('set-cookie')!.split(';')[0];
+  assert.match(entrance.headers.get('set-cookie')!, /HttpOnly; SameSite=Strict; Max-Age=300; Secure/);
+  assert.equal(await hasEntrance(cookie, f.query), true);
+  assert.equal((await worker.fetch(new Request('https://test/labs', { headers: { cookie } }), env)).status, 200);
+  for (const path of ['/api/storage/snapshot', '/api/storage/records', '/api/ai/business-assistant', '/api/staff/mall-orders']) {
+    assert.equal((await worker.fetch(new Request(`https://test${path}`, { headers: { cookie } }), env)).status, 401);
+  }
+  await revokeEntrance(cookie, f.query);
+  assert.equal(await hasEntrance(cookie, f.query), false);
+  const expired = entranceCookie(await issueEntrance(f.query));
+  f.db.exec('UPDATE staff_entrances SET expires_at = 0');
+  assert.equal(await hasEntrance(expired, f.query), false);
+  assert.equal((await worker.fetch(new Request('https://test/labs', { headers: { cookie: expired } }), env)).status, 302);
+  assert.equal(isPrivateApi('/api/mall/products'), false);
+  assert.equal(isPrivateApi('/api/storage/d1/health'), true);
+});
+
+test('signed-in staff can open direct links; logout revokes session and entrance', async t => {
+  const f = entranceFixture();
+  t.after(() => f.db.close());
+  f.db.exec(`CREATE TABLE app_users (id TEXT, status TEXT);
+    CREATE TABLE app_sessions (token_hash TEXT, user_id TEXT, expires_at INTEGER);
+    INSERT INTO app_users VALUES ('staff', 'Active');`);
+  const token = 'test-session';
+  const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))), b => b.toString(16).padStart(2, '0')).join('');
+  f.db.prepare('INSERT INTO app_sessions VALUES (?, ?, ?)').run(hash, 'staff', Date.now() + 60000);
+  const DB = { prepare: (sql: string) => ({ bind: (...params: any[]) => ({
+    all: async () => ({ results: await f.query(sql, params) }),
+    run: async () => f.db.prepare(sql).run(...params),
+  }) }) };
+  const env = { DB, ASSETS: { fetch: async () => new Response('staff shell', { headers: { 'content-type': 'text/html' } }) } } as unknown as Parameters<typeof worker.fetch>[1];
+  const entrance = entranceCookie(await issueEntrance(f.query)).split(';')[0];
+  const cookie = `idofera_session=${token}; ${entrance}`;
+  assert.equal((await worker.fetch(new Request('https://test/labs/reports', { headers: { cookie: `idofera_session=${token}` } }), env)).status, 200);
+  const logout = await worker.fetch(new Request('https://test/api/auth/logout', { method: 'POST', headers: { cookie } }), env);
+  assert.equal(logout.status, 200);
+  assert.equal(await hasEntrance(entrance, f.query), false);
+  assert.equal((await worker.fetch(new Request('https://test/labs/reports', { headers: { cookie } }), env)).status, 302);
 });
 
 test('Mall merchandising explains Active visibility without publishing controls', () => {
@@ -166,10 +236,55 @@ test('staff routes are deep-linkable', () => {
 
 test('staff login opens the labs workspace via a full-page deep link', () => {
   const footer = fs.readFileSync('src/mall-site/MallFooter.tsx', 'utf8');
+  const header = fs.readFileSync('src/mall-site/MallHeader.tsx', 'utf8');
   // Full-page navigation (not client-side go()) so the staff app boots fresh;
   // the worker/express SPA fallback must then serve index.html for /labs.
-  assert.match(footer, /window\.location\.href = '\/labs'/);
+  assert.doesNotMatch(footer, /Staff Login|\/labs/);
+  assert.match(header, /window\.location\.href = '\/labs'/);
+  assert.equal(header.match(/\.\.\.cartHold/g)?.length, 2);
   assert.deepEqual(parseRoute('/labs', ''), { surface: 'staff', staffPage: undefined });
+});
+
+test('cart hold opens staff only after three seconds and suppresses the following click', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let opened = 0;
+  const hold = createStaffCartHold(() => opened++);
+  hold.start(1, 20, 20, 0, true);
+  t.mock.timers.tick(STAFF_CART_HOLD_MS - 1);
+  assert.equal(opened, 0);
+  t.mock.timers.tick(1);
+  assert.equal(opened, 1);
+  hold.end(1);
+  assert.equal(hold.shouldSuppressClick(), true);
+  t.mock.timers.tick(3000);
+  assert.equal(opened, 1);
+  hold.start(2, 20, 20, 0, true);
+  hold.end(2);
+  assert.equal(hold.shouldSuppressClick(), false);
+});
+
+test('short cart press preserves clicks; movement and cancellation prevent staff navigation', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let opened = 0;
+  const hold = createStaffCartHold(() => opened++);
+  hold.start(1, 20, 20, 0, true);
+  t.mock.timers.tick(500);
+  hold.end(1);
+  assert.equal(hold.shouldSuppressClick(), false);
+  t.mock.timers.tick(3000);
+  assert.equal(opened, 0);
+  for (const cancel of [() => hold.move(1, 40, 20), () => hold.cancel()]) {
+    hold.start(1, 20, 20, 0, true);
+    cancel();
+    t.mock.timers.tick(3000);
+    assert.equal(opened, 0);
+    assert.equal(hold.shouldSuppressClick(), true);
+  }
+  hold.start(1, 20, 20, 2, true);
+  t.mock.timers.tick(3000);
+  hold.start(2, 20, 20, 0, false);
+  t.mock.timers.tick(3000);
+  assert.equal(opened, 0);
 });
 
 test('legacy staff routes remain recognizable for canonical redirects', () => {

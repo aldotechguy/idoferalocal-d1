@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import { isStaffPage, isPrivateApi, issueEntrance, hasEntrance, revokeEntrance, entranceCookie } from './src/server/staffEntrance';
 
 dotenv.config();
 
@@ -349,6 +350,8 @@ async function requireAppUser(req: Request): Promise<any | null> {
 }
 
 async function createSession(userId: string, res: Response) {
+  await revokeEntrance(res.req.headers.cookie || '', entranceQuery);
+  res.append('Set-Cookie', entranceCookie('', res.req.secure));
   const token = randomHex(32);
   const now = Date.now();
   const maxAge = 7 * 24 * 60 * 60; // 7 days in seconds
@@ -382,6 +385,29 @@ function getGeminiClient() {
 }
 
 // =================== AUTH ROUTES ===================
+const entranceQuery = async (sql: string, params: any[]) => db.prepare(sql).all(...params);
+app.use(async (req, res, next) => {
+  try {
+    const cookie = req.headers.cookie || '';
+    if (req.path === '/api/auth/entrance') {
+      if (req.method !== 'POST') return res.status(405).json({error: 'Method not allowed'});
+      const origin = `${req.protocol}://${req.get('host')}`;
+      if (req.get('origin') !== origin || req.get('x-staff-entrance') !== 'cart-hold') return res.status(403).json({error: 'Forbidden'});
+      res.setHeader('Set-Cookie', entranceCookie(await issueEntrance(entranceQuery), req.secure));
+      return res.set('Cache-Control', 'no-store').json({ok: true});
+    }
+    const login = ['/api/auth/login', '/api/auth/google'].includes(req.path);
+    if (isStaffPage(req.path) || isPrivateApi(req.path) || login) {
+      const entrance = !isPrivateApi(req.path) && await hasEntrance(cookie, entranceQuery);
+      if (!entrance && !await requireAppUser(req)) {
+        if (isStaffPage(req.path)) return res.set('Cache-Control', 'no-store').redirect(302, '/');
+        return res.status(401).json({error: 'Authentication required.'});
+      }
+    }
+    if (isStaffPage(req.path) || req.path.startsWith('/api/auth/')) res.set('Cache-Control', 'no-store');
+    next();
+  } catch (error) { next(error); }
+});
 
 app.post("/api/auth/login", async (req, res) => {
   try {
@@ -456,7 +482,7 @@ app.get("/api/auth/session", async (req, res) => {
     await ensureAuthSeed();
     const user = await requireAppUser(req);
     if (!user) {
-      return res.json({ user: null, authenticated: false });
+      return res.json({ user: null, authenticated: false, entranceAllowed: await hasEntrance(req.headers.cookie || '', entranceQuery) });
     }
     return res.json({ user: publicUser(user), authenticated: true });
   } catch (error: any) {
@@ -466,6 +492,8 @@ app.get("/api/auth/session", async (req, res) => {
 
 app.post("/api/auth/logout", async (req, res) => {
   try {
+    await revokeEntrance(req.headers.cookie || '', entranceQuery);
+    res.append('Set-Cookie', entranceCookie('', req.secure));
     const token = readCookie(req, SESSION_COOKIE);
     if (token) {
       db.prepare("DELETE FROM app_sessions WHERE token_hash = ?").run(sha256(token));
