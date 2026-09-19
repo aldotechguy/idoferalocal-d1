@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
+import { arrangeStockRows, mallGridColumns } from '../src/shared/mallStockRows.ts';
+import { catalogStatus, productStockLabel } from '../src/shared/productStatus.ts';
+import { productToRow } from '../src/server/relationalMapper.ts';
 import { parseRoute } from '../src/hooks/useRoute.ts';
 import { computeMenuStyle, PORTAL_DROPDOWN_Z } from '../src/components/common/PortalDropdown.tsx';
 import { validateBuyer } from '../src/mall-site/useBuyerForm.ts';
@@ -19,6 +22,69 @@ function entranceFixture() {
   const DB = { prepare: (sql: string) => ({ bind: (...params: any[]) => ({ all: async () => ({ results: await query(sql, params) }) }) }) };
   return { db, query, DB };
 }
+
+test('Explore rows cap sold-out items without dropping or duplicating products across pages and widths', () => {
+  const items = Array.from({length: 37}, (_, id) => ({id, stock: id % 4 === 0 ? 5 : 0}));
+  for (const count of [10, 20, 37]) {
+    for (const columns of [2, 3, 4, 5]) {
+      const input = items.slice(0, count);
+      const rows = arrangeStockRows(input, columns, 2);
+      const flat = rows.flat();
+      assert.equal(flat.length, count);
+      assert.equal(new Set(flat.map(p => p.id)).size, count);
+      assert.ok(rows.every(row => row.length <= columns && row.filter(p => p.stock <= 0).length <= 2));
+      for (const inStock of [true, false]) {
+        assert.deepEqual(flat.filter(p => (p.stock > 0) === inStock), input.filter(p => (p.stock > 0) === inStock));
+      }
+    }
+  }
+  assert.deepEqual(arrangeStockRows([], 5, 2), []);
+  assert.deepEqual(arrangeStockRows([{stock: 0}, {stock: -1}, {stock: 0}], 5, 2).map(row => row.length), [2, 1]);
+  assert.deepEqual([639, 640, 1023, 1024, 1279, 1280].map(mallGridColumns), [2, 3, 3, 4, 4, 5]);
+  const home = fs.readFileSync('src/mall-site/MallHome.tsx', 'utf8');
+  assert.match(home, /maxSoldOutPerRow=\{2\}/);
+});
+
+test('catalog visibility is independent of stock and archive survives normalization', () => {
+  for (const status of ['Active', 'Low Stock', 'Out of Stock', undefined]) {
+    assert.equal(catalogStatus(status), 'Active');
+  }
+  assert.equal(catalogStatus('Archived'), 'Archived');
+  for (const status of ['Low Stock', 'Out of Stock', 'Archived']) {
+    const row = productToRow({id: 'test-product', status, currentStock: 0}, '2026-09-19T00:00:00Z');
+    assert.equal(row.status, status === 'Archived' ? 'Archived' : 'Active');
+    assert.equal(row.stock_qty, 0);
+  }
+  assert.equal(productStockLabel({status: 'Active', currentStock: 0, minimumStockLevel: 5}), 'Out of Stock');
+  assert.equal(productStockLabel({status: 'Active', currentStock: 3, minimumStockLevel: 5}), 'Low Stock');
+  assert.equal(productStockLabel({status: 'Low Stock', currentStock: 30, minimumStockLevel: 5}), 'Active');
+  assert.equal(productStockLabel({status: 'Archived', currentStock: 0, minimumStockLevel: 5}), 'Archived');
+});
+
+test('visibility migration preserves quantities and archives and is idempotent', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec("CREATE TABLE products (id TEXT, status TEXT, stock_qty INTEGER); CREATE TABLE app_documents (collection TEXT, payload TEXT);");
+    for (const status of ['Active', 'Low Stock', 'Out of Stock', 'Archived']) {
+      db.prepare('INSERT INTO products VALUES (?, ?, ?)').run(status, status, 0);
+      db.prepare('INSERT INTO app_documents VALUES (?, ?)').run('products', JSON.stringify({status, currentStock: 0}));
+    }
+    const sql = fs.readFileSync('scripts/migrations/normalize-product-visibility.sql', 'utf8');
+    db.exec(sql);
+    db.exec(sql);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM products WHERE status = 'Active'").get()?.n, 3);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM products WHERE status = 'Archived'").get()?.n, 1);
+    assert.equal(db.prepare('SELECT SUM(stock_qty) AS n FROM products').get()?.n, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM app_documents WHERE json_extract(payload, '$.status') = 'Active'").get()?.n, 3);
+  } finally { db.close(); }
+});
+
+test('sync checks relational success before clearing pending changes', () => {
+  const source = fs.readFileSync('src/services/d1StorageService.ts', 'utf8');
+  const sync = source.slice(source.indexOf('export async function syncLocalRecordsToD1'));
+  assert.ok(sync.indexOf('result.relationalSynced === false') < sync.indexOf('localStorage.setItem(REVISION_KEY'));
+  assert.match(sync, /Pending changes have been retained/);
+});
 
 test('staff snapshot startup waits for authentication and cached profiles cannot restore sessions', () => {
   const app = fs.readFileSync('src/context/AppContext.tsx', 'utf8');

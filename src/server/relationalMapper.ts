@@ -3,6 +3,7 @@
  * Shared by server.ts (node:sqlite) and sites-worker.ts (D1).
  * Frontend contract (src/types) is UNCHANGED.
  */
+import { catalogStatus } from '../shared/productStatus.js';
 export type Snapshot = Record<string, any[]>;
 export type QueryAll = (sql: string, params?: any[]) => Promise<any[]>;
 
@@ -184,7 +185,7 @@ export function productToRow(p: any, now: string) {
     min_selling_price_kobo: NairaToKobo(p.minimumSellingPrice),
     stock_qty: n(p.currentStock), low_stock_threshold: n(p.minimumStockLevel, 5),
     unit: s(p.unit, 'pcs'), expiry_date: p.expiryDate ? s(p.expiryDate) : null,
-    status: s(p.status, 'Active'), is_mall_listed: b01(p.isMallListed),
+    status: catalogStatus(p.status), is_mall_listed: b01(p.isMallListed),
     mall_price_kobo: p.mallPrice != null ? NairaToKobo(p.mallPrice) : null,
     mall_description: s(p.mallDescription) || null,
     mall_featured: p.mallFeatured ? 1 : 0,

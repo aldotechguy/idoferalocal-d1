@@ -121,11 +121,7 @@ export function migrateRecord(collection: string, record: any): any {
         migrated.dealerPrice = Number(migrated.dealerPrice);
       }
 
-      if (!migrated.status) {
-        if (migrated.currentStock <= 0) migrated.status = 'Out of Stock';
-        else if (migrated.currentStock <= migrated.minimumStockLevel) migrated.status = 'Low Stock';
-        else migrated.status = 'Active';
-      }
+      migrated.status = migrated.status === 'Archived' ? 'Archived' : 'Active';
       break;
     }
 

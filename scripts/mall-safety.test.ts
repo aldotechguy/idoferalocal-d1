@@ -92,8 +92,8 @@ for (const runtime of ['node', 'worker'] as const) {
     }
     f.db.exec("UPDATE products SET created_at='2020-01-01' WHERE id='p'");
     const initial = await home();
-    assert.equal(initial.flashSales.length, 10);
-    assert.equal(initial.topSellers.length, 12);
+    assert.equal(initial.flashSales.length, 1);
+    assert.equal(initial.topSellers.length, 2);
     assert.deepEqual(initial.newArrivals, [], 'Creation dates alone do not qualify as restocks');
     const movement = (id: string, product: string, type: string, at: string, qty = 5) => f.db.prepare(
       'INSERT INTO stock_movements(id,product_id,type,qty,prev_stock,new_stock,created_at) VALUES(?,?,?,?,0,?,?)'
@@ -106,10 +106,21 @@ for (const runtime of ['node', 'worker'] as const) {
     movement('negative-receipt', 'home-73', 'Incoming', '2026-04-01', -1);
     f.db.exec("UPDATE products SET status='Archived' WHERE id='home-14'; UPDATE products SET updated_at='2026-05-01' WHERE id='home-1'");
     const restocked = (await home()).newArrivals;
-    assert.deepEqual(restocked.map((p: any) => p.id), ['home-0', ...Array.from({ length: 11 }, (_, i) => `home-${13 - i}`)]);
-    assert.equal(new Set(restocked.map((p: any) => p.id)).size, 12);
+    assert.deepEqual(restocked.map((p: any) => p.id), ['home-0']);
+    assert.equal(new Set(restocked.map((p: any) => p.id)).size, 1);
     assert.ok(restocked.every((p: any) => !p.available), 'Restocked products remain visible after selling out');
     assert.ok(initial.flashSales.every((p: any) => p.stock === 0 && !p.available));
+    // In-stock candidates beyond the original LIMIT must backfill the rails.
+    f.db.exec("UPDATE products SET stock_qty=5 WHERE id IN ('home-0','home-1','home-2','home-3','home-4','home-5','home-6','home-7','home-8','home-9','home-10','home-11','home-12','home-13','home-70','home-71')");
+    const mixed = await home();
+    assert.equal(mixed.flashSales.length, 10);
+    assert.equal(mixed.topSellers.length, 12);
+    assert.equal(mixed.newArrivals.length, 12);
+    for (const rail of [mixed.flashSales, mixed.topSellers, mixed.newArrivals]) {
+      assert.ok(rail.filter((p: any) => p.stock <= 0).length <= 1);
+      assert.equal(new Set(rail.map((p: any) => p.id)).size, rail.length);
+      assert.ok(rail.every((p: any) => p.id !== 'home-14'));
+    }
     assert.deepEqual(initial.buyAgain, []);
     assert.equal((await f.checkout()).status, 201);
     assert.deepEqual((await home()).buyAgain, [], 'Pending orders are not purchases');

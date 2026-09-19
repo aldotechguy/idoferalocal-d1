@@ -20,6 +20,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { Product } from '../../types';
+import { productStockLabel } from '../../shared/productStatus';
 import { AddProductModal } from '../modals/AddProductModal';
 import { ConfirmModal } from '../common/ConfirmModal';
 import { Pagination } from '../common/Pagination';
@@ -63,8 +64,8 @@ export const ProductsView: React.FC<ProductsViewProps> = ({ onNavigate }) => {
   const totalProductsCount = products.length;
   const archivedCount = products.filter((p) => p.status === 'Archived').length;
   const activeProductsCount = products.filter((p) => p.status !== 'Archived').length;
-  const lowStockCount = products.filter((p) => p.status !== 'Archived' && (p.status === 'Low Stock' || (p.currentStock > 0 && p.currentStock <= p.minimumStockLevel))).length;
-  const outOfStockCount = products.filter((p) => p.status !== 'Archived' && (p.status === 'Out of Stock' || p.currentStock <= 0)).length;
+  const lowStockCount = products.filter((p) => productStockLabel(p) === 'Low Stock').length;
+  const outOfStockCount = products.filter((p) => productStockLabel(p) === 'Out of Stock').length;
   const totalStockUnits = products.filter((p) => p.status !== 'Archived').reduce((acc, p) => acc + (p.currentStock || 0), 0);
 
   // Filtering & Sorting Logic
@@ -82,9 +83,9 @@ export const ProductsView: React.FC<ProductsViewProps> = ({ onNavigate }) => {
     if (selectedStatus === 'All') {
       matchesStatus = p.status !== 'Archived';
     } else if (selectedStatus === 'Out of Stock') {
-      matchesStatus = p.status !== 'Archived' && (p.status === 'Out of Stock' || p.currentStock <= 0);
+      matchesStatus = productStockLabel(p) === 'Out of Stock';
     } else if (selectedStatus === 'Low Stock') {
-      matchesStatus = p.status !== 'Archived' && (p.status === 'Low Stock' || (p.currentStock > 0 && p.currentStock <= p.minimumStockLevel));
+      matchesStatus = productStockLabel(p) === 'Low Stock';
     } else {
       matchesStatus = p.status === selectedStatus;
     }
@@ -447,16 +448,16 @@ export const ProductsView: React.FC<ProductsViewProps> = ({ onNavigate }) => {
                     <td className="py-3 px-3">
                       <span
                         className={`inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-1 rounded-full ${
-                          product.status === 'Out of Stock'
+                          productStockLabel(product) === 'Out of Stock'
                             ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-400'
-                            : product.status === 'Low Stock'
+                            : productStockLabel(product) === 'Low Stock'
                             ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400'
                             : product.status === 'Archived'
                             ? 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
                             : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400'
                         }`}
                       >
-                        {product.status}
+                        {productStockLabel(product)}
                       </span>
                     </td>
 

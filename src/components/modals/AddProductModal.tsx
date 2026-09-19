@@ -249,7 +249,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
       addProduct({
         ...formData,
         supplierName,
-        status: formData.status || (formData.currentStock <= 0 ? 'Out of Stock' : formData.currentStock <= formData.minimumStockLevel ? 'Low Stock' : 'Active'),
+        status: formData.status === 'Archived' ? 'Archived' : 'Active',
       });
     }
 

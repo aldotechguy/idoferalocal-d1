@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useMemo } from 'react';
 import { useAuth } from './AuthContext';
+import { catalogStatus } from '../shared/productStatus';
 import {
   Product,
   Customer,
@@ -997,7 +998,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id,
       createdAt: now,
       updatedAt: now,
-      status: p.currentStock <= 0 ? 'Out of Stock' : p.currentStock <= p.minimumStockLevel ? 'Low Stock' : 'Active',
+      status: catalogStatus(p.status),
     };
     setProducts((prev) => [newProd, ...prev]);
     saveDocument('products', newProd);
@@ -1013,18 +1014,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         targetName = prod.name;
         const updated = { ...prod, ...updates, updatedAt: new Date().toISOString() };
 
-        // Always enforce correct status based on stock level unless explicitly setting Archived
-        if (prod.status === 'Archived' && updates.status === undefined) {
-          updated.status = 'Archived';
-        } else if (updates.status === 'Archived') {
-          updated.status = 'Archived';
-        } else if (updated.currentStock <= 0) {
-          updated.status = 'Out of Stock';
-        } else if (updated.currentStock <= updated.minimumStockLevel) {
-          updated.status = 'Low Stock';
-        } else {
-          updated.status = 'Active';
-        }
+        updated.status = catalogStatus(updates.status ?? prod.status);
 
         saveDocument('products', updated);
         return updated;
@@ -1063,8 +1053,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const unarchiveProduct = (id: string) => {
     const target = products.find((p) => p.id === id);
     if (!target) return;
-    const restoredStatus = target.currentStock <= 0 ? 'Out of Stock' : target.currentStock <= target.minimumStockLevel ? 'Low Stock' : 'Active';
-    updateProduct(id, { status: restoredStatus }, 'Unarchived product and restored to active catalog.');
+    updateProduct(id, { status: 'Active' }, 'Unarchived product and restored to active catalog.');
     showToast({ title: 'Product Unarchived', message: `"${target.name}" restored to active inventory.`, type: 'success' });
   };
 
@@ -1142,7 +1131,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const existing = workingList[existingIdx];
           const newStock = item.currentStock !== undefined ? Number(item.currentStock) : existing.currentStock;
           const minStock = item.minimumStockLevel !== undefined ? Number(item.minimumStockLevel) : existing.minimumStockLevel;
-          const newStatus = newStock <= 0 ? 'Out of Stock' : newStock <= minStock ? 'Low Stock' : 'Active';
+          const newStatus = catalogStatus(item.status ?? existing.status);
 
           const updatedProduct: Product = {
             ...existing,
@@ -1192,7 +1181,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             currentStock: stockVal,
             minimumStockLevel: minStock,
             unit: item.unit || 'pcs',
-            status: stockVal <= 0 ? 'Out of Stock' : stockVal <= minStock ? 'Low Stock' : 'Active',
+            status: catalogStatus(item.status),
             createdAt: now,
             updatedAt: now,
           };

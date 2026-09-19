@@ -320,7 +320,10 @@ export async function syncLocalRecordsToD1(snapshot: D1Snapshot) {
     body: JSON.stringify({upserts, deletes}),
   });
   if (!response.ok) throw new Error(`D1 record sync failed (${response.status})`);
-  const result = await response.json() as {revision: number; upserted: number; deleted: number};
+  const result = await response.json() as {revision: number; upserted: number; deleted: number; relationalSynced?: boolean};
+  if (result.relationalSynced === false) {
+    throw new Error('Records reached storage, but the live catalog update failed. Pending changes have been retained. Retry Sync Now; if it fails again, contact support.');
+  }
   localStorage.setItem(REVISION_KEY, String(result.revision));
   localStorage.removeItem(REMOTE_PENDING_KEY);
   const submittedDeletionKeys = new Set(deletes.map(({collection, documentId}) => `${collection}:${documentId}`));

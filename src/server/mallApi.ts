@@ -229,15 +229,22 @@ async function getHomeSections(exec: MallExecutor, session: string) {
       AND o.status NOT IN ('cancelled', 'refunded')
       AND (o.status = 'completed' OR EXISTS (SELECT 1 FROM payments pay WHERE pay.order_id = o.id AND pay.status = 'paid'))
       AND EXISTS (SELECT 1 FROM mall_checkout_attempts a WHERE a.order_id = o.id AND a.session_id = ?)`;
+  // Rank each stock group before LIMIT so lower-ranked eligible in-stock items
+  // can fill positions vacated by excess sold-out products.
+  const selectRail = (selection: string, order: string, limit: number, params: any[] = []) => exec.queryAll(`
+    WITH candidates AS (${selection}), ranked AS (
+      SELECT *, ROW_NUMBER() OVER (PARTITION BY (stock_qty <= 0) ORDER BY ${order}) AS stock_rank
+      FROM candidates
+    ) SELECT * FROM ranked WHERE stock_qty > 0 OR stock_rank = 1 ORDER BY ${order} LIMIT ${limit}`, params);
   const [flash, top, newest, again] = await Promise.all([
-    exec.queryAll(`SELECT ${CATALOG_COLUMNS} FROM products WHERE ${VISIBLE}
+    selectRail(`SELECT ${CATALOG_COLUMNS}, updated_at FROM products WHERE ${VISIBLE}
       AND ${effectivePrice('products')} > 0 AND ${effectivePrice('products')} < retail_price_kobo
-      ORDER BY ${CATALOG_SORTS.relevance} LIMIT 10`),
-    exec.queryAll(`SELECT ${CATALOG_COLUMNS} FROM products WHERE ${VISIBLE} ORDER BY ${CATALOG_SORTS.popular} LIMIT 12`),
-    exec.queryAll(`SELECT ${CATALOG_COLUMNS}, (${lastRestock}) AS last_restock FROM products
-      WHERE ${VISIBLE} AND (${lastRestock}) IS NOT NULL ORDER BY last_restock DESC, id ASC LIMIT 12`),
-    exec.queryAll(`SELECT ${CATALOG_COLUMNS}, (${history}) AS last_purchase FROM products
-      WHERE ${VISIBLE} AND (${history}) IS NOT NULL ORDER BY last_purchase DESC, id ASC LIMIT 10`, [session, session]),
+      `, CATALOG_SORTS.relevance, 10),
+    selectRail(`SELECT ${CATALOG_COLUMNS}, updated_at FROM products WHERE ${VISIBLE}`, CATALOG_SORTS.popular, 12),
+    selectRail(`SELECT ${CATALOG_COLUMNS}, (${lastRestock}) AS last_restock FROM products
+      WHERE ${VISIBLE} AND (${lastRestock}) IS NOT NULL`, 'last_restock DESC, id ASC', 12),
+    selectRail(`SELECT ${CATALOG_COLUMNS}, (${history}) AS last_purchase FROM products
+      WHERE ${VISIBLE} AND (${history}) IS NOT NULL`, 'last_purchase DESC, id ASC', 10, [session, session]),
   ]);
   return json({ flashSales: flash.map(publicProduct), topSellers: top.map(publicProduct),
     newArrivals: newest.map(publicProduct), buyAgain: again.map(publicProduct) });

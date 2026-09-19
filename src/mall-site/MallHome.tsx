@@ -38,7 +38,7 @@ export const MallHome: React.FC = () => {
       </div>
       <MallRail title="Top Sellers" sub="Most loved right now" icon={RailIcons.Trophy} products={sections?.topSellers ?? []} loading={loading} />
       <MallRail title="New Arrivals" sub="Recently restocked" icon={RailIcons.Sparkles} products={sections?.newArrivals ?? []} loading={loading} />
-      <MallBrowseGrid title="Explore the Mall" sub="Browse our complete product catalog" fetchKey="catalog:all" fetchFn={fetchSearch('')} />
+      <MallBrowseGrid title="Explore the Mall" sub="Browse our complete product catalog" fetchKey="catalog:all" fetchFn={fetchSearch('')} maxSoldOutPerRow={2} />
       <MallHelpStrip />
     </div>
   );
