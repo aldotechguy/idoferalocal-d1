@@ -766,6 +766,7 @@ export default {
         const entrance = !isPrivateApi(url.pathname) && await hasEntrance(cookie, query);
         if (!entrance && !await requireAppUser(request, env)) {
           if (isStaffPage(url.pathname)) return new Response(null, {status: 302, headers: {location: '/', 'cache-control': 'no-store'}});
+          if (login) return json({error: 'Staff entrance expired. Return to the Mall and hold the Cart button for 3 seconds to reopen Staff Login.', code: 'STAFF_ENTRANCE_REQUIRED'}, 401);
           return json({error: 'Authentication required.'}, 401);
         }
       }

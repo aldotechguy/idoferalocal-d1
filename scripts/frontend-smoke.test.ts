@@ -20,6 +20,26 @@ function entranceFixture() {
   return { db, query, DB };
 }
 
+test('staff snapshot startup waits for authentication and cached profiles cannot restore sessions', () => {
+  const app = fs.readFileSync('src/context/AppContext.tsx', 'utf8');
+  assert.match(app, /if \(authLoading \|\| !currentUser \|\| !isStorageReady\) return;/);
+  assert.equal((app.match(/initializeD1Storage\(currentD1Snapshot\(\)\)/g) || []).length, 1);
+  assert.match(app, /\[authLoading, currentUser, isStorageReady, applyCloudData\]/);
+  assert.match(app, /if \(authLoading \|\| !currentUser \|\| !isD1Ready/);
+  const auth = fs.readFileSync('src/context/AuthContext.tsx', 'utf8');
+  assert.doesNotMatch(auth, /if \(found\) setCurrentUser\(found\)/);
+});
+
+test('login without entrance permission reports an entrance error, not a credentials error', async () => {
+  for (const path of ['/api/auth/login', '/api/auth/google']) {
+    const response = await worker.fetch(new Request(`https://test${path}`, {method: 'POST'}), {} as Parameters<typeof worker.fetch>[1]);
+    assert.equal(response.status, 401);
+    const body = await response.json() as {code: string; error: string};
+    assert.equal(body.code, 'STAFF_ENTRANCE_REQUIRED');
+    assert.match(body.error, /hold the Cart button/);
+  }
+});
+
 test('worker serves deep-link HTML without forwarding the index.html redirect', async t => {
   const fixture = entranceFixture();
   t.after(() => fixture.db.close());

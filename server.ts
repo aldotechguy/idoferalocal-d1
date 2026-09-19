@@ -401,6 +401,7 @@ app.use(async (req, res, next) => {
       const entrance = !isPrivateApi(req.path) && await hasEntrance(cookie, entranceQuery);
       if (!entrance && !await requireAppUser(req)) {
         if (isStaffPage(req.path)) return res.set('Cache-Control', 'no-store').redirect(302, '/');
+        if (login) return res.status(401).json({error: 'Staff entrance expired. Return to the Mall and hold the Cart button for 3 seconds to reopen Staff Login.', code: 'STAFF_ENTRANCE_REQUIRED'});
         return res.status(401).json({error: 'Authentication required.'});
       }
     }

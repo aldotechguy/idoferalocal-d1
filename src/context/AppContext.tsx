@@ -403,7 +403,7 @@ const sortRecordsLifo = <T extends { id?: unknown; createdAt?: string; date?: st
   });
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { currentUser } = useAuth();
+  const { currentUser, loading: authLoading } = useAuth();
   const isClearedBoot = typeof window !== 'undefined' && localStorage.getItem('idofera_cleared_empty') === 'true';
   const isInitialBootRef = useRef(false);
   const [isStorageReady, setIsStorageReady] = useState(false);
@@ -890,9 +890,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Immediate sync from D1 on browser refresh / initial load
+  // Private business data must only load after server authentication completes.
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (authLoading || !currentUser || !isStorageReady) return;
     if (d1BootSyncedRef.current) return;
     d1BootSyncedRef.current = true;
 
@@ -909,36 +909,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }, 250);
         }
       })
-      .catch((error) => console.warn('D1 startup read warning:', error))
-      .finally(() => setIsD1Ready(true));
-  }, [isStorageReady, applyCloudData]);
-
-  // If user logs in after boot and D1 hasn't synced yet, ensure initialization
-  useEffect(() => {
-    if (!currentUser) return;
-    if (!isStorageReady || d1BootSyncedRef.current) return;
-    d1BootSyncedRef.current = true;
-    initializeD1Storage(currentD1Snapshot())
-      .then(async (restored) => {
-        if (restored) {
-          isApplyingD1Ref.current = true;
-          applyCloudData(restored);
-          await writeD1SnapshotToIndexedDB(restored);
-          window.setTimeout(() => {
-            isApplyingD1Ref.current = false;
-          }, 250);
-        }
-      })
-      .catch((error) => console.warn('D1 user login sync warning:', error))
-      .finally(() => setIsD1Ready(true));
-  }, [currentUser, isStorageReady, applyCloudData]);
+      .then(() => setIsD1Ready(true))
+      .catch((error) => {
+        d1BootSyncedRef.current = false;
+        console.warn('D1 startup read warning:', error);
+      });
+  }, [authLoading, currentUser, isStorageReady, applyCloudData]);
 
   // D1 is the durable business-data source. IndexedDB remains the offline cache;
   // Firebase remains temporarily only for Google authentication.
   useEffect(() => {
-    if (!isD1Ready || isApplyingD1Ref.current) return;
+    if (authLoading || !currentUser || !isD1Ready || isApplyingD1Ref.current) return;
     queueD1Snapshot(currentD1Snapshot(), applyCloudData);
-  }, [isD1Ready, products, customers, suppliers, sales, purchases, expenses, notifications, auditLogs, stockMovements, pricingHistory, settings, heldOrders, whatsAppPreOrders, deliveryOrders, moneyMovements, applyCloudData]);
+  }, [authLoading, currentUser, isD1Ready, products, customers, suppliers, sales, purchases, expenses, notifications, auditLogs, stockMovements, pricingHistory, settings, heldOrders, whatsAppPreOrders, deliveryOrders, moneyMovements, applyCloudData]);
 
   const { showToast } = useToast();
 

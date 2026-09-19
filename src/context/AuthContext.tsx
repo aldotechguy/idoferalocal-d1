@@ -251,11 +251,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           await putManyItems('users', INITIAL_USERS);
         }
 
-        const savedId = localStorage.getItem('idofera_current_user_id');
-        if (savedId && !DUMMY_USER_IDS.has(savedId)) {
-          const found = activeUsers.find((u) => u.id === savedId);
-          if (found) setCurrentUser(found);
-        }
+        // Cached profiles are not proof of a valid server session.
       } catch (err) {
         console.warn('Users load warning:', err);
       }
