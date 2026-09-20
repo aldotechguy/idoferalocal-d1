@@ -46,3 +46,10 @@ database_id = "3a3eb157-5aa5-419a-a8ce-2eade2afc436"
 binding = "MALL_IMAGES"
 bucket_name = "idomall"
 
+[env.mall.vars]
+# Non-sensitive Mall config. Update MALL_PICKUP_ADDRESS and MALL_PICKUP_HOURS
+# to your real pickup location and hours before accepting orders.
+MALL_CHECKOUT_ENABLED = "true"
+MALL_PICKUP_ADDRESS = "REPLACE_WITH_REAL_PICKUP_ADDRESS"
+MALL_PICKUP_HOURS = "REPLACE_WITH_REAL_PICKUP_HOURS"
+
