@@ -1,5 +1,5 @@
 /**
- * Phase 4d — relational write-path verification.
+ * Phase 4d â€” relational write-path verification.
  * Proves the SAME code server.ts and sites-worker.ts call produces a matching
  * frontend snapshot, and that delete / full-replace / document-backfill behave.
  */
@@ -69,7 +69,7 @@ const cases: [string, any][] = [
 ];
 for (const [collection, document] of cases) apply(upsertToStatements(collection, document, now));
 console.log(`wrote ${cases.length} collections`);
-const snap = await buildSnapshot(tx.queryAll);
+const { stores: snap } = await buildSnapshot(tx.queryAll);
 const expectCollections = [
   'products', 'customers', 'suppliers', 'sales', 'purchases', 'expenses',
   'stockMovements', 'pricingHistory', 'moneyMovements', 'notifications',
@@ -87,7 +87,7 @@ if (Math.abs(roundSale.totalAmount - 300) > 0.001) throw new Error(`sale total m
 if (roundSale.items.length !== 2) throw new Error('sale items not preserved');
 
 // Image policy (single-sourced in relationalMapper.cleanImageList):
-// `data:` base64 uploads CANNOT enter relational storage — D1 rejects oversized
+// `data:` base64 uploads CANNOT enter relational storage â€” D1 rejects oversized
 // statements (SQLITE_TOOBIG) and base64 would bloat every snapshot push. The POS
 // thumbnail for the 11 legacy base64 products is restored in Phase 4.5 by uploading
 // the originals (extracted to backups/images/ by scripts/etl/extract-images.ts) to
@@ -146,7 +146,7 @@ const { stmts, skipped } = backfillStatementsFromDocumentRows(
 backfillDb.exec('BEGIN;');
 for (const st of stmts) btx.run(st.sql, st.params);
 backfillDb.exec('COMMIT;');
-const bSnap = await buildSnapshot(btx.queryAll);
+const { stores: bSnap } = await buildSnapshot(btx.queryAll);
 const bProducts = bSnap.products as any[];
 const bProd1 = bProducts.find((p) => p.id === 'prod-1');
 console.log('backfill stmts:', stmts.length, 'skipped:', skipped, 'stock(last wins):', bProd1?.currentStock);

@@ -10,7 +10,7 @@ export type MallProduct = {
   /** Canonical selling price from D1, in kobo. */
   price: number;
   retailPriceKobo?: number;
-  /** Quantity from canonical completed sales in D1. */
+  /** Quantity from canonical completed sales in D1. Catalog/search rows report 0; product detail returns the real count. */
   sold: number;
   stock: number;
   image: string;

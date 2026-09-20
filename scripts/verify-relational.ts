@@ -1,4 +1,4 @@
-/** Phase 4c — verify relational layer maps rows identically to ETL. */
+/** Phase 4c â€” verify relational layer maps rows identically to ETL. */
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import { makeNodeAdapter, ensureRelationalSchemaNode } from '../src/server/nodeAdapter.js';
@@ -27,7 +27,7 @@ for (const d of docs) {
 }
 const ctx = newCtx();
 // Freeze the clock: ETL fallback timestamps (nowIso()) and the backfill's `now`
-// fallback must be byte-identical — wall-clock drift is not data drift.
+// fallback must be byte-identical â€” wall-clock drift is not data drift.
 const FIXED_TS = Date.parse('2026-09-15T00:00:00.000Z');
 const realDateNow = Date.now;
 Date.now = () => FIXED_TS;
@@ -47,7 +47,7 @@ db.exec('COMMIT;');
 console.log(`seeded ${stmts.length} stmts`);
 
 // Build snapshot through the NEW Phase 4 mapper and check shape/totals.
-const snap = await buildSnapshot(tx.queryAll);
+const { stores: snap } = await buildSnapshot(tx.queryAll);
 const salesTotal = (snap.sales as any[]).reduce((a, x) => a + Number(x.totalAmount || 0), 0);
 console.log('snapshot collections:', Object.keys(snap).map((k) => `${k}=${(snap[k] as any[]).length}`).join(' '));
 console.log('sales total naira:', salesTotal, 'expected 1113680');
@@ -118,7 +118,7 @@ const bf = backfillStatementsFromDocumentRows(
 backfillDb.exec('BEGIN;');
 for (const st of bf.stmts) btx.run(st.sql, st.params);
 backfillDb.exec('COMMIT;');
-const bSnapAll = await buildSnapshot(btx.queryAll);
+const { stores: bSnapAll } = await buildSnapshot(btx.queryAll);
 let drift = 0;
 for (const key of Object.keys(snap)) {
   const norm = (rows: any[]) => JSON.stringify([...(rows || [])].sort((x, y) => String(x?.id ?? '').localeCompare(String(y?.id ?? ''))));

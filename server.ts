@@ -60,7 +60,7 @@ import { handleStaffMallListingApi } from "./src/server/mallListingApi";
 import { handleStaffProductImageApi, handlePublicImageRequest } from "./src/server/productImageApi";
 import { makeNodeImageStore } from "./src/server/nodeImageStore";
 import { bootstrapAdmin } from "./src/server/adminBootstrap";
-import { buildSnapshot } from "./src/server/relationalSnapshot.js";
+import { buildSnapshot, SNAPSHOT_PUSH_DOC_LIMIT } from "./src/server/relationalSnapshot.js";
 import {
   upsertToStatements,
   deleteToStatements,
@@ -898,7 +898,7 @@ app.get("/api/storage/snapshot", async (req, res) => {
       try {
         const backfill = await ensureRelationalBackfill();
         const tx = makeNodeAdapter(db);
-        const stores = await buildSnapshot(tx.queryAll);
+        const { stores, capped } = await buildSnapshot(tx.queryAll);
         const revRow = db.prepare("SELECT revision FROM sync_revisions WHERE owner_id = ?").get(ownerId) as any;
         const revision = Number(revRow?.revision || 0);
         return res.json({
@@ -909,6 +909,7 @@ app.get("/api/storage/snapshot", async (req, res) => {
           timestamp: new Date().toISOString(),
           backend: "relational",
           backfill: backfill.statements ? backfill : undefined,
+          ...(capped.length ? { bounds: { capped } } : {}),
         });
       } catch (relErr: any) {
         console.warn("Relational snapshot failed, falling back to documents:", relErr?.message || relErr);
@@ -1135,6 +1136,13 @@ app.put("/api/storage/snapshot", async (req, res) => {
     const body = req.body;
     if (!body?.stores || typeof body.stores !== "object") {
       return res.status(400).json({ error: "A stores object is required." });
+    }
+    // Bound the restore before any write; a runaway payload would otherwise
+    // translate into tens of thousands of statements per request.
+    const totalDocuments = Object.values(body.stores).reduce<number>((sum, documents) =>
+      sum + (Array.isArray(documents) ? documents.length : 0), 0);
+    if (totalDocuments > SNAPSHOT_PUSH_DOC_LIMIT) {
+      return res.status(413).json({ error: `Snapshot exceeds the maximum of ${SNAPSHOT_PUSH_DOC_LIMIT} documents. Restore a bounded slice and sync the rest with record PATCHes.` });
     }
 
     const revRow = db.prepare("SELECT revision FROM sync_revisions WHERE owner_id = ?").get(ownerId) as any;

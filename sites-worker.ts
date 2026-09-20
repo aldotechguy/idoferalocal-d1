@@ -34,7 +34,7 @@ interface D1Database {
 // SAME modules server.ts uses (no more duplicated inline logic).
 // Money is INTEGER kobo in D1, naira floats on the wire; frontend contract unchanged.
 import { RELATIONAL_DDL, RELATIONAL_INDEXES } from './src/server/relationalDdl.js';
-import { buildSnapshot } from './src/server/relationalSnapshot.js';
+import { buildSnapshot, SNAPSHOT_PUSH_DOC_LIMIT } from './src/server/relationalSnapshot.js';
 import {
   upsertToStatements,
   deleteToStatements,
@@ -485,6 +485,13 @@ async function saveSnapshot(request: Request, env: Env) {
   const ownerId = BUSINESS_OWNER_ID;
   const body = await readJson(request);
   if (!body?.stores || typeof body.stores !== 'object') return json({error: 'A stores object is required.'}, 400);
+  // Bound the restore before touching a single row: a runaway payload would
+  // otherwise translate into tens of thousands of statements per request.
+  const totalDocuments = Object.values(body.stores).reduce<number>((sum, documents) =>
+    sum + (Array.isArray(documents) ? documents.length : 0), 0);
+  if (totalDocuments > SNAPSHOT_PUSH_DOC_LIMIT) {
+    return json({error: `Snapshot exceeds the maximum of ${SNAPSHOT_PUSH_DOC_LIMIT} documents. Restore a bounded slice and sync the rest with record PATCHes.`}, 413);
+  }
 
   const revisionRows = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
     .bind(ownerId).all<{revision: number}>();
@@ -672,13 +679,14 @@ async function readSnapshot(request: Request, env: Env) {
     const backfill = await ensureRelationalBackfill(env);
     if (relationalBackfilled) {
       if (snapshotNotModified(request, revision, 'relational')) return snapshotUnchanged(revision, 'relational');
-      const stores = await buildSnapshot(makeD1QueryAll(env));
+      const { stores, capped } = await buildSnapshot(makeD1QueryAll(env));
       return snapshotResponse({
         stores,
         hasData: Object.keys(stores).length > 0,
         revision,
         backend: 'relational',
         backfill: backfill.statements ? backfill : undefined,
+        ...(capped.length ? { bounds: { capped } } : {}),
       }, revision, 'relational');
     }
   } catch (error) {

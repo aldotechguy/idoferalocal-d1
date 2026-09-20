@@ -64,7 +64,17 @@ const CATALOG_COLUMNS = `id, sku, name, COALESCE(NULLIF(mall_description, ''), d
   retail_price_kobo, mall_price_kobo, mall_featured, mall_display_order,
   mall_promo_price_kobo, mall_promo_start, mall_promo_end,
   CASE WHEN ${promoActive('products')} THEN 1 ELSE 0 END AS promo_active,
-  ${effectivePrice('products')} AS price_kobo,
+  ${effectivePrice('products')} AS price_kobo`;
+
+/**
+ * Popularity join, split out of CATALOG_COLUMNS on purpose. sale_items has no
+ * product_id index, so the correlated subquery scanned the WHOLE sale_items
+ * table once per returned catalog row -- a cost that grows with total sales.
+ * Only the two consumers that genuinely rank or display sold quantities pay it
+ * now: product detail (one row) and the 60s-cached top-sellers rail. Catalog
+ * and search rows report sold: 0.
+ */
+const CATALOG_SOLD_COLUMNS = `${CATALOG_COLUMNS},
   COALESCE((
     SELECT SUM(si.qty)
     FROM sale_items si
@@ -72,6 +82,13 @@ const CATALOG_COLUMNS = `id, sku, name, COALESCE(NULLIF(mall_description, ''), d
     WHERE si.product_id = products.id
       AND LOWER(COALESCE(sale.status, '')) IN ('completed', 'paid', 'fulfilled', 'delivered')
   ), 0) AS sold_qty`;
+
+/**
+ * Catalog 'popular' fallback after sold_qty left the storefront columns:
+ * merchandised ordering first, then recency. The top-sellers rail and product
+ * detail still rank by real sold quantities.
+ */
+const POPULAR_FALLBACK_SORT = `mall_featured DESC, updated_at DESC, id ASC`;
 
 /** Whitelisted server-side sorts. Select aliases (price_kobo, sold_qty) are valid ORDER BY keys. */
 const CATALOG_SORTS: Record<string, string> = {
@@ -142,10 +159,19 @@ type FacetRows = { name: string; count: number }[];
 let cachedCategories: { expiresAt: number; rows: FacetRows } | null = null;
 const cachedBrandScopes = new Map<string, { expiresAt: number; rows: FacetRows }>();
 
-/** Staff product writes must call this so sidebar counts never outlive the write. */
+/** Home rails cache entry: the visitor-identical flashSales/topSellers/newArrivals rows. */
+let cachedHomeRailEntry: { expiresAt: number; flash: any[]; top: any[]; newest: any[] } | null = null;
+
+/**
+ * Staff writes must call this so derived read caches never outlive the write:
+ * PATCH /api/storage/records and snapshot restores drop everything; checkout
+ * and merchandising saves only reshape the home rails but go through the same
+ * single entry point. (Named for the facet phase; it also clears the rails.)
+ */
 export function invalidateMallFacetCache(): void {
   cachedCategories = null;
   cachedBrandScopes.clear();
+  cachedHomeRailEntry = null;
 }
 
 const facetFresh = <T extends { expiresAt: number }>(entry: T | null | undefined) =>
@@ -174,12 +200,49 @@ async function cachedBrandFacets(exec: MallExecutor, whereBase: string, basePara
   return rows;
 }
 
+/** Supplier receipts and manual restocks use Incoming; returns and corrections must not make an old product appear newly restocked. */
+const lastRestockSql = `SELECT MAX(sm.created_at) FROM stock_movements sm
+    WHERE sm.product_id = products.id AND sm.type = 'Incoming'
+      AND sm.qty > 0 AND sm.new_stock > sm.prev_stock`;
+
+/** Rank each stock group before LIMIT so lower-ranked eligible in-stock items can fill positions vacated by excess sold-out products. */
+const selectRail = (exec: MallExecutor, selection: string, order: string, limit: number, params: any[] = []) => exec.queryAll(`
+    WITH candidates AS (${selection}), ranked AS (
+      SELECT *, ROW_NUMBER() OVER (PARTITION BY (stock_qty <= 0) ORDER BY ${order}) AS stock_rank
+      FROM candidates
+    ) SELECT * FROM ranked WHERE stock_qty > 0 OR stock_rank = 1 ORDER BY ${order} LIMIT ${limit}`, params);
+
+/**
+ * Home rail cache. flashSales/topSellers/newArrivals are identical for every
+ * visitor (only buyAgain is session-scoped), yet they re-ran three whole-catalog
+ * scans on EVERY homepage view. They share the facet cache's TTL and
+ * invalidation contract, so a warm homepage costs one buyAgain lookup. Rows are
+ * cached pre-mapping; publicProduct is a pure transform of them.
+ */
+async function cachedHomeRails(exec: MallExecutor) {
+  const fresh = facetFresh(cachedHomeRailEntry);
+  if (fresh) return fresh;
+  const [flash, top, newest] = await Promise.all([
+    exec.queryAll(`SELECT ${CATALOG_COLUMNS} FROM products WHERE ${VISIBLE}
+      AND ${effectivePrice('products')} > 0 AND ${effectivePrice('products')} < retail_price_kobo
+      ORDER BY ${CATALOG_SORTS.relevance} LIMIT 10`),
+    selectRail(exec, `SELECT ${CATALOG_SOLD_COLUMNS}, updated_at FROM products WHERE ${VISIBLE}`, CATALOG_SORTS.popular, 12),
+    selectRail(exec, `SELECT ${CATALOG_COLUMNS}, (${lastRestockSql}) AS last_restock FROM products
+      WHERE ${VISIBLE} AND (${lastRestockSql}) IS NOT NULL`, 'last_restock DESC, id ASC', 12),
+  ]);
+  cachedHomeRailEntry = { expiresAt: Date.now() + FACET_TTL_MS, flash, top, newest };
+  return cachedHomeRailEntry;
+}
+
 async function getCatalog(exec: MallExecutor, url: URL) {
   const q = s(url.searchParams.get('q')).trim().slice(0, 80);
   const category = s(url.searchParams.get('category')).trim().slice(0, 80);
   const brandFilter = s(url.searchParams.get('brand')).trim().slice(0, 80);
   const sortKey = s(url.searchParams.get('sort'), 'relevance').trim();
   const sort = CATALOG_SORTS[sortKey];
+  // Catalog 'popular' no longer orders by per-row sold quantities; fall back
+  // to merchandised-then-recency ordering.
+  const effectiveSort = sortKey === 'popular' ? POPULAR_FALLBACK_SORT : sort;
   const limitParam = url.searchParams.get('limit');
   const limit = Math.min(Math.max(limitParam === null ? 24 : n(limitParam, 24), 1), 60);
   const offset = Math.max(n(url.searchParams.get('offset'), 0), 0);
@@ -220,7 +283,7 @@ async function getCatalog(exec: MallExecutor, url: URL) {
       (rawInStock !== '1' || n(row.stock_qty) > 0)).map(({ row }) => row.id);
     const encodedIds = JSON.stringify(ids);
     const order = sortKey === 'relevance'
-      ? `(SELECT CAST(key AS INTEGER) FROM json_each(?) WHERE value = products.id)` : sort;
+      ? `(SELECT CAST(key AS INTEGER) FROM json_each(?) WHERE value = products.id)` : effectiveSort;
     const rows = ids.length ? await exec.queryAll(
       `SELECT ${CATALOG_COLUMNS} FROM products WHERE ${VISIBLE} AND id IN (SELECT value FROM json_each(?))
        ORDER BY ${stockOrder}${order} LIMIT ? OFFSET ?`,
@@ -250,7 +313,7 @@ async function getCatalog(exec: MallExecutor, url: URL) {
   // back to the plain count — that only costs an extra query on the rare
   // out-of-range page, not on any normal page view.
   const rows = await exec.queryAll(
-    `SELECT ${CATALOG_COLUMNS}, COUNT(*) OVER() AS page_total FROM products WHERE ${where} ORDER BY ${stockOrder}${sort} LIMIT ? OFFSET ?`,
+    `SELECT ${CATALOG_COLUMNS}, COUNT(*) OVER() AS page_total FROM products WHERE ${where} ORDER BY ${stockOrder}${effectiveSort} LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );
   const total = n((rows[0] as any)?.page_total
@@ -271,41 +334,27 @@ async function getCatalog(exec: MallExecutor, url: URL) {
 }
 
 async function getHomeSections(exec: MallExecutor, session: string) {
-  // Supplier receipts and manual restocks use Incoming; returns and corrections
-  // must not make an old product appear newly restocked.
-  const lastRestock = `SELECT MAX(sm.created_at) FROM stock_movements sm
-    WHERE sm.product_id = products.id AND sm.type = 'Incoming'
-      AND sm.qty > 0 AND sm.new_stock > sm.prev_stock`;
+  // Mall order history is browser-scoped: an order counts as a purchase for
+  // buyAgain only when THIS checkout session placed it AND it is paid or
+  // completed. Pending orders are not purchases.
   const history = `SELECT MAX(o.created_at) FROM mall_order_items oi
     JOIN mall_orders o ON o.id = oi.mall_order_id
     WHERE oi.product_id = products.id
       AND o.status NOT IN ('cancelled', 'refunded')
       AND (o.status = 'completed' OR EXISTS (SELECT 1 FROM payments pay WHERE pay.order_id = o.id AND pay.status = 'paid'))
       AND EXISTS (SELECT 1 FROM mall_checkout_attempts a WHERE a.order_id = o.id AND a.session_id = ?)`;
-  // Rank each stock group before LIMIT so lower-ranked eligible in-stock items
-  // can fill positions vacated by excess sold-out products.
-  const selectRail = (selection: string, order: string, limit: number, params: any[] = []) => exec.queryAll(`
-    WITH candidates AS (${selection}), ranked AS (
-      SELECT *, ROW_NUMBER() OVER (PARTITION BY (stock_qty <= 0) ORDER BY ${order}) AS stock_rank
-      FROM candidates
-    ) SELECT * FROM ranked WHERE stock_qty > 0 OR stock_rank = 1 ORDER BY ${order} LIMIT ${limit}`, params);
-  const [flash, top, newest, again] = await Promise.all([
-    exec.queryAll(`SELECT ${CATALOG_COLUMNS} FROM products WHERE ${VISIBLE}
-      AND ${effectivePrice('products')} > 0 AND ${effectivePrice('products')} < retail_price_kobo
-      ORDER BY ${CATALOG_SORTS.relevance} LIMIT 10`),
-    selectRail(`SELECT ${CATALOG_COLUMNS}, updated_at FROM products WHERE ${VISIBLE}`, CATALOG_SORTS.popular, 12),
-    selectRail(`SELECT ${CATALOG_COLUMNS}, (${lastRestock}) AS last_restock FROM products
-      WHERE ${VISIBLE} AND (${lastRestock}) IS NOT NULL`, 'last_restock DESC, id ASC', 12),
-    selectRail(`SELECT ${CATALOG_COLUMNS}, (${history}) AS last_purchase FROM products
+  const [rails, again] = await Promise.all([
+    cachedHomeRails(exec),
+    selectRail(exec, `SELECT ${CATALOG_COLUMNS}, (${history}) AS last_purchase FROM products
       WHERE ${VISIBLE} AND (${history}) IS NOT NULL`, 'last_purchase DESC, id ASC', 10, [session, session]),
   ]);
-  return json({ flashSales: flash.map(publicProduct), topSellers: top.map(publicProduct),
-    newArrivals: newest.map(publicProduct), buyAgain: again.map(publicProduct) });
+  return json({ flashSales: rails.flash.map(publicProduct), topSellers: rails.top.map(publicProduct),
+    newArrivals: rails.newest.map(publicProduct), buyAgain: again.map(publicProduct) });
 }
 
 async function getProduct(exec: MallExecutor, id: string) {
   const rows = await exec.queryAll(
-    `SELECT ${CATALOG_COLUMNS} FROM products WHERE id = ? AND ${VISIBLE} LIMIT 1`,
+    `SELECT ${CATALOG_SOLD_COLUMNS} FROM products WHERE id = ? AND ${VISIBLE} LIMIT 1`,
     [id],
   );
   if (!rows.length) return json({ error: 'Product not available' }, 404);
@@ -575,6 +624,9 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
     if (/mall_state_conflict|INSUFFICIENT_STOCK/.test(String(error))) fail(409, 'Cart, price, or availability changed. Refresh your cart and retry.');
     throw error;
   }
+  // Stock and purchase counts changed: the cached home rails must not show a
+  // pre-checkout world past this write.
+  invalidateMallFacetCache();
   return json({
     ok: true,
     orderNo,

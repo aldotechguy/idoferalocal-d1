@@ -11,7 +11,7 @@
  * lexically.
  */
 import type { MallExecutor, MallStmt } from './mallApi.js';
-import { effectivePrice, promoActive } from './mallApi.js';
+import { effectivePrice, promoActive, invalidateMallFacetCache } from './mallApi.js';
 import { n, s } from './relationalMapper.js';
 import { assertSql } from './mallSafety.js';
 import type { StaffActor } from './mallOrderAdminApi.js';
@@ -281,6 +281,9 @@ async function saveListing(exec: MallExecutor, productId: string, actor: StaffAc
     if (/mall_state_conflict|MALL_INVALID/.test(String(error))) fail(409, 'This listing changed while you were editing. Reload and apply your changes again.');
     throw error;
   }
+  // A saved promo/price reshapes the storefront's flash-sales rail; drop the
+  // cached rails so the next homepage view recomputes them.
+  invalidateMallFacetCache();
   const updated = await readRow(exec, productId);
   return json({
     listing: { ...listingView(updated), issues: decision.issues },

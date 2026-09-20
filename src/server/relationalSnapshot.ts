@@ -3,7 +3,48 @@ import { KoboToNaira, n, b, parseJsonArray } from './relationalMapper.js';
 import { productRow, customerRow, supplierRow, saleRow, purchaseRow } from './relationalMapper.js';
 import type { QueryAll, Snapshot } from './relationalMapper.js';
 
-export async function buildSnapshot(q: QueryAll): Promise<Snapshot> {
+/**
+ * Row caps for append-only history collections. Sales, stock movements and
+ * audit entries grow without limit as the shop runs, and a full snapshot read
+ * (first sync or repair) previously scanned each one end to end. Each capped
+ * collection keeps its NEWEST rows (the queries already order newest-first).
+ * The client merge is an upsert by id, so rows a cap omits are never deleted
+ * from an existing device; a fresh device simply starts with the newest slice.
+ * Child tables (sale_items, purchase_items, receiving_history) stay uncapped:
+ * capping them independently of their parents could orphan or drop line items.
+ */
+export const SNAPSHOT_ROW_CAPS: Record<string, number> = {
+  audit_logs: 1500,
+  notifications: 500,
+  pricing_history: 2000,
+  stock_movements: 5000,
+  money_movements: 5000,
+  expenses: 5000,
+  delivery_orders: 5000,
+  whatsapp_preorders: 2000,
+  held_orders: 1000,
+};
+
+/**
+ * A repair push rewrites every supplied document twice (document mirror +
+ * relational rows). Reject runaway payloads before any write; the normal write
+ * path is PATCH micro-batches, and a healthy store is ~1,600 documents.
+ */
+export const SNAPSHOT_PUSH_DOC_LIMIT = 20_000;
+
+export type BoundedSnapshot = { stores: Snapshot; capped: string[] };
+
+export async function buildSnapshot(q: QueryAll): Promise<BoundedSnapshot> {
+  const capped = new Set<string>();
+  // Applies the per-collection cap and records collections that REACHED it
+  // (rows may exist beyond the cap on the server).
+  const qCapped = (sql: string, table: string) => {
+    const cap = SNAPSHOT_ROW_CAPS[table];
+    return q(cap ? `${sql} LIMIT ${cap}` : sql).then((rows) => {
+      if (cap && rows.length >= cap) capped.add(table);
+      return rows;
+    });
+  };
   const [productRows, customerRows, supplierRows, saleRows, saleItemRows, purchaseRows, purchaseItemRows, recvRows, expenseRows, stockRows, pricingRows, moneyRows, deliveryRows, heldRows, wapoRows, notifRows, auditRows, settingsRows] = await Promise.all([
     q('SELECT * FROM products ORDER BY updated_at DESC'),
     q('SELECT * FROM customers ORDER BY created_at DESC'),
@@ -13,15 +54,15 @@ export async function buildSnapshot(q: QueryAll): Promise<Snapshot> {
     q('SELECT * FROM purchases ORDER BY created_at DESC'),
     q('SELECT * FROM purchase_items'),
     q('SELECT * FROM receiving_history'),
-    q('SELECT * FROM expenses ORDER BY date DESC'),
-    q('SELECT * FROM stock_movements ORDER BY created_at DESC'),
-    q('SELECT * FROM pricing_history ORDER BY created_at DESC'),
-    q('SELECT * FROM money_movements ORDER BY date DESC'),
-    q('SELECT * FROM delivery_orders ORDER BY created_at DESC'),
-    q('SELECT * FROM held_orders ORDER BY created_at DESC'),
-    q('SELECT * FROM whatsapp_preorders ORDER BY created_at DESC'),
-    q('SELECT * FROM notifications ORDER BY created_at DESC'),
-    q('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 1500'),
+    qCapped('SELECT * FROM expenses ORDER BY date DESC', 'expenses'),
+    qCapped('SELECT * FROM stock_movements ORDER BY created_at DESC', 'stock_movements'),
+    qCapped('SELECT * FROM pricing_history ORDER BY created_at DESC', 'pricing_history'),
+    qCapped('SELECT * FROM money_movements ORDER BY date DESC', 'money_movements'),
+    qCapped('SELECT * FROM delivery_orders ORDER BY created_at DESC', 'delivery_orders'),
+    qCapped('SELECT * FROM held_orders ORDER BY created_at DESC', 'held_orders'),
+    qCapped('SELECT * FROM whatsapp_preorders ORDER BY created_at DESC', 'whatsapp_preorders'),
+    qCapped('SELECT * FROM notifications ORDER BY created_at DESC', 'notifications'),
+    qCapped('SELECT * FROM audit_logs ORDER BY created_at DESC', 'audit_logs'),
     q('SELECT * FROM settings'),
   ]);
   const itemsBySale = new Map<string, any[]>();
@@ -42,7 +83,7 @@ export async function buildSnapshot(q: QueryAll): Promise<Snapshot> {
     if (!recvByPo.has(k)) recvByPo.set(k, []);
     recvByPo.get(k)!.push(g);
   }
-  return {
+  const stores: Snapshot = {
     products: productRows.map(productRow),
     customers: customerRows.map(customerRow),
     suppliers: supplierRows.map(supplierRow),
@@ -69,4 +110,5 @@ export async function buildSnapshot(q: QueryAll): Promise<Snapshot> {
     }),
     whatsAppPreOrders: wapoRows.map((r: any) => ({ id: r.id, preOrderNo: r.preorder_no, customerId: r.customer_id || undefined, customerName: r.customer_name || '', customerPhone: r.customer_phone || '', items: parseJsonArray(r.items_json), subtotal: KoboToNaira(r.subtotal_kobo), totalAmount: KoboToNaira(r.total_kobo), status: r.status || 'Pending Review', convertedSaleId: r.converted_sale_id || undefined, createdBy: r.created_by || '', createdAt: r.created_at, updatedAt: r.updated_at || undefined })),
   };
+  return { stores, capped: [...capped] };
 }

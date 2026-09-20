@@ -13,6 +13,7 @@ import { makeNodeImageStore } from '../src/server/nodeImageStore.ts';
 import { bootstrapAdmin } from '../src/server/adminBootstrap.ts';
 import { drainMallOutbox, signMallWebhook, mallReadiness, runMallMaintenance, MALL_OPERATIONS_DDL, MALL_SCHEMA_VERSION } from '../src/server/mallOperations.ts';
 import { normalizeMallPhone, normalizedPhoneSql } from '../src/shared/mallPhone.ts';
+import { SNAPSHOT_PUSH_DOC_LIMIT } from '../src/server/relationalSnapshot.ts';
 
 /** Binding-shaped test double; executes real SQL and atomic batches, not canned results.
  * This is NOT a deployed D1/workerd test. */
@@ -86,6 +87,9 @@ for (const runtime of ['node', 'worker'] as const) {
   test(`${runtime}: homepage rows use the whole catalog and browser-scoped paid history`, async t => {
     const f = await fixture(runtime); t.after(() => f.db.close());
     const home = async (sid = session) => {
+      // Raw SQL mutations below bypass the API write paths that normally drop
+      // the rail cache, so every scenario step must recompute from scratch.
+      invalidateMallFacetCache();
       const response = await f.send(new Request('http://test/api/mall/home', { headers: { 'x-mall-session': sid } }));
       assert.equal(response.status, 200);
       return response.json() as Promise<any>;
@@ -514,6 +518,56 @@ for (const runtime of ['node', 'worker'] as const) {
     assert.equal(beyond.total, 8);
     assert.equal(pageQueries(), 1);
     assert.equal(facetQueries(), 0);
+  });
+
+  test(`${runtime}: warm homepage serves cached rails; merchandising and checkout writes drop them`, async (t) => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    // Product 'p' has no Mall price, so seed a discount candidate for the
+    // flash-sales rail.
+    f.db.prepare(`INSERT INTO products(id,sku,name,stock_qty,status,is_mall_listed,retail_price_kobo,mall_price_kobo,created_at,updated_at)
+      VALUES('rail-flash','RAIL-FLASH','Rail flash',5,'Active',1,10000,8000,'now','now')`).run();
+    const queries: string[] = [];
+    const instrumented: MallExecutor = { ...f.exec, queryAll: async (sql, params) => { queries.push(sql); return f.exec.queryAll(sql, params); } };
+    const home = async () => {
+      const response = await handleMallApi(new Request('http://test/api/mall/home', { headers: { 'x-mall-session': session } }), instrumented);
+      assert.equal(response.status, 200);
+      return await response.json() as any;
+    };
+    // The three shared rails: flash (marked by its discount predicate) and the
+    // two ROW_NUMBER rails; buyAgain also uses ROW_NUMBER but is session-scoped.
+    const railQueries = () => queries.filter((sql) =>
+      (sql.includes('ROW_NUMBER() OVER') && !sql.includes('last_purchase')) || sql.includes('< retail_price_kobo')).length;
+
+    queries.length = 0;
+    const first = await home();
+    assert.equal(first.flashSales.length, 1);
+    assert.equal(railQueries(), 3);
+
+    queries.length = 0;
+    const warm = await home();
+    assert.deepEqual(warm.flashSales.map((p: any) => p.id), first.flashSales.map((p: any) => p.id));
+    assert.equal(railQueries(), 0, 'a warm homepage must serve all three shared rails from the cache');
+
+    // A merchandising save can reshape the flash rail: 'p' gains a Mall price
+    // and must appear after the write, not after the TTL.
+    const listing = await handleStaffMallListingApi(
+      new Request('http://test/api/staff/mall-listings/p', {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mallPriceKobo: 9500 }),
+      }), f.exec, actor);
+    assert.equal(listing.status, 200);
+    queries.length = 0;
+    const postListing = await home();
+    assert.equal(railQueries(), 3, 'a merchandising save must drop the rail cache');
+    assert.ok(postListing.flashSales.some((p: any) => p.id === 'p'), 'the fresh rail must reflect the new Mall price');
+
+    // Checkout changes stock and purchase counts; same invalidation contract.
+    queries.length = 0;
+    assert.equal(railQueries(), 0);
+    assert.equal((await f.checkout()).status, 201);
+    queries.length = 0;
+    const postCheckout = await home();
+    assert.equal(railQueries(), 3, 'a checkout must drop the rail cache');
+    assert.equal(new Set(postCheckout.flashSales.map((p: any) => p.id).sort()).size, 2);
   });
 
   test(`${runtime}: invalid customer/payment/session and stale eligibility return HTTP errors`, async (t) => {
@@ -972,4 +1026,127 @@ test('catalog facet cache is dropped by a staff product write', async (t) => {
   assert.ok(renamed, 'facet cache must be invalidated by a staff product write');
   assert.equal(renamed.count, 1);
   assert.equal(after.categories.find((c: any) => c.name === 'Original')?.count, 1);
+});
+
+test('staff snapshot GET caps append-only history tables and reports the bound', async (t) => {
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
+  await worker.fetch(new Request('http://test/api/mall/health'), env);
+  const token = 'snapshot-cap-session';
+  const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))]
+    .map((b) => b.toString(16).padStart(2, '0')).join('');
+  db.prepare(`INSERT INTO app_users(id,email,display_name,role,status,password_hash,password_salt,created_at)
+    VALUES ('cap-staff','cap@test.invalid','Manager','Administrator','Active','x','y','now')`).run();
+  db.prepare('INSERT INTO app_sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)')
+    .run(hash, 'cap-staff', Date.now(), Date.now() + 60000);
+  const cookie = { cookie: `idofera_session=${token}` };
+  // A successful snapshot PUT both fills the relational tables and flips the
+  // worker onto its relational snapshot read path.
+  const restore = await worker.fetch(new Request('http://test/api/storage/snapshot', {
+    method: 'PUT',
+    headers: {...cookie, 'content-type': 'application/json'},
+    body: JSON.stringify({ stores: { products: [{
+      id: 'cap-product', sku: 'CAP', name: 'Cap product', category: 'Caps', brand: 'Cap Brand',
+      unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 5,
+    }] }, expectedRevision: 0 }),
+  }), env);
+  assert.equal(restore.status, 200);
+  assert.equal((await restore.json() as any).relationalSynced, true, 'the relational mirror must succeed for the cap test');
+
+  // 505 notification rows against a 500-row cap, strictly increasing timestamps
+  // so "newest first" is deterministic.
+  const insertNotification = db.prepare(
+    'INSERT INTO notifications(id,title,message,type,is_read,created_at) VALUES (?,?,?,?,0,?)');
+  const base = Date.parse('2026-06-01T00:00:00.000Z');
+  for (let i = 0; i < 505; i += 1) {
+    insertNotification.run(`notif-${String(i).padStart(3, '0')}`, 't', 'm', 'info',
+      new Date(base + i * 60_000).toISOString());
+  }
+  const get = await worker.fetch(new Request('http://test/api/storage/snapshot?fresh=true', { headers: cookie }), env);
+  assert.equal(get.status, 200);
+  const body = await get.json() as any;
+  assert.equal(body.backend, 'relational');
+  assert.equal(body.stores.notifications.length, 500, 'history tables must be capped to their newest rows');
+  assert.equal(body.stores.notifications[0].id, 'notif-504', 'the cap must keep the newest rows');
+  assert.ok(Array.isArray(body.bounds?.capped) && body.bounds.capped.includes('notifications'),
+    'the response must report which collections hit their cap');
+  assert.equal(body.stores.products.length, 1, 'core collections stay uncapped');
+});
+
+test('oversized snapshot pushes are rejected before any write', async (t) => {
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
+  await worker.fetch(new Request('http://test/api/mall/health'), env);
+  const token = 'snapshot-push-limit-session';
+  const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))]
+    .map((b) => b.toString(16).padStart(2, '0')).join('');
+  db.prepare(`INSERT INTO app_users(id,email,display_name,role,status,password_hash,password_salt,created_at)
+    VALUES ('limit-staff','limit@test.invalid','Manager','Administrator','Active','x','y','now')`).run();
+  db.prepare('INSERT INTO app_sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)')
+    .run(hash, 'limit-staff', Date.now(), Date.now() + 60000);
+  const cookie = { cookie: `idofera_session=${token}` };
+
+  const documents = Array.from({ length: SNAPSHOT_PUSH_DOC_LIMIT + 1 }, (_, i) => ({ id: `bulk-${i}`, name: 'Bulk' }));
+  const oversized = await worker.fetch(new Request('http://test/api/storage/snapshot', {
+    method: 'PUT',
+    headers: {...cookie, 'content-type': 'application/json'},
+    body: JSON.stringify({ stores: { products: documents }, expectedRevision: 0 }),
+  }), env);
+  assert.equal(oversized.status, 413);
+  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM app_documents').get() as any).n, 0,
+    'the bound must reject the push before a single row is written');
+
+  // A bounded restore still succeeds right after the rejection.
+  const restore = await worker.fetch(new Request('http://test/api/storage/snapshot', {
+    method: 'PUT',
+    headers: {...cookie, 'content-type': 'application/json'},
+    body: JSON.stringify({ stores: { products: [{
+      id: 'small-1', sku: 'SMALL-1', name: 'Small product', category: 'Caps', brand: 'Cap Brand',
+      unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 1,
+    }] }, expectedRevision: 0 }),
+  }), env);
+  assert.equal(restore.status, 200);
+  const after = await (await worker.fetch(new Request('http://test/api/storage/snapshot?fresh=true', { headers: cookie }), env)).json() as any;
+  assert.equal(after.stores.products.length, 1);
+});
+test('storefront catalog reads drop the sold_qty join; detail and top rail keep it', async (t) => {
+  for (const runtime of ['node', 'worker'] as const) {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    const queries: string[] = [];
+    const instrumented: MallExecutor = { ...f.exec, queryAll: async (sql, params) => { queries.push(sql); return f.exec.queryAll(sql, params); } };
+    const catalog = async (query: string) => (await (await handleMallApi(new Request(`http://test/api/mall/products?${query}`), instrumented)).json()) as any;
+    const fetchDetail = async () => (await (await handleMallApi(new Request('http://test/api/mall/products/p'), instrumented)).json()) as any;
+    const soldQueries = () => queries.filter((sql) => sql.includes('FROM sale_items')).length;
+
+    queries.length = 0;
+    const browse = await catalog('limit=5&sort=popular');
+    assert.equal(browse.sort, 'popular');
+    assert.equal(browse.products[0].sold, 0, 'catalog rows report sold: 0 after the join left the storefront columns');
+    assert.equal(soldQueries(), 0);
+
+    queries.length = 0;
+    const detail = await fetchDetail();
+    assert.equal(detail.product.sold, 0, 'a pending checkout is not a canonical sale');
+    assert.equal(soldQueries(), 1, 'product detail keeps the real sold join');
+
+    queries.length = 0;
+    assert.equal((await f.checkout()).status, 201);
+    assert.equal((await fetchDetail()).product.sold, 0, 'pending orders are not canonical sales');
+    assert.equal(soldQueries(), 1);
+
+    queries.length = 0;
+    assert.equal((await f.pay()).status, 200);
+    const paid = await fetchDetail();
+    assert.equal(paid.product.sold, 2);
+    assert.equal(soldQueries(), 1);
+
+    queries.length = 0;
+    const rails = await (await handleMallApi(new Request('http://test/api/mall/home', { headers: { 'x-mall-session': session } }), instrumented)).json() as any;
+    assert.equal(rails.topSellers[0].id, 'p');
+    assert.equal(rails.topSellers[0].sold, 2);
+    assert.equal(soldQueries(), 1, 'the top-sellers rail keeps the real popularity join');
+    queries.length = 0;
+    await (await handleMallApi(new Request('http://test/api/mall/home', { headers: { 'x-mall-session': session } }), instrumented)).json();
+    assert.equal(soldQueries(), 0, 'a warm homepage must not re-run the top-seller join');
+  }
 });
