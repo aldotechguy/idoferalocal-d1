@@ -9,7 +9,7 @@ interface R2BucketLike {
 }
 
 interface Env extends MallConfig {
-  ASSETS: {fetch(request: Request): Promise<Response>};
+  ASSETS: { fetch(request: Request): Promise<Response> };
   DB: D1Database;
   MALL_IMAGES?: R2BucketLike;
   GEMINI_API_KEY?: string;
@@ -24,7 +24,7 @@ interface Env extends MallConfig {
 interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement;
   run(): Promise<unknown>;
-  all<T = Record<string, unknown>>(): Promise<{results?: T[]}>;
+  all<T = Record<string, unknown>>(): Promise<{ results?: T[] }>;
 }
 
 interface D1Database {
@@ -49,7 +49,7 @@ import { handleStaffMallApi, maintainMall } from './src/server/mallOrderAdminApi
 import { handleStaffMallListingApi } from './src/server/mallListingApi.js';
 import { handleStaffProductImageApi, handlePublicImageRequest } from './src/server/productImageApi.js';
 import type { ImageStore } from './src/server/imageStore.js';
-import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, MALL_SCHEMA_VERSION, isDuplicateColumnError, signMallWebhook, type MallConfig } from './src/server/mallOperations.js';
+import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, MALL_ORDER_COLUMNS, MALL_SCHEMA_VERSION, isDuplicateColumnError, signMallWebhook, type MallConfig } from './src/server/mallOperations.js';
 import { MALL_SAFETY_DDL, MALL_CATALOG_INDEX_COLUMNS, MALL_CATALOG_INDEXES } from './src/server/mallSafety.js';
 import { bootstrapAdmin } from './src/server/adminBootstrap.js';
 import type { QueryAll } from './src/server/relationalMapper.js';
@@ -96,7 +96,7 @@ const ALLOWED_STORES = new Set([
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
-    headers: {'content-type': 'application/json; charset=utf-8'},
+    headers: { 'content-type': 'application/json; charset=utf-8' },
   });
 
 const encoder = new TextEncoder();
@@ -120,7 +120,7 @@ async function sha256(value: string) {
 async function hashPassword(password: string, salt: string, iterations = PASSWORD_ITERATIONS) {
   const key = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
   return toHex(await crypto.subtle.deriveBits(
-    {name: 'PBKDF2', hash: 'SHA-256', salt: encoder.encode(salt), iterations},
+    { name: 'PBKDF2', hash: 'SHA-256', salt: encoder.encode(salt), iterations },
     key,
     256,
   ));
@@ -147,6 +147,7 @@ interface MallWebhookOrder {
   order_no?: string;
   customer_phone?: string;
   customer_name?: string;
+  customer_email?: string;
   total_kobo?: number;
   status?: string;
   delivery_address_json?: string;
@@ -220,21 +221,40 @@ async function handleMallWebhook(request: Request, env: Env): Promise<Response> 
     return json({ status: 'acknowledged', event: parsed.event });
   }
 
-  // Build the email and send via Resend.
-  const to = env.MALL_NOTIFY_EMAIL;
-  if (!to || !env.RESEND_API_KEY) {
+  // Build the emails and send via Resend.
+  const operator = env.MALL_NOTIFY_EMAIL;
+  if (!operator || !env.RESEND_API_KEY) {
     return json({ error: 'Email notification is not fully configured on the Worker.' }, 503);
   }
 
   const label = MALL_EVENT_LABELS[parsed.event] || parsed.event;
   const order = parsed.order || {};
+  const orderNo = order.order_no || parsed.id;
   const totalNgn = order.total_kobo
     ? (order.total_kobo / 100).toLocaleString('en-NG', { style: 'currency', currency: 'NGN' })
     : '—';
-  const subject = `[Mall] ${label} — Order ${order.order_no || parsed.id}`;
-  const html = emailTemplate({
+  const from = env.MALL_EMAIL_FROM || 'Mall Orders <onboarding@resend.dev>';
+  const sendEmail = (to: string, subject: string, html: string) =>
+    fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      },
+      body: JSON.stringify({
+        // Resend only accepts senders on a domain you have verified. Until a real
+        // domain is verified, `onboarding@resend.dev` is the sandbox sender (it can
+        // only deliver to the Resend account owner's own address).
+        from,
+        to: [to],
+        subject,
+        html,
+      }),
+    });
+
+  const resendRes = await sendEmail(operator, `[Mall] ${label} — Order ${orderNo}`, emailTemplate({
     event: parsed.event, label,
-    orderNo: order.order_no || 'unknown',
+    orderNo,
     customerName: order.customer_name || 'unknown',
     customerPhone: order.customer_phone || 'unavailable',
     totalNgn,
@@ -243,24 +263,7 @@ async function handleMallWebhook(request: Request, env: Env): Promise<Response> 
     paymentMethod: order.payment_method || 'unavailable',
     occurredAt: parsed.occurredAt,
     instructions: parsed.instructions,
-  });
-
-  const resendRes = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${env.RESEND_API_KEY}`,
-    },
-    body: JSON.stringify({
-      // Resend only accepts senders on a domain you have verified. Until a real
-      // domain is verified, `onboarding@resend.dev` is the sandbox sender (it can
-      // only deliver to the Resend account owner's own address).
-      from: env.MALL_EMAIL_FROM || 'Mall Orders <onboarding@resend.dev>',
-      to: [to],
-      subject,
-      html,
-    }),
-  });
+  }));
 
   const deliveryId = crypto.randomUUID();
   if (!resendRes.ok) {
@@ -272,13 +275,44 @@ async function handleMallWebhook(request: Request, env: Env): Promise<Response> 
     return json({ error: 'Failed to send email', detail: errText }, 502);
   }
 
+  // Customer copy (best-effort). The operator acknowledgement above is
+  // authoritative: a failed customer send must NOT fail the delivery, or the
+  // outbox retry would email the operator twice. Failures stay observable in the
+  // delivery row's error column instead.
+  const customerEmail = typeof order.customer_email === 'string' ? order.customer_email.trim().toLowerCase() : '';
+  let customerError = '';
+  let customerOutcome = 'none';
+  if (customerEmail) {
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail) && parsed.event in MALL_EVENT_LABELS) {
+      const customerRes = await sendEmail(customerEmail, `${label} — your order ${orderNo}`, customerEmailTemplate({
+        label, orderNo,
+        customerName: order.customer_name || '',
+        totalNgn,
+        status: order.status,
+        paymentMethod: order.payment_method,
+        paymentStatus: order.payment_status,
+        instructions: parsed.instructions,
+      }));
+      if (customerRes.ok) {
+        customerOutcome = 'sent';
+        await customerRes.body?.cancel();
+      } else {
+        customerOutcome = 'failed';
+        customerError = `Customer copy failed: ${(await customerRes.text()).slice(0, 300)}`;
+      }
+    } else {
+      customerOutcome = 'skipped';
+      customerError = 'Customer copy skipped: the stored address did not pass format validation.';
+    }
+  }
+
   const deliveredAt = new Date().toISOString();
   await record(
-    'INSERT INTO mall_webhook_deliveries(id,event_id,event,status,delivered_at) VALUES(?,?,?,?,?)',
-    [deliveryId, parsed.id, parsed.event, 'sent', deliveredAt],
+    'INSERT INTO mall_webhook_deliveries(id,event_id,event,status,error,delivered_at) VALUES(?,?,?,?,?,?)',
+    [deliveryId, parsed.id, parsed.event, 'sent', customerError || null, deliveredAt],
   );
 
-  return json({ status: 'sent', eventId: parsed.id, deliveredAt });
+  return json({ status: 'sent', eventId: parsed.id, deliveredAt, customer: customerOutcome });
 }
 
 const EMAIL_CSS = `
@@ -326,6 +360,54 @@ function emailTemplate(params: {
       </table>
     </div>
     <div class="footer">This is an automated notification from the Mall system. Do not reply to this email.</div>
+  </div>
+</body>
+</html>`;
+}
+
+/**
+ * Customer-facing copy. Friendlier than the operator email: no internal event
+ * plumbing, every customer-provided value escaped, and payment/pickup
+ * instructions included exactly when they are actionable for the customer.
+ */
+function customerEmailTemplate(params: {
+  label: string;
+  orderNo: string;
+  customerName: string;
+  totalNgn: string;
+  status?: string;
+  paymentMethod?: string;
+  paymentStatus?: string;
+  instructions?: Record<string, unknown>;
+}): string {
+  const escapes: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  const esc = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, (ch) => escapes[ch] || ch);
+  const instructions = params.instructions || {};
+  const bank = instructions.bank as { name?: string; accountName?: string; accountNumber?: string } | undefined;
+  const pickup = instructions.pickup as { address?: string; hours?: string } | undefined;
+  const fmt = (value: unknown) => value ? String(value).replace(/_/g, ' ') : '—';
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><style>${EMAIL_CSS}</style></head>
+<body>
+  <div class="container">
+    <div class="header"><h1>${esc(params.label)} — Order ${esc(params.orderNo)}</h1></div>
+    <div class="body">
+      <p>Hi ${esc(params.customerName || 'there')},</p>
+      <p>Here is the latest update on your order.</p>
+      <table>
+        <tr><td>Order #</td><td>${esc(params.orderNo)}</td></tr>
+        <tr><td>Update</td><td>${esc(params.label)}</td></tr>
+        <tr><td>Order Status</td><td>${esc(fmt(params.status))}</td></tr>
+        <tr><td>Payment</td><td>${esc(fmt(params.paymentMethod))} — ${esc(fmt(params.paymentStatus))}</td></tr>
+        <tr><td>Total</td><td>${esc(params.totalNgn)}</td></tr>
+      </table>
+      ${params.paymentMethod === 'bank_transfer' && params.paymentStatus !== 'paid' && bank
+        ? `<p>To complete payment, transfer <strong>${esc(params.totalNgn)}</strong> to:<br>${esc(bank.name)} — ${esc(bank.accountName)}<br>Account: <strong>${esc(bank.accountNumber)}</strong><br>Use your order number <strong>${esc(params.orderNo)}</strong> as the payment reference.</p>`
+        : ''}
+      ${pickup ? `<p>Pickup: ${esc(pickup.address)}. Hours: ${esc(pickup.hours)}.</p>` : ''}
+    </div>
+    <div class="footer">Questions about this order? Contact the store and quote your order number.</div>
   </div>
 </body>
 </html>`;
@@ -443,11 +525,11 @@ async function ensureSchema(env: Env) {
   for (let offset = 0; offset < statements.length; offset += 50) {
     await env.DB.batch(statements.slice(offset, offset + 50));
   }
-  await env.DB.batch(MALL_OPERATIONS_DDL.map(sql=>env.DB.prepare(sql)));
+  await env.DB.batch(MALL_OPERATIONS_DDL.map(sql => env.DB.prepare(sql)));
   // #10 merchandising columns + the status column the catalog indexes cover:
   // additive guarded ALTERs; a duplicate column is the expected no-op on every
   // start after the first.
-  for (const column of [...MALL_MERCH_COLUMNS, ...MALL_CATALOG_INDEX_COLUMNS]) {
+  for (const column of [...MALL_MERCH_COLUMNS, ...MALL_ORDER_COLUMNS, ...MALL_CATALOG_INDEX_COLUMNS]) {
     try { await env.DB.prepare(column.ddl).run(); }
     catch (error) { if (!isDuplicateColumnError(error)) throw error; }
   }
@@ -483,7 +565,7 @@ async function ensureRelationalBackfill(env: Env): Promise<{ documents: number; 
   }
   const rows = await env.DB.prepare(
     'SELECT owner_id, collection, payload, updated_at FROM app_documents ORDER BY owner_id, collection, document_id',
-  ).bind().all<{collection: string; payload: string; owner_id?: string; updated_at?: number}>();
+  ).bind().all<{ collection: string; payload: string; owner_id?: string; updated_at?: number }>();
   const list = rows.results || [];
   if (!list.length) return none;
   const { stmts, skipped } = backfillStatementsFromDocumentRows(list, new Date().toISOString());
@@ -492,7 +574,7 @@ async function ensureRelationalBackfill(env: Env): Promise<{ documents: number; 
   return { documents: list.length, statements: stmts.length, skipped };
 }
 
-async function seedUser(env: Env, user: {id: string; email: string; username: string; displayName: string; password: string; superAdmin: boolean}) {
+async function seedUser(env: Env, user: { id: string; email: string; username: string; displayName: string; password: string; superAdmin: boolean }) {
   await ensureSchema(env);
   const existing = await env.DB.prepare('SELECT id FROM app_users WHERE id = ?').bind(user.id).all();
   if (existing.results?.length) return;
@@ -515,7 +597,7 @@ async function ensureBusinessDataOwner(env: Env) {
   const current = await env.DB.prepare('SELECT 1 AS present FROM app_documents WHERE owner_id = ? LIMIT 1').bind(BUSINESS_OWNER_ID).all();
   if (current.results?.length) return;
   const legacy = await env.DB.prepare('SELECT owner_id FROM app_documents WHERE owner_id != ? GROUP BY owner_id ORDER BY COUNT(*) DESC LIMIT 1')
-    .bind(BUSINESS_OWNER_ID).all<{owner_id: string}>();
+    .bind(BUSINESS_OWNER_ID).all<{ owner_id: string }>();
   const legacyOwner = legacy.results?.[0]?.owner_id;
   if (!legacyOwner) return;
   await env.DB.batch([
@@ -540,7 +622,7 @@ async function createSession(userId: string, env: Env) {
   const expiresAt = now + 7 * 24 * 60 * 60 * 1000;
   await env.DB.prepare('INSERT INTO app_sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
     .bind(await sha256(token), userId, now, expiresAt).run();
-  return {token, maxAge: Math.floor((expiresAt - now) / 1000)};
+  return { token, maxAge: Math.floor((expiresAt - now) / 1000) };
 }
 
 async function authLogin(request: Request, env: Env) {
@@ -548,18 +630,18 @@ async function authLogin(request: Request, env: Env) {
   const body = await readJson(request);
   const identifier = String(body?.identifier || '').trim().toLowerCase();
   const password = String(body?.password || '');
-  if (!identifier || !password) return json({error: 'Email/username and password are required.'}, 400);
+  if (!identifier || !password) return json({ error: 'Email/username and password are required.' }, 400);
   const rows = await env.DB.prepare('SELECT * FROM app_users WHERE lower(email) = ? OR lower(username) = ? LIMIT 1')
     .bind(identifier, identifier).all<AppUserRow>();
   const user = rows.results?.[0];
-  if (!user || user.status !== 'Active') return json({error: 'Invalid credentials or inactive account.'}, 401);
+  if (!user || user.status !== 'Active') return json({ error: 'Invalid credentials or inactive account.' }, 401);
   const candidate = await hashPassword(password, user.password_salt, user.password_iterations);
-  if (!safeEqual(candidate, user.password_hash)) return json({error: 'Invalid credentials or inactive account.'}, 401);
+  if (!safeEqual(candidate, user.password_hash)) return json({ error: 'Invalid credentials or inactive account.' }, 401);
   const lastLogin = new Date().toISOString();
   await env.DB.prepare('UPDATE app_users SET last_login = ? WHERE id = ?').bind(lastLogin, user.id).run();
   const session = await createSession(user.id, env);
   await ensureBusinessDataOwner(env);
-  const response = json({user: publicUser({...user, last_login: lastLogin})});
+  const response = json({ user: publicUser({ ...user, last_login: lastLogin }) });
   response.headers.set('set-cookie', sessionCookie(session.token, session.maxAge));
   await revokeEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
   response.headers.append('set-cookie', entranceCookie());
@@ -570,19 +652,19 @@ async function authGoogle(request: Request, env: Env) {
   await ensureAuthSeed(env);
   const body = await readJson(request);
   const accessToken = String(body?.accessToken || '');
-  if (!accessToken) return json({error: 'Google access token is required.'}, 400);
-  const googleResponse = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {headers: {authorization: `Bearer ${accessToken}`}});
-  if (!googleResponse.ok) return json({error: 'Google authentication could not be verified.'}, 401);
-  const googleUser = await googleResponse.json() as {email?: string; email_verified?: boolean};
-  if (!googleUser.email || googleUser.email_verified === false) return json({error: 'A verified Google email is required.'}, 401);
+  if (!accessToken) return json({ error: 'Google access token is required.' }, 400);
+  const googleResponse = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { authorization: `Bearer ${accessToken}` } });
+  if (!googleResponse.ok) return json({ error: 'Google authentication could not be verified.' }, 401);
+  const googleUser = await googleResponse.json() as { email?: string; email_verified?: boolean };
+  if (!googleUser.email || googleUser.email_verified === false) return json({ error: 'A verified Google email is required.' }, 401);
   const rows = await env.DB.prepare('SELECT * FROM app_users WHERE lower(email) = ? LIMIT 1').bind(googleUser.email.toLowerCase()).all<AppUserRow>();
   const user = rows.results?.[0];
-  if (!user || user.status !== 'Active') return json({error: 'This Google account is not registered or is inactive.'}, 403);
+  if (!user || user.status !== 'Active') return json({ error: 'This Google account is not registered or is inactive.' }, 403);
   const lastLogin = new Date().toISOString();
   await env.DB.prepare('UPDATE app_users SET last_login = ? WHERE id = ?').bind(lastLogin, user.id).run();
   const session = await createSession(user.id, env);
   await ensureBusinessDataOwner(env);
-  const response = json({user: publicUser({...user, last_login: lastLogin})});
+  const response = json({ user: publicUser({ ...user, last_login: lastLogin }) });
   response.headers.set('set-cookie', sessionCookie(session.token, session.maxAge));
   await revokeEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
   response.headers.append('set-cookie', entranceCookie());
@@ -602,7 +684,7 @@ async function authLogout(request: Request, env: Env) {
   await revokeEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
   const token = readCookie(request, SESSION_COOKIE);
   if (token) await env.DB.prepare('DELETE FROM app_sessions WHERE token_hash = ?').bind(await sha256(token)).run();
-  const response = json({ok: true});
+  const response = json({ ok: true });
   response.headers.set('set-cookie', sessionCookie('', 0));
   response.headers.append('set-cookie', entranceCookie());
   return response;
@@ -610,67 +692,67 @@ async function authLogout(request: Request, env: Env) {
 
 async function authUsers(request: Request, env: Env) {
   const actor = await requireAppUser(request, env);
-  if (!actor) return json({error: 'Authentication required.'}, 401);
+  if (!actor) return json({ error: 'Authentication required.' }, 401);
   const rows = await env.DB.prepare('SELECT * FROM app_users ORDER BY is_super_admin DESC, display_name').all<AppUserRow>();
-  return json({users: (rows.results || []).map(publicUser)});
+  return json({ users: (rows.results || []).map(publicUser) });
 }
 
 async function upsertAuthUser(request: Request, env: Env) {
   const actor = await requireAppUser(request, env);
-  if (!actor || actor.role !== 'Administrator') return json({error: 'Administrator access required.'}, 403);
+  if (!actor || actor.role !== 'Administrator') return json({ error: 'Administrator access required.' }, 403);
   const body = await readJson(request);
   const input = body?.user || {};
   const id = String(input.id || '');
-  if (!id || !input.email || !input.displayName) return json({error: 'User id, email, and display name are required.'}, 400);
+  if (!id || !input.email || !input.displayName) return json({ error: 'User id, email, and display name are required.' }, 400);
   const existingRows = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(id).all<AppUserRow>();
   const existing = existingRows.results?.[0];
   const password = String(body?.password || input.password || '');
-  if (!existing && password.length < 8) return json({error: 'A password of at least 8 characters is required.'}, 400);
+  if (!existing && password.length < 8) return json({ error: 'A password of at least 8 characters is required.' }, 400);
   let salt = existing?.password_salt || randomHex(16);
   let hash = existing?.password_hash || '';
   let changedAt = existing?.password_last_changed || new Date().toISOString();
   if (password) {
-    if (password.length < 8) return json({error: 'Password must be at least 8 characters.'}, 400);
+    if (password.length < 8) return json({ error: 'Password must be at least 8 characters.' }, 400);
     salt = randomHex(16); hash = await hashPassword(password, salt); changedAt = new Date().toISOString();
   }
   await env.DB.prepare(
     'INSERT INTO app_users (id, email, username, display_name, role, status, avatar_url, password_hash, password_salt, password_iterations, is_super_admin, is_protected, created_at, last_login, password_last_changed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, username=excluded.username, display_name=excluded.display_name, role=excluded.role, status=excluded.status, avatar_url=excluded.avatar_url, password_hash=excluded.password_hash, password_salt=excluded.password_salt, password_iterations=excluded.password_iterations, last_login=excluded.last_login, password_last_changed=excluded.password_last_changed',
   ).bind(id, String(input.email).toLowerCase(), input.username || null, input.displayName, input.role || 'Sales Staff', input.status || 'Active', input.avatarUrl || null, hash, salt, PASSWORD_ITERATIONS, existing?.is_super_admin || 0, existing?.is_protected || 0, input.createdAt || existing?.created_at || new Date().toISOString(), input.lastLogin || existing?.last_login || null, changedAt).run();
-  return json({ok: true});
+  return json({ ok: true });
 }
 
 async function deleteAuthUser(request: Request, env: Env, id: string) {
   const actor = await requireAppUser(request, env);
-  if (!actor || !actor.is_super_admin) return json({error: 'Super administrator access required.'}, 403);
-  if (id === actor.id || id === 'usr-superadmin-idofera') return json({error: 'Protected account cannot be deleted.'}, 400);
+  if (!actor || !actor.is_super_admin) return json({ error: 'Super administrator access required.' }, 403);
+  if (id === actor.id || id === 'usr-superadmin-idofera') return json({ error: 'Protected account cannot be deleted.' }, 400);
   await env.DB.prepare('DELETE FROM app_users WHERE id = ?').bind(id).run();
-  return json({ok: true});
+  return json({ ok: true });
 }
 
 async function changeAuthPassword(request: Request, env: Env) {
   const actor = await requireAppUser(request, env);
-  if (!actor) return json({error: 'Authentication required.'}, 401);
+  if (!actor) return json({ error: 'Authentication required.' }, 401);
   const body = await readJson(request);
   const targetId = String(body?.targetUserId || actor.id);
   const newPassword = String(body?.newPassword || '');
   const oldPassword = String(body?.oldPassword || '');
-  if (newPassword.length < 8) return json({error: 'Password must be at least 8 characters.'}, 400);
+  if (newPassword.length < 8) return json({ error: 'Password must be at least 8 characters.' }, 400);
   const rows = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(targetId).all<AppUserRow>();
   const target = rows.results?.[0];
-  if (!target) return json({error: 'User not found.'}, 404);
+  if (!target) return json({ error: 'User not found.' }, 404);
   if (targetId === actor.id) {
     const candidate = await hashPassword(oldPassword, actor.password_salt, actor.password_iterations);
-    if (!oldPassword || !safeEqual(candidate, actor.password_hash)) return json({error: 'Current password is incorrect.'}, 401);
+    if (!oldPassword || !safeEqual(candidate, actor.password_hash)) return json({ error: 'Current password is incorrect.' }, 401);
   } else {
-    if (actor.role !== 'Administrator') return json({error: 'Administrator access required.'}, 403);
-    if (target.is_super_admin && !actor.is_super_admin) return json({error: 'Only the super administrator can reset this password.'}, 403);
+    if (actor.role !== 'Administrator') return json({ error: 'Administrator access required.' }, 403);
+    if (target.is_super_admin && !actor.is_super_admin) return json({ error: 'Only the super administrator can reset this password.' }, 403);
   }
   const salt = randomHex(16);
   const changedAt = new Date().toISOString();
   await env.DB.prepare('UPDATE app_users SET password_hash = ?, password_salt = ?, password_iterations = ?, password_last_changed = ? WHERE id = ?')
     .bind(await hashPassword(newPassword, salt), salt, PASSWORD_ITERATIONS, changedAt, targetId).run();
   if (targetId !== actor.id) await env.DB.prepare('DELETE FROM app_sessions WHERE user_id = ?').bind(targetId).run();
-  return json({ok: true, passwordLastChanged: changedAt});
+  return json({ ok: true, passwordLastChanged: changedAt });
 }
 
 async function readJson(request: Request) {
@@ -685,21 +767,21 @@ async function saveSnapshot(request: Request, env: Env) {
   await ensureSchema(env);
   const ownerId = BUSINESS_OWNER_ID;
   const body = await readJson(request);
-  if (!body?.stores || typeof body.stores !== 'object') return json({error: 'A stores object is required.'}, 400);
+  if (!body?.stores || typeof body.stores !== 'object') return json({ error: 'A stores object is required.' }, 400);
   // Bound the restore before touching a single row: a runaway payload would
   // otherwise translate into tens of thousands of statements per request.
   const totalDocuments = Object.values(body.stores).reduce<number>((sum, documents) =>
     sum + (Array.isArray(documents) ? documents.length : 0), 0);
   if (totalDocuments > SNAPSHOT_PUSH_DOC_LIMIT) {
-    return json({error: `Snapshot exceeds the maximum of ${SNAPSHOT_PUSH_DOC_LIMIT} documents. Restore a bounded slice and sync the rest with record PATCHes.`}, 413);
+    return json({ error: `Snapshot exceeds the maximum of ${SNAPSHOT_PUSH_DOC_LIMIT} documents. Restore a bounded slice and sync the rest with record PATCHes.` }, 413);
   }
 
   const revisionRows = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
-    .bind(ownerId).all<{revision: number}>();
+    .bind(ownerId).all<{ revision: number }>();
   const currentRevision = Number(revisionRows.results?.[0]?.revision || 0);
   const expectedRevision = Number(body.expectedRevision || 0);
   if (expectedRevision !== currentRevision) {
-    return json({error: 'Snapshot revision conflict.', revision: currentRevision}, 409);
+    return json({ error: 'Snapshot revision conflict.', revision: currentRevision }, 409);
   }
 
   const now = Date.now();
@@ -781,7 +863,7 @@ function snapshotNotModified(request: Request, revision: number, backend: string
 }
 
 const snapshotUnchanged = (revision: number, backend: string) =>
-  new Response(null, {status: 304, headers: {'cache-control': 'no-store', 'etag': snapshotGuard(revision, backend)}});
+  new Response(null, { status: 304, headers: { 'cache-control': 'no-store', 'etag': snapshotGuard(revision, backend) } });
 
 function snapshotResponse(body: Record<string, unknown>, revision: number, backend: string) {
   const response = json(body);
@@ -838,7 +920,7 @@ async function readSnapshotDelta(env: Env, ownerId: string, revision: number, si
        AND (updated_at > ? OR (updated_at = ? AND (collection > ? OR (collection = ? AND document_id > ?))))
      ORDER BY updated_at, collection, document_id LIMIT ?`,
   ).bind(ownerId, sinceMs, sinceMs, watermark?.collection ?? '', watermark?.collection ?? '', watermark?.documentId ?? '', SNAPSHOT_DELTA_LIMIT)
-    .all<{collection: string; document_id: string; payload: string; updated_at: number}>();
+    .all<{ collection: string; document_id: string; payload: string; updated_at: number }>();
   const list = rows.results || [];
   let cursor: SnapshotCursor = { ms: sinceMs, collection: watermark?.collection ?? '', documentId: watermark?.documentId ?? '' };
   const stores: Record<string, unknown[]> = {};
@@ -866,7 +948,7 @@ async function readSnapshot(request: Request, env: Env) {
   const ownerId = BUSINESS_OWNER_ID;
   // Read the revision first so an unchanged store can short-circuit below.
   const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
-    .bind(ownerId).all<{revision: number}>();
+    .bind(ownerId).all<{ revision: number }>();
   const revision = Number(revisions.results?.[0]?.revision || 0);
 
   // A supplied watermark means delta mode, and is handled before the relational
@@ -900,7 +982,7 @@ async function readSnapshot(request: Request, env: Env) {
 
   const rows = await env.DB.prepare(
     'SELECT collection, document_id, payload, updated_at FROM app_documents WHERE owner_id = ? ORDER BY collection, document_id',
-  ).bind(ownerId).all<{collection: string; document_id: string; payload: string; updated_at: number}>();
+  ).bind(ownerId).all<{ collection: string; document_id: string; payload: string; updated_at: number }>();
   const stores: Record<string, unknown[]> = {};
   for (const row of rows.results || []) {
     try {
@@ -956,7 +1038,7 @@ async function patchRecords(request: Request, env: Env) {
   const body = await readJson(request);
   const upserts = Array.isArray(body?.upserts) ? body.upserts : [];
   const deletes = Array.isArray(body?.deletes) ? body.deletes : [];
-  if (upserts.length + deletes.length > 5000) return json({error: 'Too many records in one sync.'}, 413);
+  if (upserts.length + deletes.length > 5000) return json({ error: 'Too many records in one sync.' }, 413);
 
   const now = Date.now();
   const nowIso = new Date(now).toISOString();
@@ -972,7 +1054,7 @@ async function patchRecords(request: Request, env: Env) {
     const document = item?.document;
     if (!ALLOWED_STORES.has(collection) || !document || typeof document !== 'object') continue;
     const documentId = String(document.id || 'singleton');
-    candidates.push({collection, documentId, payload: JSON.stringify(document)});
+    candidates.push({ collection, documentId, payload: JSON.stringify(document) });
   }
   const storedPayloads = new Map<string, string>();
   for (let offset = 0; offset < candidates.length; offset += 50) {
@@ -982,7 +1064,7 @@ async function patchRecords(request: Request, env: Env) {
     const rows = await env.DB.prepare(
       `SELECT collection, document_id, payload FROM app_documents WHERE owner_id = ? AND (collection, document_id) IN (${placeholders})`,
     ).bind(ownerId, ...page.flatMap((candidate) => [candidate.collection, candidate.documentId]))
-      .all<{collection: string; document_id: string; payload: string}>();
+      .all<{ collection: string; document_id: string; payload: string }>();
     for (const row of rows.results || []) {
       storedPayloads.set(`${row.collection}:${row.document_id}`, row.payload);
     }
@@ -995,11 +1077,11 @@ async function patchRecords(request: Request, env: Env) {
     // volatile and excluded from the equality check.
     if (storedPayloads.get(`${candidate.collection}:${candidate.documentId}`) !== undefined
       && canonicalDocumentPayload(storedPayloads.get(`${candidate.collection}:${candidate.documentId}`))
-        === canonicalDocumentPayload(candidate.payload)) {
+      === canonicalDocumentPayload(candidate.payload)) {
       skippedUnchanged += 1;
       continue;
     }
-    writtenKeys.push({collection: candidate.collection, documentId: candidate.documentId});
+    writtenKeys.push({ collection: candidate.collection, documentId: candidate.documentId });
     statements.push(env.DB.prepare(
       'INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at',
     ).bind(ownerId, candidate.collection, candidate.documentId, candidate.payload, now));
@@ -1021,7 +1103,7 @@ async function patchRecords(request: Request, env: Env) {
   // push that changed zero rows.
   if (skippedUnchanged === candidates.length && deletes.length === 0 && candidates.length > 0) {
     const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
-      .bind(ownerId).all<{revision: number}>();
+      .bind(ownerId).all<{ revision: number }>();
     const revision = Number(revisions.results?.[0]?.revision || 0);
     return json({
       ok: true,
@@ -1037,7 +1119,7 @@ async function patchRecords(request: Request, env: Env) {
   }
 
   const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
-    .bind(ownerId).all<{revision: number}>();
+    .bind(ownerId).all<{ revision: number }>();
   const revision = Math.max(now, Number(revisions.results?.[0]?.revision || 0) + 1);
   statements.push(env.DB.prepare(
     'INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?) ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at',
@@ -1064,7 +1146,7 @@ async function patchRecords(request: Request, env: Env) {
     .sort((left, right) => (left.collection < right.collection ? -1 : left.collection > right.collection ? 1 : left.documentId < right.documentId ? -1 : left.documentId > right.documentId ? 1 : 0))
     .pop();
   const patchCursor = lastWritten
-    ? JSON.stringify({ms: now, collection: lastWritten.collection, documentId: lastWritten.documentId})
+    ? JSON.stringify({ ms: now, collection: lastWritten.collection, documentId: lastWritten.documentId })
     : nowIso;
   return json({
     ok: true,
@@ -1087,14 +1169,14 @@ async function askGemini(apiKey: string, prompt: string) {
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
     {
       method: 'POST',
-      headers: {'content-type': 'application/json'},
-      body: JSON.stringify({contents: [{parts: [{text: prompt}]}]}),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
     },
   );
   if (!response.ok) throw new Error(`Gemini request failed (${response.status})`);
   const data = await response.json() as any;
   return (data.candidates?.[0]?.content?.parts || [])
-    .map((part: {text?: string}) => part.text || '')
+    .map((part: { text?: string }) => part.text || '')
     .join('')
     .trim();
 }
@@ -1105,7 +1187,7 @@ function stripJsonFence(text: string) {
 
 async function businessAssistant(request: Request, env: Env) {
   const body = await readJson(request);
-  if (!body?.prompt) return json({error: 'A prompt is required.'}, 400);
+  if (!body?.prompt) return json({ error: 'A prompt is required.' }, 400);
   const context = body.businessContext || {};
   if (!env.GEMINI_API_KEY) {
     return json({
@@ -1117,13 +1199,13 @@ async function businessAssistant(request: Request, env: Env) {
     env.GEMINI_API_KEY,
     `You are IdoferaLabs AI Business Assistant. Give concise, actionable retail and wholesale advice.\n\nBusiness context:\n${JSON.stringify(context, null, 2)}\n\nQuestion:\n${body.prompt}`,
   );
-  return json({answer, source: 'gemini-2.5-flash'});
+  return json({ answer, source: 'gemini-2.5-flash' });
 }
 
 async function pricingAssistant(request: Request, env: Env) {
   const body = await readJson(request);
   const product = body?.product;
-  if (!product) return json({error: 'A product is required.'}, 400);
+  if (!product) return json({ error: 'A product is required.' }, 400);
   const cost = Number(product.costPrice) || 100;
   if (!env.GEMINI_API_KEY) {
     const retail = Math.round(cost * 145) / 100;
@@ -1143,7 +1225,7 @@ async function pricingAssistant(request: Request, env: Env) {
     env.GEMINI_API_KEY,
     `Return only valid JSON with recommendedRetailPrice, recommendedWholesalePrice, suggestedDiscountPct, projectedProfitMargin, riskLevel, and explanation for this product:\n${JSON.stringify(product, null, 2)}`,
   );
-  return json({...JSON.parse(stripJsonFence(text)), source: 'gemini-2.5-flash'});
+  return json({ ...JSON.parse(stripJsonFence(text)), source: 'gemini-2.5-flash' });
 }
 
 async function salesForecast(request: Request, env: Env) {
@@ -1166,7 +1248,7 @@ async function salesForecast(request: Request, env: Env) {
     env.GEMINI_API_KEY,
     `Return only valid JSON with forecastDays, predictedRevenue, predictedSalesCount, highRiskStockouts, suggestedReorderDate, cashFlowTrend, and insights. Sales count: ${sales.length}. Products: ${JSON.stringify(products.slice(0, 20), null, 2)}`,
   );
-  return json({...JSON.parse(stripJsonFence(text)), source: 'gemini-2.5-flash'});
+  return json({ ...JSON.parse(stripJsonFence(text)), source: 'gemini-2.5-flash' });
 }
 
 async function serveAsset(request: Request, env: Env) {
@@ -1183,20 +1265,22 @@ async function serveAsset(request: Request, env: Env) {
     headers.set('cache-control', isStaffPage(url.pathname) ? 'no-store' : 'no-cache, max-age=0');
     headers.delete('content-length');
     const html = (await response.text()).replaceAll('__SITE_ORIGIN__', url.origin);
-    return new Response(html, {status: response.status, statusText: response.statusText, headers});
+    return new Response(html, { status: response.status, statusText: response.statusText, headers });
   } else if (url.pathname.startsWith('/assets/')) {
     headers.set('cache-control', 'public, max-age=31536000, immutable');
   }
-  return new Response(response.body, {status: response.status, statusText: response.statusText, headers});
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
 export default {
   async scheduled(_controller: unknown, env: Env): Promise<void> {
     await ensureSchema(env);
-    await maintainMall({config:env,queryAll:makeD1QueryAll(env),runBatch:async stmts=>{
-      const result=await env.DB.batch(toD1Statements(env,stmts));
-      return result.map((row:any)=>Number(row?.meta?.changes ?? 0));
-    }}, async (input, init) => {
+    await maintainMall({
+      config: env, queryAll: makeD1QueryAll(env), runBatch: async stmts => {
+        const result = await env.DB.batch(toD1Statements(env, stmts));
+        return result.map((row: any) => Number(row?.meta?.changes ?? 0));
+      }
+    }, async (input, init) => {
       // Deliver the signed outbox POST to the receiver IN PROCESS. Reaching
       // MALL_WEBHOOK_URL over the network would mean this Worker fetching a
       // hostname its own route matches, which Cloudflare answers with error 1042
@@ -1218,9 +1302,9 @@ export default {
       const query = makeD1QueryAll(env);
       const cookie = request.headers.get('cookie') || '';
       if (url.pathname === '/api/auth/entrance') {
-        if (request.method !== 'POST') return json({error: 'Method not allowed'}, 405);
-        if (request.headers.get('origin') !== url.origin || request.headers.get('x-staff-entrance') !== 'cart-hold') return json({error: 'Forbidden'}, 403);
-        const response = json({ok: true});
+        if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
+        if (request.headers.get('origin') !== url.origin || request.headers.get('x-staff-entrance') !== 'cart-hold') return json({ error: 'Forbidden' }, 403);
+        const response = json({ ok: true });
         response.headers.set('cache-control', 'no-store');
         response.headers.set('set-cookie', entranceCookie(await issueEntrance(query)));
         return response;
@@ -1229,16 +1313,16 @@ export default {
       if (isStaffPage(url.pathname) || isPrivateApi(url.pathname) || login) {
         const entrance = !isPrivateApi(url.pathname) && await hasEntrance(cookie, query);
         if (!entrance && !await requireAppUser(request, env)) {
-          if (isStaffPage(url.pathname)) return new Response(null, {status: 302, headers: {location: '/', 'cache-control': 'no-store'}});
-          if (login) return json({error: 'Staff entrance expired. Return to the Mall and hold the Cart button for 3 seconds to reopen Staff Login.', code: 'STAFF_ENTRANCE_REQUIRED'}, 401);
-          return json({error: 'Authentication required.'}, 401);
+          if (isStaffPage(url.pathname)) return new Response(null, { status: 302, headers: { location: '/', 'cache-control': 'no-store' } });
+          if (login) return json({ error: 'Staff entrance expired. Return to the Mall and hold the Cart button for 3 seconds to reopen Staff Login.', code: 'STAFF_ENTRANCE_REQUIRED' }, 401);
+          return json({ error: 'Authentication required.' }, 401);
         }
       }
-      if (url.pathname === '/api/health') return json({status: 'ok', app: 'IdoferaLabs API', timestamp: new Date().toISOString()});
+      if (url.pathname === '/api/health') return json({ status: 'ok', app: 'IdoferaLabs API', timestamp: new Date().toISOString() });
       if (url.pathname === '/api/storage/d1/health') {
         await ensureSchema(env);
         const ownerId = BUSINESS_OWNER_ID;
-        const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?').bind(ownerId).all<{revision: number}>();
+        const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?').bind(ownerId).all<{ revision: number }>();
         // Counting every document and five relational tables costs ~2,185 rows on
         // each poll. Liveness only needs the revision, so the counts are opt-in
         // (`?detail=1`) and used by the Settings panel rather than by every poll.
@@ -1246,7 +1330,7 @@ export default {
         let totalDocuments: number | undefined;
         let relational: Record<string, unknown> | undefined;
         if (wantsDetail) {
-          const docCount = await env.DB.prepare('SELECT count(*) as count FROM app_documents WHERE owner_id = ?').bind(ownerId).all<{count: number}>();
+          const docCount = await env.DB.prepare('SELECT count(*) as count FROM app_documents WHERE owner_id = ?').bind(ownerId).all<{ count: number }>();
           totalDocuments = Number(docCount.results?.[0]?.count || 0);
           try {
             const row = await d1Get(env, `SELECT
@@ -1295,7 +1379,7 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/ai/sales-forecasting') return await salesForecast(request, env);
       if (url.pathname === '/api/staff/product-images') {
         const actor = await requireAppUser(request, env);
-        if (!actor) return json({error: 'Authentication required.'}, 401);
+        if (!actor) return json({ error: 'Authentication required.' }, 401);
         await ensureSchema(env);
         return await handleStaffProductImageApi(request, makeR2ImageStore(env), {
           config: env,
@@ -1304,11 +1388,11 @@ export default {
             const results = await env.DB.batch(toD1Statements(env, stmts));
             return results.map((result: any) => Number(result?.meta?.changes ?? 0));
           },
-        }, {id: actor.id, displayName: actor.display_name, role: actor.role});
+        }, { id: actor.id, displayName: actor.display_name, role: actor.role });
       }
       if (url.pathname === '/api/staff/mall-listings' || url.pathname.startsWith('/api/staff/mall-listings/')) {
         const actor = await requireAppUser(request, env);
-        if (!actor) return json({error: 'Authentication required.'}, 401);
+        if (!actor) return json({ error: 'Authentication required.' }, 401);
         await ensureSchema(env);
         return await handleStaffMallListingApi(request, {
           config: env,
@@ -1317,12 +1401,12 @@ export default {
             const results = await env.DB.batch(toD1Statements(env, stmts));
             return results.map((result: any) => Number(result?.meta?.changes ?? 0));
           },
-        }, {id: actor.id, displayName: actor.display_name, role: actor.role});
+        }, { id: actor.id, displayName: actor.display_name, role: actor.role });
       }
       if (url.pathname === '/api/staff/mall-orders' || url.pathname.startsWith('/api/staff/mall-orders/')) {
         await ensureSchema(env);
         const actor = await requireAppUser(request, env);
-        if (!actor) return json({error: 'Authentication required.'}, 401);
+        if (!actor) return json({ error: 'Authentication required.' }, 401);
         return await handleStaffMallApi(request, {
           config: env,
           imagesConfigured: !!env.MALL_IMAGES,
@@ -1331,8 +1415,8 @@ export default {
             const results = await env.DB.batch(toD1Statements(env, stmts));
             return results.map((result: any) => Number(result?.meta?.changes ?? 0));
           },
-        }, {id: actor.id, displayName: actor.display_name, role: actor.role});
-            }
+        }, { id: actor.id, displayName: actor.display_name, role: actor.role });
+      }
       // #18 — email notification webhook receiver (public, HMAC-signed).
       if (request.method === 'POST' && url.pathname === '/api/mall-webhook') {
         await ensureSchema(env);
@@ -1352,12 +1436,12 @@ export default {
           },
         });
       }
-      if (url.pathname.startsWith('/api/')) return json({error: 'Not found'}, 404);
+      if (url.pathname.startsWith('/api/')) return json({ error: 'Not found' }, 404);
       // #14 — public, immutable product images (served from R2, never the asset bucket).
       if (url.pathname.startsWith('/mall-images/')) {
         return await handlePublicImageRequest(request, makeR2ImageStore(env), decodeURIComponent(url.pathname.slice('/mall-images/'.length)));
       }
-            return await serveAsset(request, env);
+      return await serveAsset(request, env);
     } catch (error) {
       // Preserve Mall domain semantics when an error propagates from the Mall
       // handlers (status + structured payload). Anything else falls back to a

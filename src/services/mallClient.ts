@@ -122,6 +122,7 @@ export function getBuyerProfile(): MallBuyerProfile | null {
     return {
       name: String(v.name || ''),
       phone: String(v.phone || ''),
+      email: String(v.email || ''),
       address: String(v.address || ''),
       savedAt: String(v.savedAt || new Date().toISOString()),
     };

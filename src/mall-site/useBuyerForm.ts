@@ -7,25 +7,29 @@ export function useBuyerForm() {
   const [mode, setMode] = React.useState<'guest' | 'saved'>('guest');
   const [name, setName] = React.useState('');
   const [phone, setPhone] = React.useState('');
+  const [email, setEmail] = React.useState('');
   const [address, setAddress] = React.useState('');
   const [deliveryZone, setDeliveryZone] = React.useState<MallDeliveryZone>('pickup');
   const [pay, setPay] = React.useState<'pay_on_pickup' | 'bank_transfer'>('pay_on_pickup');
   const [save, setSave] = React.useState(false);
   React.useEffect(() => {
     const b = getBuyerProfile();
-    if (b && (b.name || b.phone)) { setName(b.name); setPhone(b.phone); setAddress(b.address); setMode('saved'); }
+    if (b && (b.name || b.phone)) { setName(b.name); setPhone(b.phone); setEmail(b.email || ''); setAddress(b.address); setMode('saved'); }
   }, []);
-  return { mode, setMode, name, setName, phone, setPhone, address, setAddress, deliveryZone, setDeliveryZone, pay, setPay, save, setSave };
+  return { mode, setMode, name, setName, phone, setPhone, email, setEmail, address, setAddress, deliveryZone, setDeliveryZone, pay, setPay, save, setSave };
 }
 
-export function validateBuyer(name: string, phone: string): string {
+export const MALL_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export function validateBuyer(name: string, phone: string, email = ''): string {
   if (!name.trim()) return 'Please enter your name.';
   if (phone.replace(/\D/g, '').length < 7) return 'Enter a valid phone number.';
+  if (email.trim() && !MALL_EMAIL_PATTERN.test(email.trim())) return 'Enter a valid email address.';
   return '';
 }
 
-export function persistBuyer(mode: string, save: boolean, name: string, phone: string, address: string) {
-  if (mode === 'saved' || save) saveBuyerProfile({ name: name.trim(), phone: phone.trim(), address: address.trim() });
+export function persistBuyer(mode: string, save: boolean, name: string, phone: string, address: string, email = '') {
+  if (mode === 'saved' || save) saveBuyerProfile({ name: name.trim(), phone: phone.trim(), address: address.trim(), email: email.trim().toLowerCase() });
 }
 
 export function useCheckoutSubmit() {

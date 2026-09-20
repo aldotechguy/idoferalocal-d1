@@ -3,7 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { RELATIONAL_DDL, RELATIONAL_INDEXES } from './relationalDdl.js';
 import { MALL_OVERSELL_TRIGGER_SQL, type MallExecutor } from './mallApi.js';
 import { MALL_SAFETY_DDL, MALL_CATALOG_INDEX_COLUMNS, MALL_CATALOG_INDEXES } from './mallSafety.js';
-import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, MALL_SCHEMA_VERSION, isDuplicateColumnError, type MallConfig } from './mallOperations.js';
+import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, MALL_ORDER_COLUMNS, MALL_SCHEMA_VERSION, isDuplicateColumnError, type MallConfig } from './mallOperations.js';
 
 
 export type Tx = {
@@ -38,6 +38,11 @@ export function ensureRelationalSchemaNode(db: DatabaseSync): number {
   // #10 merchandising columns: additive, and a duplicate-column error on restart
   // is the expected no-op rather than a failure.
   for (const column of MALL_MERCH_COLUMNS) {
+    try { db.exec(`${column.ddl};`); }
+    catch (error) { if (!isDuplicateColumnError(error)) throw error; }
+  }
+  // #16 customer email on orders: additive, same guarded contract as merch columns.
+  for (const column of MALL_ORDER_COLUMNS) {
     try { db.exec(`${column.ddl};`); }
     catch (error) { if (!isDuplicateColumnError(error)) throw error; }
   }
@@ -101,6 +106,7 @@ export function makeNodeMallExecutor(db: DatabaseSync, config?: MallConfig, clie
 export function relationalSchemaStatements(): string[] {
   return [...RELATIONAL_DDL, ...RELATIONAL_INDEXES, ...MALL_SAFETY_DDL, ...MALL_OPERATIONS_DDL,
     ...MALL_MERCH_COLUMNS.map((column) => column.ddl),
+    ...MALL_ORDER_COLUMNS.map((column) => column.ddl),
     ...MALL_CATALOG_INDEX_COLUMNS.map((column) => column.ddl),
     ...MALL_CATALOG_INDEXES,
     MALL_OVERSELL_TRIGGER_SQL,

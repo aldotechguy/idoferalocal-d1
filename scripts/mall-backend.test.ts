@@ -44,6 +44,27 @@ test('checkout is server-priced, pending, fee-safe and idempotent', async () => 
   assert.equal((db.prepare(`SELECT stock_qty FROM products WHERE id = 'prod-1'`).get() as any).stock_qty, 8);
 });
 
+test('checkout validates and stores the optional customer email', async () => {
+  const bad = fixture();
+  const rejected = await checkout(bad.exec, bad.session, { customerEmail: 'not-an-email' });
+  assert.equal(rejected.response.status, 400);
+  assert.equal(rejected.body.fields.customerEmail, 'Enter a valid email address.');
+  assert.equal((bad.db.prepare('SELECT COUNT(*) AS n FROM mall_orders').get() as any).n, 0);
+
+  const good = fixture();
+  const placed = await checkout(good.exec, good.session, { customerEmail: '  ADA@Example.COM ' });
+  assert.equal(placed.response.status, 201);
+  assert.equal(placed.body.customerEmail, 'ada@example.com', 'the email is normalized (trimmed, lowercased) on the server');
+  const row = good.db.prepare('SELECT customer_email FROM mall_orders').get() as any;
+  assert.equal(row.customer_email, 'ada@example.com');
+
+  // Omitting the email keeps checkout working (operator-only notifications).
+  const noEmail = fixture();
+  const bare = await checkout(noEmail.exec, noEmail.session);
+  assert.equal(bare.response.status, 201);
+  assert.equal(bare.body.customerEmail, undefined);
+});
+
 test('fixed delivery zones are server-priced and require an address', async () => {
   const central = fixture();
   assert.equal((await checkout(central.exec, central.session, { deliveryZone: 'invented_free_zone' })).response.status, 400);

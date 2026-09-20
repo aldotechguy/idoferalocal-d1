@@ -61,7 +61,7 @@ Monitor the expiry backlog and increase throughput deliberately if volume requir
 POST JSON containing `id`, `event`, `occurredAt`, `data`, `order`, and `instructions`.
 `data` is the event-time snapshot; `order` is the current order at send time and may
 already reflect a later transition. Do not assume delivery order is chronological.
-Current order data contains customer name/phone for notification routing.
+Current order data contains customer name/phone/email for notification routing.
 The order also includes payment reference/status/method and fulfilment JSON so the
 receiver can distinguish payment instructions, pickup, and delivery notifications.
 Treat the delivery address in that JSON as private customer information. Restrict
@@ -119,6 +119,13 @@ Resend configuration:
 
 Behaviour and diagnostics:
 
+- Checkout collects an OPTIONAL customer email (validated and lowercased server-side;
+  omitted emails keep checkout working). When an order carries one, every order event
+  emails a second, customer-facing copy with a friendly greeting, the order status, and
+  — for unpaid bank transfers — the payment instructions, or the pickup address/hours.
+  The copy is best-effort: the operator acknowledgement is authoritative, so a failed
+  customer send never retries the event (and never duplicates the operator email); the
+  failure stays visible in `mall_webhook_deliveries.error`.
 - Hourly `MALL_HEARTBEAT` events are acknowledged and recorded but never emailed, so the
   signed wire is provably up without one message per hour forever.
 - Order events (received, paid, dispatched, delivered, cancelled, refunded) email the

@@ -88,7 +88,7 @@ export const MallOrdersView: React.FC = () => {
         <div className="text-right shrink-0"><p className="font-black text-sm">{money(order.totalKobo)}</p><p className="text-xs font-bold text-blue-600">{STATUS_LABELS[order.status] || order.status}</p></div>
       </button>)}</div>}
 
-    <AccessibleOverlay open={Boolean(selected)} onClose={() => setSelected(null)} title={selected?.orderNo || 'Mall order'} description={selected ? `${selected.customerName} · ${selected.customerPhone}` : undefined} className="max-w-2xl">
+    <AccessibleOverlay open={Boolean(selected)} onClose={() => setSelected(null)} title={selected?.orderNo || 'Mall order'} description={selected ? `${selected.customerName} · ${selected.customerPhone}${selected.customerEmail ? ` · ${selected.customerEmail}` : ''}` : undefined} className="max-w-2xl">
       {selected && <div className="space-y-4">
         {!selected.linkedSaleId && selected.delivery.zone && selected.delivery.zone!=='pickup' && !selected.delivery.addressVerified && ['Administrator','Store Manager'].includes(currentUser?.role || '') && <button disabled={busy} className="rounded border p-3 text-sm" onClick={()=>act(()=>staffMallClient.reviewDelivery(selected.id),'Delivery serviceability verified')}>I verified this address is serviceable within the selected zone</button>}
         {!selected.linkedSaleId && selected.status!=='cancelled' && ['Administrator','Store Manager'].includes(currentUser?.role || '') && <button disabled={busy} className="rounded border p-3 text-sm text-rose-700" onClick={()=>act(()=>staffMallClient.rejectPayment(selected.id,cancelReason),'Payment rejected; order cancelled and stock released')}>Reject payment and cancel order</button>}

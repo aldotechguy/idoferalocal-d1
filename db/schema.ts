@@ -404,6 +404,7 @@ export const mallOrders = sqliteTable(
     customerId: text('customer_id'),
     customerName: text('customer_name').notNull().default(''),
     customerPhone: text('customer_phone'),
+    customerEmail: text('customer_email'),
     status: text('status').notNull().default('pending'),
     subtotalKobo: integer('subtotal_kobo').notNull().default(0),
     deliveryFeeKobo: integer('delivery_fee_kobo').notNull().default(0),

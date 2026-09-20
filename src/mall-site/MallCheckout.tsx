@@ -3,7 +3,7 @@ import { User, Zap, Check } from 'lucide-react';
 import { useNavigateMall } from '../hooks/useRoute';
 import { formatNaira } from './mallUi';
 import { MallCartLines } from './MallCartLines';
-import { useBuyerForm, validateBuyer, persistBuyer, useCheckoutSubmit } from './useBuyerForm';
+import { useBuyerForm, validateBuyer, MALL_EMAIL_PATTERN, persistBuyer, useCheckoutSubmit } from './useBuyerForm';
 import { FormField } from '../components/common/FormField';
 import { MALL_DELIVERY_ZONES, mallDeliveryFeeKobo } from '../shared/mallDelivery';
 
@@ -15,12 +15,12 @@ export const MallCheckout: React.FC = () => {
   const items = c.cart?.items ?? [];
   const subtotal = c.cart?.subtotalKobo ?? 0;
   const deliveryFee = mallDeliveryFeeKobo(f.deliveryZone);
-  const [fieldErrors, setFieldErrors] = React.useState<{ name?: string; phone?: string; address?: string }>({});
+  const [fieldErrors, setFieldErrors] = React.useState<{ name?: string; phone?: string; email?: string; address?: string }>({});
   const submit = async () => {
-    const v = validateBuyer(f.name, f.phone);
+    const v = validateBuyer(f.name, f.phone, f.email);
     if (!items.length) { c.setErr('Your cart is empty.'); return; }
     if (v) {
-      setFieldErrors({ name: !f.name.trim() ? 'Please enter your full name.' : undefined, phone: f.phone.replace(/\D/g, '').length < 7 ? 'Enter a valid phone number.' : undefined });
+      setFieldErrors({ name: !f.name.trim() ? 'Please enter your full name.' : undefined, phone: f.phone.replace(/\D/g, '').length < 7 ? 'Enter a valid phone number.' : undefined, email: f.email.trim() && !MALL_EMAIL_PATTERN.test(f.email.trim()) ? 'Enter a valid email address.' : undefined });
       c.setErr(v); return;
     }
     if (f.deliveryZone !== 'pickup' && !f.address.trim()) {
@@ -30,8 +30,8 @@ export const MallCheckout: React.FC = () => {
     setFieldErrors({});
     c.setErr(''); c.setBusy(true);
     try {
-      persistBuyer(f.mode, f.save, f.name, f.phone, f.address);
-      const ok = await c.checkout({ customerName: f.name.trim(), customerPhone: f.phone.trim(), deliveryAddress: f.address.trim(), deliveryZone: f.deliveryZone, paymentMethod: f.pay });
+      persistBuyer(f.mode, f.save, f.name, f.phone, f.address, f.email);
+      const ok = await c.checkout({ customerName: f.name.trim(), customerPhone: f.phone.trim(), customerEmail: f.email.trim() || undefined, deliveryAddress: f.address.trim(), deliveryZone: f.deliveryZone, paymentMethod: f.pay });
       if (ok) go('/order-success');
     } finally { c.setBusy(false); }
   };
@@ -58,6 +58,7 @@ export const MallCheckout: React.FC = () => {
         <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-3">
           <FormField label="Full name" required error={fieldErrors.name}><input name="name" autoComplete="name" value={f.name} onChange={(e) => f.setName(e.target.value)} placeholder="e.g. Mfoniso Okon" className={input} /></FormField>
           <FormField label="Phone number" required error={fieldErrors.phone}><input name="phone" type="tel" inputMode="tel" autoComplete="tel" value={f.phone} onChange={(e) => f.setPhone(e.target.value)} placeholder="0803…" className={input} /></FormField>
+          <FormField label="Email (for order updates)" error={fieldErrors.email} hint="We email your order confirmation and status updates here."><input name="email" type="email" inputMode="email" autoComplete="email" value={f.email} onChange={(e) => f.setEmail(e.target.value)} placeholder="you@example.com" className={input} /></FormField>
           <fieldset>
             <legend className="text-sm font-black">Delivery zone</legend>
             <div className="mt-2 grid sm:grid-cols-2 gap-2">{MALL_DELIVERY_ZONES.map((zone) => <label key={zone.id} className={`min-h-12 rounded-xl border p-3 text-sm font-bold flex items-center gap-2 ${f.deliveryZone === zone.id ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/40' : 'border-slate-200 dark:border-slate-700'}`}><input type="radio" name="deliveryZone" value={zone.id} checked={f.deliveryZone === zone.id} onChange={() => f.setDeliveryZone(zone.id)} /><span>{zone.label}<small className="block text-slate-500">{zone.feeKobo == null ? 'Staff quote' : formatNaira(zone.feeKobo)}</small></span></label>)}</div>

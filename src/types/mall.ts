@@ -58,6 +58,7 @@ export type MallOrder = {
   deliveryLabel?: string;
   quoteRequired?: boolean;
   customerName?: string;
+  customerEmail?: string;
   paidKobo?: number;
   amountDueKobo?: number;
   paymentStatus?: string;
@@ -69,6 +70,7 @@ export type MallOrder = {
 export type MallCheckoutBody = {
   customerName?: string;
   customerPhone?: string;
+  customerEmail?: string;
   deliveryAddress?: string;
   deliveryZone?: MallDeliveryZone;
   note?: string;
@@ -78,6 +80,7 @@ export type MallCheckoutBody = {
 export type MallBuyerProfile = {
   name: string;
   phone: string;
+  email: string;
   address: string;
   savedAt: string;
 };

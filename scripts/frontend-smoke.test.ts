@@ -363,10 +363,13 @@ test('legacy staff routes remain recognizable for canonical redirects', () => {
   assert.deepEqual(parseRoute('/app', ''), { surface: 'staff', staffPage: undefined, legacyPath: true });
 });
 
-test('checkout validation requires a name and plausible phone', () => {
+test('checkout validation requires a name, plausible phone and an optional valid email', () => {
   assert.equal(validateBuyer('', '08031234567'), 'Please enter your name.');
   assert.equal(validateBuyer('Ada', '123'), 'Enter a valid phone number.');
   assert.equal(validateBuyer('Ada', '0803 123 4567'), '');
+  assert.equal(validateBuyer('Ada', '0803 123 4567', 'not-an-email'), 'Enter a valid email address.');
+  assert.equal(validateBuyer('Ada', '0803 123 4567', 'ada@example.com'), '');
+  assert.equal(validateBuyer('Ada', '0803 123 4567', ''), '', 'email stays optional');
 });
 
 test('fixed delivery zones expose canonical fees', () => {

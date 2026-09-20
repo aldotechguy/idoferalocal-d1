@@ -129,6 +129,7 @@ CREATE TABLE `mall_orders` (
 	`customer_id` text,
 	`customer_name` text DEFAULT '' NOT NULL,
 	`customer_phone` text,
+	`customer_email` text,
 	`status` text DEFAULT 'pending' NOT NULL,
 	`subtotal_kobo` integer DEFAULT 0 NOT NULL,
 	`delivery_fee_kobo` integer DEFAULT 0 NOT NULL,

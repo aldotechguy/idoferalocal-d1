@@ -43,7 +43,7 @@ function publicOrder(row: any, items: any[] = []) {
   const payment = publicPayment(row);
   return {
     id: s(row.id), orderNo: s(row.order_no), customerId: s(row.customer_id) || undefined,
-    customerName: s(row.customer_name), customerPhone: s(row.customer_phone), status: s(row.status, 'pending'),
+    customerName: s(row.customer_name), customerPhone: s(row.customer_phone), customerEmail: s(row.customer_email) || undefined, status: s(row.status, 'pending'),
     subtotalKobo: n(row.subtotal_kobo), deliveryFeeKobo: n(row.delivery_fee_kobo),
     discountKobo: n(row.discount_kobo), totalKobo: n(row.total_kobo), linkedSaleId: s(row.linked_sale_id) || undefined,
     delivery, payment, createdAt: s(row.created_at), itemCount: n(row.item_count),

@@ -497,6 +497,9 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
   const rawPhone = text('customerPhone', 32, true);
   const customerPhone = normalizeMallPhone(rawPhone);
   if (!customerPhone) fields.customerPhone = 'Enter a Nigerian mobile number or an international number starting with +.';
+  const rawEmail = text('customerEmail', 254);
+  const customerEmail = rawEmail.toLowerCase();
+  if (customerEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail)) fields.customerEmail = 'Enter a valid email address.';
   const deliveryAddress = text('deliveryAddress', 400);
   const note = text('note', 400);
   const rawMethod = s(body?.paymentMethod);
@@ -511,7 +514,7 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
   const deliveryFeeKobo = fixedDeliveryFeeKobo ?? 0;
   if (deliveryZone !== 'pickup' && deliveryAddress.length<10) fail(400, 'Enter a delivery address for the selected zone.',{fields:{deliveryAddress:'Enter at least 10 characters including street and area.'}});
 
-  const requestJson = JSON.stringify({ customerName, customerPhone, deliveryAddress, note, paymentMethod, deliveryZone });
+  const requestJson = JSON.stringify({ customerName, customerPhone, customerEmail, deliveryAddress, note, paymentMethod, deliveryZone });
   const attempt = (await exec.queryAll('SELECT * FROM mall_checkout_attempts WHERE attempt_key = ?', [attemptKey]))[0];
   if (attempt && (attempt.session_id !== sessionId || attempt.request_json !== requestJson)) fail(409, 'Idempotency key was already used for a different checkout.');
   const orderId = attempt?.order_id || `mo-${uuid()}`;
@@ -526,7 +529,7 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
     return json({
       ok: true, orderNo: s(existing.order_no), status: s(existing.status, 'pending'),
       items: existingItems.map((item) => ({ productId: s(item.product_id), name: s(item.product_name), unit: 'pcs', price: n(item.unit_price_kobo), qty: n(item.qty) })),
-      customerName: s(existing.customer_name), subtotalKobo: n(existing.subtotal_kobo), deliveryFeeKobo: n(existing.delivery_fee_kobo), totalKobo: n(existing.total_kobo), paymentStatus: payment?.status, paymentMethod: payment?.provider, paymentReference: payment?.reference,
+      customerName: s(existing.customer_name), customerEmail: s(existing.customer_email) || undefined, subtotalKobo: n(existing.subtotal_kobo), deliveryFeeKobo: n(existing.delivery_fee_kobo), totalKobo: n(existing.total_kobo), paymentStatus: payment?.status, paymentMethod: payment?.provider, paymentReference: payment?.reference,
       deliveryZone: mallDeliveryZone(existingDelivery.zone), deliveryLabel: s(existingDelivery.zoneLabel, mallDeliveryLabel(mallDeliveryZone(existingDelivery.zone))), quoteRequired: existingDelivery.quoteRequired === true && existingDelivery.quoteConfirmed !== true,
       paidKobo: paid, amountDueKobo: ['cancelled', 'refunded'].includes(existing.status) ? 0 : n(existing.total_kobo) - paid, createdAt: s(existing.created_at),
       instructions: publicMallConfig(exec.config),
@@ -580,11 +583,11 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
       AND ${effectivePrice('p')} = ?)`,
     [r.cart_line_id, cartId, r.product_id, r.qty, r.qty, r.price_kobo])),
     {
-    sql: `INSERT INTO mall_orders (id, order_no, customer_id, customer_name, customer_phone, status,
+    sql: `INSERT INTO mall_orders (id, order_no, customer_id, customer_name, customer_phone, customer_email, status,
             subtotal_kobo, delivery_fee_kobo, discount_kobo, total_kobo, payment_ref, delivery_address_json, linked_sale_id, created_at)
-          VALUES (?, ?, NULL, ?, ?, 'pending', ?, ?, 0, ?, NULL, ?, NULL, ?)`,
+          VALUES (?, ?, NULL, ?, ?, ?, 'pending', ?, ?, 0, ?, NULL, ?, NULL, ?)`,
     params: [
-      orderId, orderNo, customerName, customerPhone,
+      orderId, orderNo, customerName, customerPhone, customerEmail || null,
       subtotalKobo, deliveryFeeKobo, totalKobo,
       JSON.stringify({ address: deliveryAddress, note, paymentMethod, zone: deliveryZone, zoneLabel: mallDeliveryLabel(deliveryZone), quoteRequired, quoteConfirmed: !quoteRequired }),
       createdAt,
@@ -639,6 +642,7 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
       qty: it.qty,
     })),
     customerName,
+    customerEmail: customerEmail || undefined,
     subtotalKobo,
     deliveryFeeKobo,
     totalKobo,

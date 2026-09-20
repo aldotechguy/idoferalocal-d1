@@ -12,7 +12,7 @@ import { normalizedPhoneSql } from '../shared/mallPhone.js';
  * ~80 statements (and the 5 known-failing duplicate-column ALTERs) on every
  * start. See `ensureSchema` in sites-worker.ts.
  */
-export const MALL_SCHEMA_VERSION = 5;
+export const MALL_SCHEMA_VERSION = 6;
 
 export const MALL_MERCH_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: 'mall_featured', ddl: 'ALTER TABLE products ADD COLUMN mall_featured INTEGER NOT NULL DEFAULT 0' },
@@ -20,6 +20,10 @@ export const MALL_MERCH_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = 
   { name: 'mall_promo_price_kobo', ddl: 'ALTER TABLE products ADD COLUMN mall_promo_price_kobo INTEGER' },
   { name: 'mall_promo_start', ddl: 'ALTER TABLE products ADD COLUMN mall_promo_start TEXT' },
   { name: 'mall_promo_end', ddl: 'ALTER TABLE products ADD COLUMN mall_promo_end TEXT' },
+];
+
+export const MALL_ORDER_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
+  { name: 'customer_email', ddl: 'ALTER TABLE mall_orders ADD COLUMN customer_email TEXT' },
 ];
 
 export function isDuplicateColumnError(error: unknown) {
@@ -181,7 +185,7 @@ export async function drainMallOutbox(exec: MallExecutor, send: typeof fetch = f
     const changed = await exec.runBatch([{sql:"UPDATE mall_outbox SET status='sending',lease_token=?,lease_until=?,attempts=attempts+1 WHERE id=? AND ((status='pending' AND next_attempt_at<=?) OR (status='sending' AND lease_until<?))",params:[token,now+120_000,row.id,now,now]}]);
     if (!changed[0]) continue;
     try {
-      const order = row.order_id ? (await exec.queryAll(`SELECT o.order_no,o.customer_phone,o.customer_name,o.total_kobo,o.status,
+      const order = row.order_id ? (await exec.queryAll(`SELECT o.order_no,o.customer_phone,o.customer_name,o.customer_email,o.total_kobo,o.status,
         o.delivery_address_json AS fulfilment_json,p.reference AS payment_reference,p.status AS payment_status,p.provider AS payment_method
         FROM mall_orders o LEFT JOIN payments p ON p.order_id=o.id WHERE o.id=? LIMIT 1`,[row.order_id]))[0] : null;
       const body = JSON.stringify({id:row.id,event:row.event,occurredAt:row.created_at,data:JSON.parse(row.payload_json),order, instructions:publicMallConfig(config)});

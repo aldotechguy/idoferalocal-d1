@@ -18,7 +18,7 @@ import { SNAPSHOT_PUSH_DOC_LIMIT } from '../src/server/relationalSnapshot.ts';
 /** Binding-shaped test double; executes real SQL and atomic batches, not canned results.
  * This is NOT a deployed D1/workerd test. */
 class SqliteD1 {
-  constructor(readonly db: DatabaseSync) {}
+  constructor(readonly db: DatabaseSync) { }
   prepare(sql: string) {
     const db = this.db;
     return {
@@ -50,7 +50,7 @@ async function fixture(runtime: 'node' | 'worker') {
   // process; reset it so every test reads counts from its own database.
   invalidateMallFacetCache();
   const exec = makeNodeMallExecutor(db);
-  const env: any = { MALL_CHECKOUT_ENABLED:'true',MALL_PICKUP_ADDRESS:'Test pickup',MALL_PICKUP_HOURS:'Test hours', DB: new SqliteD1(db), ASSETS: { fetch: async (req: Request) => new Response(`asset:${new URL(req.url).pathname}`) } };
+  const env: any = { MALL_CHECKOUT_ENABLED: 'true', MALL_PICKUP_ADDRESS: 'Test pickup', MALL_PICKUP_HOURS: 'Test hours', DB: new SqliteD1(db), ASSETS: { fetch: async (req: Request) => new Response(`asset:${new URL(req.url).pathname}`) } };
   const send = (request: Request) => runtime === 'worker' ? worker.fetch(request, env) : handleMallApi(request, exec);
   await worker.fetch(new Request('http://test/api/mall/health'), env);
   const token = 'test-staff-session-token';
@@ -252,70 +252,70 @@ for (const runtime of ['node', 'worker'] as const) {
     assert.equal(archived.total, 0);
   });
 
-  test(`${runtime}: catalog, direct detail, description, pagination and cart concurrency`,async t=>{
-    const f=await fixture(runtime);t.after(()=>f.db.close());
+  test(`${runtime}: catalog, direct detail, description, pagination and cart concurrency`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
     f.db.exec("UPDATE products SET mall_description='Public description',mall_price_kobo=12000; INSERT INTO products(id,sku,name,stock_qty,status,is_mall_listed,retail_price_kobo,created_at,updated_at) VALUES('hidden','hidden','Hidden',10,'Active',0,100,'now','now')");
-    const detail:any=await (await f.send(new Request('http://test/api/mall/products/p'))).json();
-    assert.equal(detail.product.description,'Public description');assert.equal(detail.product.price,12000);
-    assert.equal((await f.send(new Request('http://test/api/mall/products/hidden'))).status,200);
-    const catalog:any=await (await f.send(new Request('http://test/api/mall/products?limit=1&offset=1&q=Product'))).json();
-    assert.equal(catalog.total,1);assert.equal(catalog.products.length,0);
-    const add=()=>f.send(new Request('http://test/api/mall/cart',{method:'POST',headers:{'x-mall-session':session},body:JSON.stringify({productId:'p',qty:1})}));
-    const responses=await Promise.all([add(),add()]);assert.ok(responses.every(r=>r.ok));
-    assert.equal(f.scalar('SELECT qty FROM mall_cart_items'),4);
-    const cart:any=await (await f.send(new Request('http://test/api/mall/cart',{headers:{'x-mall-session':session}}))).json();
-    assert.equal(cart.subtotalKobo,48000);
+    const detail: any = await (await f.send(new Request('http://test/api/mall/products/p'))).json();
+    assert.equal(detail.product.description, 'Public description'); assert.equal(detail.product.price, 12000);
+    assert.equal((await f.send(new Request('http://test/api/mall/products/hidden'))).status, 200);
+    const catalog: any = await (await f.send(new Request('http://test/api/mall/products?limit=1&offset=1&q=Product'))).json();
+    assert.equal(catalog.total, 1); assert.equal(catalog.products.length, 0);
+    const add = () => f.send(new Request('http://test/api/mall/cart', { method: 'POST', headers: { 'x-mall-session': session }, body: JSON.stringify({ productId: 'p', qty: 1 }) }));
+    const responses = await Promise.all([add(), add()]); assert.ok(responses.every(r => r.ok));
+    assert.equal(f.scalar('SELECT qty FROM mall_cart_items'), 4);
+    const cart: any = await (await f.send(new Request('http://test/api/mall/cart', { headers: { 'x-mall-session': session } }))).json();
+    assert.equal(cart.subtotalKobo, 48000);
   });
 
-  test(`${runtime}: private tracking, reference search, timeline and normalized matching`,async t=>{
-    const f=await fixture(runtime);t.after(()=>f.db.close());const receipt:any=await (await f.checkout()).json();
-    assert.equal((await f.send(new Request('http://test/api/mall/orders?phone=08031234567'))).status,400);
-    const track=async(phone:string)=>(await (await f.send(new Request(`http://test/api/mall/orders?orderNo=${receipt.orderNo}&phone=${encodeURIComponent(phone)}`))).json()) as any;
-    assert.equal((await track('+2348031234567')).orders.length,1);
-    assert.equal((await track('+2348031234568')).orders.length,0);
-    const search=await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders?q=${receipt.paymentReference}`),f.exec,actor);
-    assert.equal((await search.json() as any).total,1);
-    await f.op('confirm');await f.pay();
-    const result:any=await (await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${f.id()}`),f.exec,actor)).json();
-    assert.equal(result.order.timeline.length,3);
-    assert.ok(result.order.timeline.every((event:any)=>event.createdAt && event.actorId));
-    assert.equal(f.scalar('SELECT COUNT(*) FROM notifications'),1);
-    assert.equal(f.scalar('SELECT COUNT(*) FROM mall_outbox'),3);
+  test(`${runtime}: private tracking, reference search, timeline and normalized matching`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close()); const receipt: any = await (await f.checkout()).json();
+    assert.equal((await f.send(new Request('http://test/api/mall/orders?phone=08031234567'))).status, 400);
+    const track = async (phone: string) => (await (await f.send(new Request(`http://test/api/mall/orders?orderNo=${receipt.orderNo}&phone=${encodeURIComponent(phone)}`))).json()) as any;
+    assert.equal((await track('+2348031234567')).orders.length, 1);
+    assert.equal((await track('+2348031234568')).orders.length, 0);
+    const search = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders?q=${receipt.paymentReference}`), f.exec, actor);
+    assert.equal((await search.json() as any).total, 1);
+    await f.op('confirm'); await f.pay();
+    const result: any = await (await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${f.id()}`), f.exec, actor)).json();
+    assert.equal(result.order.timeline.length, 3);
+    assert.ok(result.order.timeline.every((event: any) => event.createdAt && event.actorId));
+    assert.equal(f.scalar('SELECT COUNT(*) FROM notifications'), 1);
+    assert.equal(f.scalar('SELECT COUNT(*) FROM mall_outbox'), 3);
   });
 
-  test(`${runtime}: maximum supported cart commits atomically`,async t=>{
-    const f=await fixture(runtime);t.after(()=>f.db.close());
+  test(`${runtime}: maximum supported cart commits atomically`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
     f.db.exec('DELETE FROM mall_cart_items');
-    for(let i=0;i<100;i++){
-      f.db.prepare("INSERT INTO products(id,sku,name,stock_qty,status,is_mall_listed,retail_price_kobo,created_at,updated_at) VALUES(?,?,?,2,'Active',1,100,'now','now')").run(`max-${i}`,`max-${i}`,`Max ${i}`);
-      f.db.prepare('INSERT INTO mall_cart_items(id,cart_id,product_id,qty,unit_price_kobo) VALUES(?,?,?,1,100)').run(`max-${i}`,`mc-${session}`,`max-${i}`);
+    for (let i = 0; i < 100; i++) {
+      f.db.prepare("INSERT INTO products(id,sku,name,stock_qty,status,is_mall_listed,retail_price_kobo,created_at,updated_at) VALUES(?,?,?,2,'Active',1,100,'now','now')").run(`max-${i}`, `max-${i}`, `Max ${i}`);
+      f.db.prepare('INSERT INTO mall_cart_items(id,cart_id,product_id,qty,unit_price_kobo) VALUES(?,?,?,1,100)').run(`max-${i}`, `mc-${session}`, `max-${i}`);
     }
-    assert.equal((await f.checkout()).status,201);
-    assert.equal(f.scalar('SELECT COUNT(*) FROM mall_order_items'),100);
-    assert.equal(f.scalar('SELECT COUNT(*) FROM stock_movements'),100);
+    assert.equal((await f.checkout()).status, 201);
+    assert.equal(f.scalar('SELECT COUNT(*) FROM mall_order_items'), 100);
+    assert.equal(f.scalar('SELECT COUNT(*) FROM stock_movements'), 100);
   });
 
-  test(`${runtime}: serviceability, dispatch, delivery and return record stay synchronized`,async t=>{
-    const f=await fixture(runtime);t.after(()=>f.db.close());
-    assert.equal((await f.checkout(attempt,{deliveryZone:'uyo_central',deliveryAddress:'Test street, central Uyo'})).status,201);
-    assert.equal((await f.op('confirm')).status,409);
-    assert.equal((await f.op('review-delivery',{confirmed:true},'Sales Staff')).status,403);
-    assert.equal((await f.op('review-delivery',{confirmed:true})).status,200);
-    assert.equal((await f.op('confirm')).status,200);
-    assert.equal((await f.op('collect-payment',{paymentMethod:'Cash',amountKobo:170000})).status,200);
-    assert.equal((await f.op('mark-packed')).status,200);
-    assert.equal((await f.op('mark-ready')).status,409);
-    assert.equal((await f.op('mark-out-for-delivery')).status,400);
-    assert.equal((await f.op('mark-out-for-delivery',{courier:'Test courier'})).status,200);
-    assert.equal(f.scalar('SELECT status FROM delivery_orders'),'In Transit');
-    assert.throws(()=>f.db.exec("UPDATE delivery_orders SET status='Delivered'"));
-    assert.equal((await f.op('complete')).status,200);
-    assert.equal(f.scalar('SELECT status FROM delivery_orders'),'Delivered');
-    assert.equal((await f.op('refund',{reason:'Return',returnStock:true})).status,400);
-    assert.equal((await f.op('refund',{reason:'Return',returnStock:true,returnReference:'GRN-TEST'})).status,200);
-    assert.equal(f.scalar('SELECT status FROM delivery_orders'),'Returned');
-    assert.equal(f.scalar('SELECT receipt_reference FROM mall_returns'),'GRN-TEST');
-    assert.equal(f.scalar('SELECT stock_qty FROM products'),10);
+  test(`${runtime}: serviceability, dispatch, delivery and return record stay synchronized`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    assert.equal((await f.checkout(attempt, { deliveryZone: 'uyo_central', deliveryAddress: 'Test street, central Uyo' })).status, 201);
+    assert.equal((await f.op('confirm')).status, 409);
+    assert.equal((await f.op('review-delivery', { confirmed: true }, 'Sales Staff')).status, 403);
+    assert.equal((await f.op('review-delivery', { confirmed: true })).status, 200);
+    assert.equal((await f.op('confirm')).status, 200);
+    assert.equal((await f.op('collect-payment', { paymentMethod: 'Cash', amountKobo: 170000 })).status, 200);
+    assert.equal((await f.op('mark-packed')).status, 200);
+    assert.equal((await f.op('mark-ready')).status, 409);
+    assert.equal((await f.op('mark-out-for-delivery')).status, 400);
+    assert.equal((await f.op('mark-out-for-delivery', { courier: 'Test courier' })).status, 200);
+    assert.equal(f.scalar('SELECT status FROM delivery_orders'), 'In Transit');
+    assert.throws(() => f.db.exec("UPDATE delivery_orders SET status='Delivered'"));
+    assert.equal((await f.op('complete')).status, 200);
+    assert.equal(f.scalar('SELECT status FROM delivery_orders'), 'Delivered');
+    assert.equal((await f.op('refund', { reason: 'Return', returnStock: true })).status, 400);
+    assert.equal((await f.op('refund', { reason: 'Return', returnStock: true, returnReference: 'GRN-TEST' })).status, 200);
+    assert.equal(f.scalar('SELECT status FROM delivery_orders'), 'Returned');
+    assert.equal(f.scalar('SELECT receipt_reference FROM mall_returns'), 'GRN-TEST');
+    assert.equal(f.scalar('SELECT stock_qty FROM products'), 10);
   });
   test(`${runtime}: simultaneous checkout retries return one order; new attempt permits repeat purchase`, async (t) => {
     const f = await fixture(runtime); t.after(() => f.db.close());
@@ -384,7 +384,7 @@ for (const runtime of ['node', 'worker'] as const) {
     const f = await fixture(runtime); t.after(() => f.db.close()); await f.checkout(); await f.pay();
     f.db.exec(`UPDATE mall_orders SET delivery_address_json=json_set(delivery_address_json,'$.zone','uyo_central')`);
     await f.op('mark-packed');
-    const results = await Promise.all([f.op('refund', { reason: 'Returned', returnStock: true }), f.op('mark-out-for-delivery',{courier:'Test courier'})]);
+    const results = await Promise.all([f.op('refund', { reason: 'Returned', returnStock: true }), f.op('mark-out-for-delivery', { courier: 'Test courier' })]);
     assert.deepEqual(results.map((r) => r.status).sort(), [200, 409]);
     const refunded = f.scalar('SELECT status FROM mall_orders') === 'refunded';
     assert.equal(f.scalar('SELECT stock_qty FROM products'), refunded ? 10 : 8);
@@ -454,9 +454,9 @@ for (const runtime of ['node', 'worker'] as const) {
     const f = await fixture(runtime); t.after(() => f.db.close());
     const beta = f.db.prepare(`INSERT INTO products(id,sku,name,stock_qty,status,is_mall_listed,retail_price_kobo,created_at,updated_at,brand,mall_featured,mall_display_order)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`);
-    beta.run('alpha-bucket','AB','Alpha Bucket',5,'Active',1,50000,'2020-01-01T00:00:00.000Z','2026-09-18T11:00:00.000Z','Acme',1,5);
-    beta.run('beta-jug','BJ','Beta Jug',5,'Active',1,10000,'2024-01-01T00:00:00.000Z','now','Beta',0,null);
-    beta.run('gamma-pail','GP','Gamma Pail',5,'Active',1,30000,'2022-01-01T00:00:00.000Z','2026-09-18T10:00:00.000Z','Acme',0,1);
+    beta.run('alpha-bucket', 'AB', 'Alpha Bucket', 5, 'Active', 1, 50000, '2020-01-01T00:00:00.000Z', '2026-09-18T11:00:00.000Z', 'Acme', 1, 5);
+    beta.run('beta-jug', 'BJ', 'Beta Jug', 5, 'Active', 1, 10000, '2024-01-01T00:00:00.000Z', 'now', 'Beta', 0, null);
+    beta.run('gamma-pail', 'GP', 'Gamma Pail', 5, 'Active', 1, 30000, '2022-01-01T00:00:00.000Z', '2026-09-18T10:00:00.000Z', 'Acme', 0, 1);
     const page = async (query: string) => (await (await f.send(new Request(`http://test/api/mall/products?${query}`))).json()) as any;
     const asc = await page('sort=price_asc');
     assert.deepEqual(asc.products.map((p: any) => p.id), ['beta-jug', 'p', 'gamma-pail', 'alpha-bucket']);
@@ -631,80 +631,80 @@ test('Worker static routes bypass Mall and unexpected async errors become safe r
   assert.equal(typeof body.error, 'string');
 });
 
-test('outbox signatures, exclusive leases, retry, dead letters and readiness',async t=>{
-  const f=await fixture('node');t.after(()=>f.db.close());
-  f.exec.config={MALL_CHECKOUT_ENABLED:'true',MALL_PICKUP_ADDRESS:'Test pickup',MALL_PICKUP_HOURS:'Test hours',MALL_BANK_NAME:'Test bank',MALL_BANK_ACCOUNT_NAME:'Test business',MALL_BANK_ACCOUNT_NUMBER:'0000000000',MALL_WEBHOOK_URL:'https://notifications.example.test/mall',MALL_WEBHOOK_SECRET:'test-secret-only-12345678901234567890'};
-  await f.checkout();let count=0;
-  const send:typeof fetch=async(_url,options)=>{
+test('outbox signatures, exclusive leases, retry, dead letters and readiness', async t => {
+  const f = await fixture('node'); t.after(() => f.db.close());
+  f.exec.config = { MALL_CHECKOUT_ENABLED: 'true', MALL_PICKUP_ADDRESS: 'Test pickup', MALL_PICKUP_HOURS: 'Test hours', MALL_BANK_NAME: 'Test bank', MALL_BANK_ACCOUNT_NAME: 'Test business', MALL_BANK_ACCOUNT_NUMBER: '0000000000', MALL_WEBHOOK_URL: 'https://notifications.example.test/mall', MALL_WEBHOOK_SECRET: 'test-secret-only-12345678901234567890' };
+  await f.checkout(); let count = 0;
+  const send: typeof fetch = async (_url, options) => {
     count++;
-    const headers=new Headers(options?.headers);const timestamp=headers.get('x-mall-timestamp')!;
-    assert.equal(headers.get('x-mall-signature'),`sha256=${await signMallWebhook(f.exec.config!.MALL_WEBHOOK_SECRET!,timestamp,String(options?.body))}`);
-    return new Response(null,{status:204});
+    const headers = new Headers(options?.headers); const timestamp = headers.get('x-mall-timestamp')!;
+    assert.equal(headers.get('x-mall-signature'), `sha256=${await signMallWebhook(f.exec.config!.MALL_WEBHOOK_SECRET!, timestamp, String(options?.body))}`);
+    return new Response(null, { status: 204 });
   };
-  await Promise.all([drainMallOutbox(f.exec,send),drainMallOutbox(f.exec,send)]);
-  assert.equal(count,1);assert.equal(f.scalar("SELECT status FROM mall_outbox LIMIT 1"),'delivered');
+  await Promise.all([drainMallOutbox(f.exec, send), drainMallOutbox(f.exec, send)]);
+  assert.equal(count, 1); assert.equal(f.scalar("SELECT status FROM mall_outbox LIMIT 1"), 'delivered');
   await f.op('confirm');
-  await drainMallOutbox(f.exec,async()=>new Response(null,{status:503}));
-  assert.equal(f.scalar("SELECT attempts FROM mall_outbox WHERE status='pending'"),1);
+  await drainMallOutbox(f.exec, async () => new Response(null, { status: 503 }));
+  assert.equal(f.scalar("SELECT attempts FROM mall_outbox WHERE status='pending'"), 1);
   f.db.exec("UPDATE mall_outbox SET attempts=9,next_attempt_at=0 WHERE status='pending'");
-  await drainMallOutbox(f.exec,async()=>new Response(null,{status:503}));
-  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_outbox WHERE status='dead'"),1);
-  assert.equal((await mallReadiness(f.exec)).ready,false);
-  await handleStaffMallApi(new Request('http://test/api/staff/mall-orders/retry-notifications',{method:'POST'}),f.exec,actor);
-  await runMallMaintenance(f.exec,async()=>new Response(null,{status:409}),send);
-  assert.equal((await mallReadiness(f.exec)).ready,true);
+  await drainMallOutbox(f.exec, async () => new Response(null, { status: 503 }));
+  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_outbox WHERE status='dead'"), 1);
+  assert.equal((await mallReadiness(f.exec)).ready, false);
+  await handleStaffMallApi(new Request('http://test/api/staff/mall-orders/retry-notifications', { method: 'POST' }), f.exec, actor);
+  await runMallMaintenance(f.exec, async () => new Response(null, { status: 409 }), send);
+  assert.equal((await mallReadiness(f.exec)).ready, true);
   f.db.exec('DROP TRIGGER trg_products_no_oversell');
-  assert.equal((await mallReadiness(f.exec)).ready,false);
+  assert.equal((await mallReadiness(f.exec)).ready, false);
 });
 
-test('unpaid expiry restores stock once, cleans abandoned carts and emits cancellation event',async t=>{
-  const f=await fixture('node');t.after(()=>f.db.close());await f.checkout();
+test('unpaid expiry restores stock once, cleans abandoned carts and emits cancellation event', async t => {
+  const f = await fixture('node'); t.after(() => f.db.close()); await f.checkout();
   f.db.exec("UPDATE mall_orders SET created_at='2020-01-01T00:00:00.000Z';UPDATE mall_carts SET updated_at=0");
-  const expire=(id:string)=>handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/cancel`,{method:'POST',body:JSON.stringify({reason:'Expired unpaid'})}),f.exec,actor);
-  await runMallMaintenance(f.exec,expire);await runMallMaintenance(f.exec,expire);
-  assert.equal(f.scalar('SELECT stock_qty FROM products'),10);
-  assert.equal(f.scalar('SELECT status FROM mall_orders'),'cancelled');
-  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_carts'),0);
-  assert.equal(f.scalar("SELECT status FROM mall_order_events WHERE action='CANCEL_MALL_ORDER'"),'cancelled');
+  const expire = (id: string) => handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/cancel`, { method: 'POST', body: JSON.stringify({ reason: 'Expired unpaid' }) }), f.exec, actor);
+  await runMallMaintenance(f.exec, expire); await runMallMaintenance(f.exec, expire);
+  assert.equal(f.scalar('SELECT stock_qty FROM products'), 10);
+  assert.equal(f.scalar('SELECT status FROM mall_orders'), 'cancelled');
+  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_carts'), 0);
+  assert.equal(f.scalar("SELECT status FROM mall_order_events WHERE action='CANCEL_MALL_ORDER'"), 'cancelled');
 });
 
-test('database guards reject invalid records and legacy phone expression indexes match exact values',async t=>{
-  const f=await fixture('node');t.after(()=>f.db.close());
-  assert.throws(()=>f.db.exec('UPDATE mall_cart_items SET qty=0'));
-  assert.throws(()=>f.db.exec("INSERT INTO mall_cart_items(id,cart_id,product_id,qty,unit_price_kobo) SELECT 'duplicate',cart_id,product_id,qty,unit_price_kobo FROM mall_cart_items"));
+test('database guards reject invalid records and legacy phone expression indexes match exact values', async t => {
+  const f = await fixture('node'); t.after(() => f.db.close());
+  assert.throws(() => f.db.exec('UPDATE mall_cart_items SET qty=0'));
+  assert.throws(() => f.db.exec("INSERT INTO mall_cart_items(id,cart_id,product_id,qty,unit_price_kobo) SELECT 'duplicate',cart_id,product_id,qty,unit_price_kobo FROM mall_cart_items"));
   await f.checkout();
-  assert.throws(()=>f.db.exec("UPDATE mall_orders SET status='invented'"));
-  assert.throws(()=>f.db.exec('UPDATE payments SET amount_kobo=-1'));
-  for(const input of ['0803 123 4567','2348031234567','+234 (803) 123-4567','invalid']) {
-    const value=(f.db.prepare(`SELECT ${normalizedPhoneSql('?')} AS phone`).get(...Array((normalizedPhoneSql('?').match(/\?/g)||[]).length).fill(input)) as any).phone;
-    assert.equal(value,normalizeMallPhone(input));
+  assert.throws(() => f.db.exec("UPDATE mall_orders SET status='invented'"));
+  assert.throws(() => f.db.exec('UPDATE payments SET amount_kobo=-1'));
+  for (const input of ['0803 123 4567', '2348031234567', '+234 (803) 123-4567', 'invalid']) {
+    const value = (f.db.prepare(`SELECT ${normalizedPhoneSql('?')} AS phone`).get(...Array((normalizedPhoneSql('?').match(/\?/g) || []).length).fill(input)) as any).phone;
+    assert.equal(value, normalizeMallPhone(input));
   }
   ensureRelationalSchemaNode(f.db);
-  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_orders'),1);
-  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_order_events'),1);
+  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_orders'), 1);
+  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_order_events'), 1);
 });
 
-test('trusted-IP rate limits and missing production configuration fail closed',async t=>{
-  const f=await fixture('node');t.after(()=>f.db.close());f.exec.clientIp='test-client';
-  for(let i=0;i<10;i++) await f.send(new Request('http://test/api/mall/orders'));
-  const limited=await f.send(new Request('http://test/api/mall/orders'));
-  assert.equal(limited.status,429);assert.equal(limited.headers.get('retry-after'),'60');
-  f.exec.config={};
-  assert.equal((await f.checkout()).status,503);
-    assert.equal(f.scalar('SELECT COUNT(*) FROM mall_orders'),0);
+test('trusted-IP rate limits and missing production configuration fail closed', async t => {
+  const f = await fixture('node'); t.after(() => f.db.close()); f.exec.clientIp = 'test-client';
+  for (let i = 0; i < 10; i++) await f.send(new Request('http://test/api/mall/orders'));
+  const limited = await f.send(new Request('http://test/api/mall/orders'));
+  assert.equal(limited.status, 429); assert.equal(limited.headers.get('retry-after'), '60');
+  f.exec.config = {};
+  assert.equal((await f.checkout()).status, 503);
+  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_orders'), 0);
 });
 
 test('tracking limit is stricter than checkout and only the 6th request is rejected', async (t) => {
-    // The tracking group serves `GET /api/mall/orders`, a phone+order-number
+  // The tracking group serves `GET /api/mall/orders`, a phone+order-number
   // lookup that is a phone-enumeration vector, so its cap must stay below
   // checkout's. Importing the constants directly prevents silent drift.
   assert.equal(MALL_RATE_LIMITS.tracking, 5);
   assert.equal(MALL_RATE_LIMITS.checkout, 10);
-    assert.ok(MALL_RATE_LIMITS.tracking < MALL_RATE_LIMITS.checkout);
+  assert.ok(MALL_RATE_LIMITS.tracking < MALL_RATE_LIMITS.checkout);
   assert.equal(mallRateLimitGroup('/api/mall/orders'), 'tracking');
   assert.equal(mallRateLimitFor('/api/mall/orders'), MALL_RATE_LIMITS.tracking);
   const f = await fixture('node'); t.after(() => f.db.close()); f.exec.clientIp = 'tracking-client';
-    const url = 'http://test/api/mall/orders?phone=08031234567&orderNo=ORD-TEST';
+  const url = 'http://test/api/mall/orders?phone=08031234567&orderNo=ORD-TEST';
   // First five requests within the window must not be rate-limited.
   for (let i = 0; i < 5; i++) {
     const r = await f.send(new Request(url));
@@ -726,10 +726,12 @@ test('administrator bootstrap is disabled without explicit secrets and rejects i
 test('checkout revalidates price and eligibility inside the write batch', async (t) => {
   for (const mutation of ["UPDATE products SET status='Inactive'", "UPDATE products SET status='Archived'", 'UPDATE products SET retail_price_kobo=20000', 'UPDATE mall_cart_items SET qty=3']) {
     const f = await fixture('node'); t.after(() => f.db.close());
-    const executor: MallExecutor = { ...f.exec, runBatch: async (statements) => {
-      f.db.exec(mutation);
-      return f.exec.runBatch(statements);
-    } };
+    const executor: MallExecutor = {
+      ...f.exec, runBatch: async (statements) => {
+        f.db.exec(mutation);
+        return f.exec.runBatch(statements);
+      }
+    };
     const response = await handleMallApi(new Request('http://test/api/mall/checkout', {
       method: 'POST', headers: { 'x-mall-session': session, 'idempotency-key': attempt }, body: JSON.stringify(body),
     }), executor);
@@ -762,7 +764,7 @@ test('staff merchandising validation, promotion windows, concurrency and roles',
 
   // Merchandising saves retain optimistic concurrency without changing approval flags.
   db.prepare(`INSERT INTO products(id,sku,name,stock_qty,status,is_mall_listed,retail_price_kobo,created_at,updated_at,images_json,min_selling_price_kobo)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run('sell','S','Sellable',5,'Active',0,20000,'now','now','["http://img/x.png"]',5000);
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run('sell', 'S', 'Sellable', 5, 'Active', 0, 20000, 'now', 'now', '["http://img/x.png"]', 5000);
   const merchandising = { mallPriceKobo: 15000, mallDescription: 'Fresh copy', featured: true, displayOrder: 2 };
   const first = await write('sell', merchandising);
   assert.equal(first.status, 200);
@@ -907,14 +909,14 @@ test('delta read returns only rows written after the watermark', async (t) => {
   const oldAt = Date.parse('2026-01-01T00:00:00.000Z');
   const newAt = Date.parse('2026-02-01T00:00:00.000Z');
   db.prepare('INSERT INTO app_documents(owner_id,collection,document_id,payload,updated_at) VALUES (?,?,?,?,?)')
-    .run('idofera-business', 'products', 'old', JSON.stringify({id: 'old'}), oldAt);
+    .run('idofera-business', 'products', 'old', JSON.stringify({ id: 'old' }), oldAt);
   db.prepare('INSERT INTO app_documents(owner_id,collection,document_id,payload,updated_at) VALUES (?,?,?,?,?)')
-    .run('idofera-business', 'products', 'new', JSON.stringify({id: 'new'}), newAt);
+    .run('idofera-business', 'products', 'new', JSON.stringify({ id: 'new' }), newAt);
   const cookie = { cookie: `idofera_session=${token}` };
   // Legacy ISO watermarks keep working: they bound only on `updated_at`.
   const delta = await worker.fetch(new Request(
     `http://test/api/storage/snapshot?since=${encodeURIComponent('2026-01-15T00:00:00.000Z')}`,
-    {headers: cookie},
+    { headers: cookie },
   ), env);
   assert.equal(delta.status, 200);
   const payload = await delta.json() as any;
@@ -922,7 +924,7 @@ test('delta read returns only rows written after the watermark', async (t) => {
   assert.equal(payload.bounded, false);
   assert.deepEqual(Object.keys(payload.stores || {}), ['products']);
   assert.deepEqual((payload.stores.products || []).map((record: any) => record.id), ['new']);
-  assert.deepEqual(JSON.parse(payload.cursor), {ms: newAt, collection: 'products', documentId: 'new'});
+  assert.deepEqual(JSON.parse(payload.cursor), { ms: newAt, collection: 'products', documentId: 'new' });
 });
 
 test('delta keyset never skips rows sharing one millisecond', async (t) => {
@@ -944,24 +946,24 @@ test('delta keyset never skips rows sharing one millisecond', async (t) => {
   const sharedAt = Date.parse('2026-03-01T00:00:00.000Z');
   for (const id of ['a-row', 'b-row']) {
     db.prepare('INSERT INTO app_documents(owner_id,collection,document_id,payload,updated_at) VALUES (?,?,?,?,?)')
-      .run('idofera-business', 'products', id, JSON.stringify({id}), sharedAt);
+      .run('idofera-business', 'products', id, JSON.stringify({ id }), sharedAt);
   }
   const cookie = { cookie: `idofera_session=${token}` };
   const first = await worker.fetch(new Request(
-    `http://test/api/storage/snapshot?since=${encodeURIComponent(JSON.stringify({ms: sharedAt, collection: 'products', documentId: 'a-row'}))}`,
-    {headers: cookie},
+    `http://test/api/storage/snapshot?since=${encodeURIComponent(JSON.stringify({ ms: sharedAt, collection: 'products', documentId: 'a-row' }))}`,
+    { headers: cookie },
   ), env);
   assert.equal(first.status, 200);
   const firstPayload = await first.json() as any;
   assert.deepEqual((firstPayload.stores.products || []).map((record: any) => record.id), ['b-row']);
-  assert.deepEqual(JSON.parse(firstPayload.cursor), {ms: sharedAt, collection: 'products', documentId: 'b-row'});
+  assert.deepEqual(JSON.parse(firstPayload.cursor), { ms: sharedAt, collection: 'products', documentId: 'b-row' });
 
   // An unchanged re-push writes zero rows and keeps the revision: no client
   // is forced into a full re-read for a batch that changed nothing.
   const unchanged = await worker.fetch(new Request('http://test/api/storage/records', {
     method: 'PATCH',
-    headers: {...cookie, 'content-type': 'application/json'},
-    body: JSON.stringify({upserts: [{collection: 'products', document: {id: 'b-row'}}], deletes: []}),
+    headers: { ...cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ upserts: [{ collection: 'products', document: { id: 'b-row' } }], deletes: [] }),
   }), env);
   assert.equal(unchanged.status, 200);
   const unchangedBody = await unchanged.json() as any;
@@ -986,29 +988,29 @@ test('incremental mirror keeps orphans out without rewriting unchanged lines', a
   db.prepare('INSERT INTO sync_revisions(owner_id,revision,updated_at) VALUES (?,?,?)')
     .run('idofera-business', 43, Date.now());
   const cookie = { cookie: `idofera_session=${token}` };
-  const sale = (items: {productId: string; quantity: number}[]) => ({
+  const sale = (items: { productId: string; quantity: number }[]) => ({
     id: 'sale-lines', invoiceNo: 'INV-LINES', totalAmount: 100,
-    items: items.map((item) => ({productId: item.productId, productName: item.productId, quantity: item.quantity, unitPrice: 10, total: 10 * item.quantity})),
+    items: items.map((item) => ({ productId: item.productId, productName: item.productId, quantity: item.quantity, unitPrice: 10, total: 10 * item.quantity })),
   });
   const patch = (document: unknown) => worker.fetch(new Request('http://test/api/storage/records', {
     method: 'PATCH',
-    headers: {...cookie, 'content-type': 'application/json'},
-    body: JSON.stringify({upserts: [{collection: 'sales', document}], deletes: []}),
+    headers: { ...cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ upserts: [{ collection: 'sales', document }], deletes: [] }),
   }), env);
-  assert.equal((await patch(sale([{productId: 'p-one', quantity: 1}, {productId: 'p-two', quantity: 2}]))).status, 200);
+  assert.equal((await patch(sale([{ productId: 'p-one', quantity: 1 }, { productId: 'p-two', quantity: 2 }]))).status, 200);
   assert.deepEqual(
     (db.prepare('SELECT id FROM sale_items WHERE sale_id = ? ORDER BY id').all('sale-lines') as any[]).map((row) => row.id),
     ['sale-lines-item-0', 'sale-lines-item-1'],
   );
   // Removing one line deletes only its orphan; the surviving line keeps its
   // row instead of being deleted and re-inserted by a blanket wipe.
-  assert.equal((await patch(sale([{productId: 'p-one', quantity: 1}]))).status, 200);
+  assert.equal((await patch(sale([{ productId: 'p-one', quantity: 1 }]))).status, 200);
   assert.deepEqual(
     (db.prepare('SELECT id FROM sale_items WHERE sale_id = ? ORDER BY id').all('sale-lines') as any[]).map((row) => row.id),
     ['sale-lines-item-0'],
   );
   // Re-pushing the identical document is a no-op: same revision, null cursor.
-  const repeat = await patch(sale([{productId: 'p-one', quantity: 1}]));
+  const repeat = await patch(sale([{ productId: 'p-one', quantity: 1 }]));
   assert.equal(repeat.status, 200);
   const repeatBody = await repeat.json() as any;
   assert.equal(repeatBody.skippedUnchanged, 1);
@@ -1043,11 +1045,15 @@ test('catalog facet cache is dropped by a staff product write', async (t) => {
   // within the 60s TTL the stale entry would otherwise still show the old list.
   const patch = await worker.fetch(new Request('http://test/api/storage/records', {
     method: 'PATCH',
-    headers: {...cookie, 'content-type': 'application/json'},
-    body: JSON.stringify({upserts: [{collection: 'products', document: {
-      id: 'facet-a', sku: 'FACET-A', name: 'Facet product a', category: 'Renamed',
-      brand: 'Facet Brand', unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 5,
-    }}], deletes: []}),
+    headers: { ...cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      upserts: [{
+        collection: 'products', document: {
+          id: 'facet-a', sku: 'FACET-A', name: 'Facet product a', category: 'Renamed',
+          brand: 'Facet Brand', unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 5,
+        }
+      }], deletes: []
+    }),
   }), env);
   assert.equal(patch.status, 200);
   const after = await catalog();
@@ -1073,11 +1079,15 @@ test('staff snapshot GET caps append-only history tables and reports the bound',
   // worker onto its relational snapshot read path.
   const restore = await worker.fetch(new Request('http://test/api/storage/snapshot', {
     method: 'PUT',
-    headers: {...cookie, 'content-type': 'application/json'},
-    body: JSON.stringify({ stores: { products: [{
-      id: 'cap-product', sku: 'CAP', name: 'Cap product', category: 'Caps', brand: 'Cap Brand',
-      unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 5,
-    }] }, expectedRevision: 0 }),
+    headers: { ...cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      stores: {
+        products: [{
+          id: 'cap-product', sku: 'CAP', name: 'Cap product', category: 'Caps', brand: 'Cap Brand',
+          unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 5,
+        }]
+      }, expectedRevision: 0
+    }),
   }), env);
   assert.equal(restore.status, 200);
   assert.equal((await restore.json() as any).relationalSynced, true, 'the relational mirror must succeed for the cap test');
@@ -1116,136 +1126,158 @@ test('oversized snapshot pushes are rejected before any write', async (t) => {
   const cookie = { cookie: `idofera_session=${token}` };
 
 
-test('email webhook verifies the signature, dedupes retries and skips heartbeats', async (t) => {
-  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
-  const secret = 'safety-webhook-secret';
-  const env: any = {
-    DB: new SqliteD1(db),
-    ASSETS: { fetch: async () => new Response('asset') },
-    MALL_WEBHOOK_SECRET: secret,
-    MALL_NOTIFY_EMAIL: 'owner@test.invalid',
-    MALL_EMAIL_FROM: 'Mall Orders <orders@verified.test>',
-    RESEND_API_KEY: 're_safety_key',
-  };
-  // Resend is an outbound HTTP call, so the only seam is global fetch.
-  const sent: { from: string; to: string[]; subject: string; html: string }[] = [];
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
-    sent.push(JSON.parse(String(init.body)));
-    return new Response(JSON.stringify({ id: 'resend-1' }), { status: 200, headers: { 'content-type': 'application/json' } });
-  }) as unknown as typeof fetch;
-  t.after(() => { globalThis.fetch = realFetch; });
+  test('email webhook verifies the signature, dedupes retries and skips heartbeats', async (t) => {
+    const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+    const secret = 'safety-webhook-secret';
+    const env: any = {
+      DB: new SqliteD1(db),
+      ASSETS: { fetch: async () => new Response('asset') },
+      MALL_WEBHOOK_SECRET: secret,
+      MALL_NOTIFY_EMAIL: 'owner@test.invalid',
+      MALL_EMAIL_FROM: 'Mall Orders <orders@verified.test>',
+      RESEND_API_KEY: 're_safety_key',
+    };
+    // Resend is an outbound HTTP call, so the only seam is global fetch.
+    const sent: { from: string; to: string[]; subject: string; html: string }[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
+      sent.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({ id: 'resend-1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    t.after(() => { globalThis.fetch = realFetch; });
 
-  const post = async (
-    payload: Record<string, unknown>,
-    options: { secret?: string; at?: number; target?: any } = {},
-  ) => {
-    const raw = JSON.stringify(payload);
-    const at = String(options.at ?? Math.floor(Date.now() / 1000));
-    const signature = await signMallWebhook(options.secret ?? secret, at, raw);
-    return worker.fetch(new Request('http://test/api/mall-webhook', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-mall-timestamp': at, 'x-mall-signature': `sha256=${signature}` },
-      body: raw,
-    }), options.target ?? env);
-  };
+    const post = async (
+      payload: Record<string, unknown>,
+      options: { secret?: string; at?: number; target?: any } = {},
+    ) => {
+      const raw = JSON.stringify(payload);
+      const at = String(options.at ?? Math.floor(Date.now() / 1000));
+      const signature = await signMallWebhook(options.secret ?? secret, at, raw);
+      return worker.fetch(new Request('http://test/api/mall-webhook', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-mall-timestamp': at, 'x-mall-signature': `sha256=${signature}` },
+        body: raw,
+      }), options.target ?? env);
+    };
 
-  const event = {
-    id: 'created:mall-order-1',
-    event: 'ORDER_RECEIVED',
-    occurredAt: '2026-06-01T00:00:00.000Z',
-    data: { orderNo: 'MALL-1', status: 'pending' },
-    order: {
-      order_no: 'MALL-1', customer_name: 'Ada', customer_phone: '08031234567',
-      total_kobo: 20000, status: 'pending', payment_status: 'pending', payment_method: 'pay_on_pickup',
-    },
-  };
+    const event = {
+      id: 'created:mall-order-1',
+      event: 'ORDER_RECEIVED',
+      occurredAt: '2026-06-01T00:00:00.000Z',
+      data: { orderNo: 'MALL-1', status: 'pending' },
+      order: {
+        order_no: 'MALL-1', customer_name: 'Ada', customer_phone: '08031234567',
+        total_kobo: 20000, status: 'pending', payment_status: 'pending', payment_method: 'pay_on_pickup',
+      },
+    };
 
-  // A forged signature and a replayed old timestamp must never reach Resend.
-  assert.equal((await post(event, { secret: 'wrong-secret' })).status, 401);
-  assert.equal((await post(event, { at: Math.floor(Date.now() / 1000) - 3600 })).status, 400);
-  assert.equal(sent.length, 0, 'unauthenticated calls must not send email');
+    // A forged signature and a replayed old timestamp must never reach Resend.
+    assert.equal((await post(event, { secret: 'wrong-secret' })).status, 401);
+    assert.equal((await post(event, { at: Math.floor(Date.now() / 1000) - 3600 })).status, 400);
+    assert.equal(sent.length, 0, 'unauthenticated calls must not send email');
 
-  const first = await post(event);
-  assert.equal(first.status, 200);
-  assert.equal((await first.json() as any).status, 'sent');
-  assert.equal(sent.length, 1);
-  assert.deepEqual(sent[0].to, ['owner@test.invalid']);
-  assert.equal(sent[0].from, 'Mall Orders <orders@verified.test>', 'the From address is operator configurable');
-  assert.match(sent[0].subject, /Order received . Order MALL-1/);
-  assert.match(sent[0].html, /Ada/, 'the operator email must carry the order detail');
+    const first = await post(event);
+    assert.equal(first.status, 200);
+    assert.equal((await first.json() as any).status, 'sent');
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0].to, ['owner@test.invalid']);
+    assert.equal(sent[0].from, 'Mall Orders <orders@verified.test>', 'the From address is operator configurable');
+    assert.match(sent[0].subject, /Order received . Order MALL-1/);
+    assert.match(sent[0].html, /Ada/, 'the operator email must carry the order detail');
 
-  // The drain retries until it sees a 2xx, so a repeat of the same outbox row
-  // must be a no-op rather than a second email.
-  const replay = await post(event);
-  assert.equal(replay.status, 200);
-  assert.equal((await replay.json() as any).status, 'already_delivered');
-  assert.equal(sent.length, 1);
+    // The drain retries until it sees a 2xx, so a repeat of the same outbox row
+    // must be a no-op rather than a second email.
+    const replay = await post(event);
+    assert.equal(replay.status, 200);
+    assert.equal((await replay.json() as any).status, 'already_delivered');
+    assert.equal(sent.length, 1);
 
-  // The hourly heartbeat proves the signed wire is up without emailing.
-  const heartbeat = await post({ id: 'heartbeat:2026-06-01T00', event: 'MALL_HEARTBEAT' });
-  assert.equal(heartbeat.status, 200);
-  assert.equal((await heartbeat.json() as any).status, 'acknowledged');
-  assert.equal(sent.length, 1);
+    // The hourly heartbeat proves the signed wire is up without emailing.
+    const heartbeat = await post({ id: 'heartbeat:2026-06-01T00', event: 'MALL_HEARTBEAT' });
+    assert.equal(heartbeat.status, 200);
+    assert.equal((await heartbeat.json() as any).status, 'acknowledged');
+    assert.equal(sent.length, 1);
 
-  // Missing Resend credentials fail loudly (503 so the outbox retries) instead
-  // of reporting a delivery that never happened.
-  const unconfigured = await post({ ...event, id: 'created:mall-order-2' }, { target: { ...env, RESEND_API_KEY: undefined } });
-  assert.equal(unconfigured.status, 503);
-  assert.equal(sent.length, 1);
+    // Missing Resend credentials fail loudly (503 so the outbox retries) instead
+    // of reporting a delivery that never happened.
+    const unconfigured = await post({ ...event, id: 'created:mall-order-2' }, { target: { ...env, RESEND_API_KEY: undefined } });
+    assert.equal(unconfigured.status, 503);
+    assert.equal(sent.length, 1);
 
-  // With no configured sender we fall back to Resend's sandbox address instead
-  // of an unverifiable @workers.dev address that Resend would reject.
-  const fallback = await post({ ...event, id: 'created:mall-order-3' }, { target: { ...env, MALL_EMAIL_FROM: undefined } });
-  assert.equal(fallback.status, 200);
-  assert.equal(sent.length, 2);
-  assert.match(sent[1].from, /onboarding@resend\.dev>$/);
-});
+    // With no configured sender we fall back to Resend's sandbox address instead
+    // of an unverifiable @workers.dev address that Resend would reject.
+    const fallback = await post({ ...event, id: 'created:mall-order-3' }, { target: { ...env, MALL_EMAIL_FROM: undefined } });
+    assert.equal(fallback.status, 200);
+    assert.equal(sent.length, 2);
+    assert.match(sent[1].from, /onboarding@resend\.dev>$/);
 
-test('the scheduled drain turns a new order into one operator email', async (t) => {
-  const f = await fixture('worker'); t.after(() => f.db.close());
-  const env: any = {
-    ...f.env,
-    MALL_WEBHOOK_URL: 'https://idomall.example.test/api/mall-webhook',
-    MALL_WEBHOOK_SECRET: 'scheduler-webhook-secret-0123456789abcdef',
-    MALL_NOTIFY_EMAIL: 'owner@test.invalid',
-    MALL_EMAIL_FROM: 'Mall Orders <orders@verified.test>',
-    RESEND_API_KEY: 're_scheduler_key',
-  };
-  // Only Resend is outbound; the drain must NOT reach back over the network to
-  // its own MALL_WEBHOOK_URL (Cloudflare answers a self-subrequest with 1042).
-  const sent: any[] = [];
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
-    sent.push(JSON.parse(String(init.body)));
-    return new Response(JSON.stringify({ id: 'resend-1' }), { status: 200, headers: { 'content-type': 'application/json' } });
-  }) as unknown as typeof fetch;
-  t.after(() => { globalThis.fetch = realFetch; });
+    // An order that carried a customer email produces a second, customer-facing
+    // copy: same event, different recipient and friendlier template.
+    const withCustomer = await post({ ...event, id: 'created:mall-order-4', order: { ...event.order, customer_email: 'ADA@Example.com' } });
+    assert.equal(withCustomer.status, 200);
+    assert.equal((await withCustomer.json() as any).customer, 'sent');
+    assert.equal(sent.length, 4, 'operator email first, then the customer copy');
+    assert.deepEqual(sent[2].to, ['owner@test.invalid']);
+    assert.deepEqual(sent[3].to, ['ada@example.com']);
+    assert.match(sent[3].subject, /your order MALL-1/);
+    assert.match(sent[3].html, /Hi Ada/, 'the customer copy greets the buyer by name');
+    assert.doesNotMatch(sent[3].html, /customer_phone|payment_reference/, 'the customer copy stays free of internal plumbing');
 
-  const placed = await f.checkout();
-  assert.equal(placed.status, 201);
-  const receipt = await placed.json() as { orderNo: string };
-  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_outbox WHERE event='ORDER_RECEIVED' AND status='pending'"), 1);
-  assert.equal(sent.length, 0, 'nothing is emailed until the scheduler runs');
+    // A malformed stored address is skipped (and reported) rather than emailed.
+    const badCustomer = await post({ ...event, id: 'created:mall-order-5', order: { ...event.order, customer_email: 'not-an-email' } });
+    assert.equal(badCustomer.status, 200);
+    assert.equal((await badCustomer.json() as any).customer, 'skipped');
+    assert.equal(sent.length, 5);
+    assert.deepEqual(sent[4].to, ['owner@test.invalid'], 'the operator copy is unaffected by a bad customer address');
+  });
 
-  await worker.scheduled({}, env);
-  assert.equal(sent.length, 1, 'the drain must deliver exactly one email per order event');
-  assert.equal(sent[0].to[0], 'owner@test.invalid');
-  assert.match(sent[0].subject, new RegExp(`Order ${receipt.orderNo}`));
-  assert.equal(f.scalar("SELECT status FROM mall_outbox WHERE event='ORDER_RECEIVED'"), 'delivered');
+  test('the scheduled drain emails the operator and the customer copy', async (t) => {
+    const f = await fixture('worker'); t.after(() => f.db.close());
+    const env: any = {
+      ...f.env,
+      MALL_WEBHOOK_URL: 'https://idomall.example.test/api/mall-webhook',
+      MALL_WEBHOOK_SECRET: 'scheduler-webhook-secret-0123456789abcdef',
+      MALL_NOTIFY_EMAIL: 'owner@test.invalid',
+      MALL_EMAIL_FROM: 'Mall Orders <orders@verified.test>',
+      RESEND_API_KEY: 're_scheduler_key',
+    };
+    // Only Resend is outbound; the drain must NOT reach back over the network to
+    // its own MALL_WEBHOOK_URL (Cloudflare answers a self-subrequest with 1042).
+    const sent: any[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
+      sent.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({ id: 'resend-1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    t.after(() => { globalThis.fetch = realFetch; });
 
-  // The hourly heartbeat keeps the signed wire warm without emailing, which is
-  // what stops one notification per hour forever.
-  await worker.scheduled({}, env);
-  await worker.scheduled({}, env);
-  assert.equal(sent.length, 1, 'heartbeats must never email the operator');
-  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_outbox WHERE status='dead'"), 0);
-});
+    const placed = await f.checkout(attempt, { customerEmail: 'ada@example.com' });
+    assert.equal(placed.status, 201);
+    const receipt = await placed.json() as { orderNo: string; customerEmail?: string };
+    assert.equal(receipt.customerEmail, 'ada@example.com', 'the checkout response echoes the stored email');
+    assert.equal(f.scalar("SELECT COUNT(*) FROM mall_outbox WHERE event='ORDER_RECEIVED' AND status='pending'"), 1);
+    assert.equal(sent.length, 0, 'nothing is emailed until the scheduler runs');
+
+    await worker.scheduled({}, env);
+    assert.equal(sent.length, 2, 'one order event must email the operator and the customer copy');
+    assert.equal(sent[0].to[0], 'owner@test.invalid');
+    assert.match(sent[0].subject, new RegExp(`Order ${receipt.orderNo}`));
+    assert.equal(sent[1].to[0], 'ada@example.com');
+    assert.match(sent[1].subject, new RegExp(`your order ${receipt.orderNo}`));
+    assert.equal(f.scalar("SELECT status FROM mall_outbox WHERE event='ORDER_RECEIVED'"), 'delivered');
+
+    // The hourly heartbeat keeps the signed wire warm without emailing, which is
+    // what stops one notification per hour forever.
+    await worker.scheduled({}, env);
+    await worker.scheduled({}, env);
+    assert.equal(sent.length, 2, 'heartbeats must never email anyone');
+    assert.equal(f.scalar("SELECT COUNT(*) FROM mall_outbox WHERE status='dead'"), 0);
+  });
 
   const documents = Array.from({ length: SNAPSHOT_PUSH_DOC_LIMIT + 1 }, (_, i) => ({ id: `bulk-${i}`, name: 'Bulk' }));
   const oversized = await worker.fetch(new Request('http://test/api/storage/snapshot', {
     method: 'PUT',
-    headers: {...cookie, 'content-type': 'application/json'},
+    headers: { ...cookie, 'content-type': 'application/json' },
     body: JSON.stringify({ stores: { products: documents }, expectedRevision: 0 }),
   }), env);
   assert.equal(oversized.status, 413);
@@ -1255,11 +1287,15 @@ test('the scheduled drain turns a new order into one operator email', async (t) 
   // A bounded restore still succeeds right after the rejection.
   const restore = await worker.fetch(new Request('http://test/api/storage/snapshot', {
     method: 'PUT',
-    headers: {...cookie, 'content-type': 'application/json'},
-    body: JSON.stringify({ stores: { products: [{
-      id: 'small-1', sku: 'SMALL-1', name: 'Small product', category: 'Caps', brand: 'Cap Brand',
-      unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 1,
-    }] }, expectedRevision: 0 }),
+    headers: { ...cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      stores: {
+        products: [{
+          id: 'small-1', sku: 'SMALL-1', name: 'Small product', category: 'Caps', brand: 'Cap Brand',
+          unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 1,
+        }]
+      }, expectedRevision: 0
+    }),
   }), env);
   assert.equal(restore.status, 200);
   const after = await (await worker.fetch(new Request('http://test/api/storage/snapshot?fresh=true', { headers: cookie }), env)).json() as any;
