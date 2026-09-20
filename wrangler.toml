@@ -59,7 +59,7 @@ MALL_PICKUP_HOURS = "10AM - 6PM"
   # Sender for order emails. `onboarding@resend.dev` is Resend's sandbox sender
   # (verified-domain-free, but it may only deliver to the Resend account owner).
   # Replace with an address on a domain you verified in Resend.
-  MALL_EMAIL_FROM = "Mall Orders <onboarding@resend.dev>"
+  MALL_EMAIL_FROM = "Mall Orders <orders@idofera.de5.net>"
   # MALL_WEBHOOK_SECRET, MALL_NOTIFY_EMAIL and RESEND_API_KEY are Wrangler
   # secrets (never committed): `npx wrangler secret put --env mall <NAME>`.
   # The scheduled drain signs each outbox POST with MALL_WEBHOOK_SECRET and
