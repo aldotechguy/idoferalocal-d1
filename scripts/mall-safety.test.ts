@@ -1115,6 +1115,133 @@ test('oversized snapshot pushes are rejected before any write', async (t) => {
     .run(hash, 'limit-staff', Date.now(), Date.now() + 60000);
   const cookie = { cookie: `idofera_session=${token}` };
 
+
+test('email webhook verifies the signature, dedupes retries and skips heartbeats', async (t) => {
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  const secret = 'safety-webhook-secret';
+  const env: any = {
+    DB: new SqliteD1(db),
+    ASSETS: { fetch: async () => new Response('asset') },
+    MALL_WEBHOOK_SECRET: secret,
+    MALL_NOTIFY_EMAIL: 'owner@test.invalid',
+    MALL_EMAIL_FROM: 'Mall Orders <orders@verified.test>',
+    RESEND_API_KEY: 're_safety_key',
+  };
+  // Resend is an outbound HTTP call, so the only seam is global fetch.
+  const sent: { from: string; to: string[]; subject: string; html: string }[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
+    sent.push(JSON.parse(String(init.body)));
+    return new Response(JSON.stringify({ id: 'resend-1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+
+  const post = async (
+    payload: Record<string, unknown>,
+    options: { secret?: string; at?: number; target?: any } = {},
+  ) => {
+    const raw = JSON.stringify(payload);
+    const at = String(options.at ?? Math.floor(Date.now() / 1000));
+    const signature = await signMallWebhook(options.secret ?? secret, at, raw);
+    return worker.fetch(new Request('http://test/api/mall-webhook', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mall-timestamp': at, 'x-mall-signature': `sha256=${signature}` },
+      body: raw,
+    }), options.target ?? env);
+  };
+
+  const event = {
+    id: 'created:mall-order-1',
+    event: 'ORDER_RECEIVED',
+    occurredAt: '2026-06-01T00:00:00.000Z',
+    data: { orderNo: 'MALL-1', status: 'pending' },
+    order: {
+      order_no: 'MALL-1', customer_name: 'Ada', customer_phone: '08031234567',
+      total_kobo: 20000, status: 'pending', payment_status: 'pending', payment_method: 'pay_on_pickup',
+    },
+  };
+
+  // A forged signature and a replayed old timestamp must never reach Resend.
+  assert.equal((await post(event, { secret: 'wrong-secret' })).status, 401);
+  assert.equal((await post(event, { at: Math.floor(Date.now() / 1000) - 3600 })).status, 400);
+  assert.equal(sent.length, 0, 'unauthenticated calls must not send email');
+
+  const first = await post(event);
+  assert.equal(first.status, 200);
+  assert.equal((await first.json() as any).status, 'sent');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].to, ['owner@test.invalid']);
+  assert.equal(sent[0].from, 'Mall Orders <orders@verified.test>', 'the From address is operator configurable');
+  assert.match(sent[0].subject, /Order received . Order MALL-1/);
+  assert.match(sent[0].html, /Ada/, 'the operator email must carry the order detail');
+
+  // The drain retries until it sees a 2xx, so a repeat of the same outbox row
+  // must be a no-op rather than a second email.
+  const replay = await post(event);
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json() as any).status, 'already_delivered');
+  assert.equal(sent.length, 1);
+
+  // The hourly heartbeat proves the signed wire is up without emailing.
+  const heartbeat = await post({ id: 'heartbeat:2026-06-01T00', event: 'MALL_HEARTBEAT' });
+  assert.equal(heartbeat.status, 200);
+  assert.equal((await heartbeat.json() as any).status, 'acknowledged');
+  assert.equal(sent.length, 1);
+
+  // Missing Resend credentials fail loudly (503 so the outbox retries) instead
+  // of reporting a delivery that never happened.
+  const unconfigured = await post({ ...event, id: 'created:mall-order-2' }, { target: { ...env, RESEND_API_KEY: undefined } });
+  assert.equal(unconfigured.status, 503);
+  assert.equal(sent.length, 1);
+
+  // With no configured sender we fall back to Resend's sandbox address instead
+  // of an unverifiable @workers.dev address that Resend would reject.
+  const fallback = await post({ ...event, id: 'created:mall-order-3' }, { target: { ...env, MALL_EMAIL_FROM: undefined } });
+  assert.equal(fallback.status, 200);
+  assert.equal(sent.length, 2);
+  assert.match(sent[1].from, /onboarding@resend\.dev>$/);
+});
+
+test('the scheduled drain turns a new order into one operator email', async (t) => {
+  const f = await fixture('worker'); t.after(() => f.db.close());
+  const env: any = {
+    ...f.env,
+    MALL_WEBHOOK_URL: 'https://idomall.example.test/api/mall-webhook',
+    MALL_WEBHOOK_SECRET: 'scheduler-webhook-secret-0123456789abcdef',
+    MALL_NOTIFY_EMAIL: 'owner@test.invalid',
+    MALL_EMAIL_FROM: 'Mall Orders <orders@verified.test>',
+    RESEND_API_KEY: 're_scheduler_key',
+  };
+  // Only Resend is outbound; the drain must NOT reach back over the network to
+  // its own MALL_WEBHOOK_URL (Cloudflare answers a self-subrequest with 1042).
+  const sent: any[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
+    sent.push(JSON.parse(String(init.body)));
+    return new Response(JSON.stringify({ id: 'resend-1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+
+  const placed = await f.checkout();
+  assert.equal(placed.status, 201);
+  const receipt = await placed.json() as { orderNo: string };
+  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_outbox WHERE event='ORDER_RECEIVED' AND status='pending'"), 1);
+  assert.equal(sent.length, 0, 'nothing is emailed until the scheduler runs');
+
+  await worker.scheduled({}, env);
+  assert.equal(sent.length, 1, 'the drain must deliver exactly one email per order event');
+  assert.equal(sent[0].to[0], 'owner@test.invalid');
+  assert.match(sent[0].subject, new RegExp(`Order ${receipt.orderNo}`));
+  assert.equal(f.scalar("SELECT status FROM mall_outbox WHERE event='ORDER_RECEIVED'"), 'delivered');
+
+  // The hourly heartbeat keeps the signed wire warm without emailing, which is
+  // what stops one notification per hour forever.
+  await worker.scheduled({}, env);
+  await worker.scheduled({}, env);
+  assert.equal(sent.length, 1, 'heartbeats must never email the operator');
+  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_outbox WHERE status='dead'"), 0);
+});
+
   const documents = Array.from({ length: SNAPSHOT_PUSH_DOC_LIMIT + 1 }, (_, i) => ({ id: `bulk-${i}`, name: 'Bulk' }));
   const oversized = await worker.fetch(new Request('http://test/api/storage/snapshot', {
     method: 'PUT',

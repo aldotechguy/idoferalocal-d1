@@ -12,7 +12,7 @@ import { normalizedPhoneSql } from '../shared/mallPhone.js';
  * ~80 statements (and the 5 known-failing duplicate-column ALTERs) on every
  * start. See `ensureSchema` in sites-worker.ts.
  */
-export const MALL_SCHEMA_VERSION = 4;
+export const MALL_SCHEMA_VERSION = 5;
 
 export const MALL_MERCH_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: 'mall_featured', ddl: 'ALTER TABLE products ADD COLUMN mall_featured INTEGER NOT NULL DEFAULT 0' },
@@ -47,6 +47,8 @@ export const MALL_OPERATIONS_DDL = [
   `CREATE TABLE IF NOT EXISTS mall_metrics(day TEXT NOT NULL, metric TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(day,metric))`,
   `CREATE TABLE IF NOT EXISTS mall_rate_limits(key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS mall_returns(order_id TEXT PRIMARY KEY, disposition TEXT NOT NULL CHECK(disposition IN ('restocked','not_restocked')), receipt_reference TEXT NOT NULL, reason TEXT NOT NULL, actor_id TEXT NOT NULL, created_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS mall_webhook_deliveries(id TEXT PRIMARY KEY, event_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('sent','failed')), error TEXT, delivered_at TEXT)`,
+  `CREATE INDEX IF NOT EXISTS idx_mall_webhook_event ON mall_webhook_deliveries(event_id, delivered_at)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_mall_cart_product_unique ON mall_cart_items(cart_id,product_id)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_mall_active_session ON mall_carts(session_id) WHERE status='active' AND session_id IS NOT NULL`,
   `CREATE INDEX IF NOT EXISTS idx_mall_normalized_phone ON mall_orders(${phone})`,
@@ -188,9 +190,13 @@ export async function drainMallOutbox(exec: MallExecutor, send: typeof fetch = f
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       await response.body?.cancel();
       await exec.runBatch([{sql:"UPDATE mall_outbox SET status='delivered',delivered_at=?,lease_token=NULL,lease_until=NULL,last_error=NULL WHERE id=? AND lease_token=?",params:[new Date().toISOString(),row.id,token]}]);
-    } catch {
+    } catch (error) {
       const attempts = row.attempts + 1;
-      await exec.runBatch([{sql:"UPDATE mall_outbox SET status=?,next_attempt_at=?,lease_token=NULL,lease_until=NULL,last_error='Webhook delivery failed' WHERE id=? AND lease_token=?",params:[attempts>=10?'dead':'pending',now+Math.min(3600,2**attempts*30)*1000,row.id,token]}]);
+      // Persist the real cause. The old constant string made the queue
+      // undiagnosable: "Webhook delivery failed" was identical for an HTTP 401,
+      // a DNS failure, and a receiver that threw before answering.
+      const reason = `Delivery failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200);
+      await exec.runBatch([{sql:"UPDATE mall_outbox SET status=?,next_attempt_at=?,lease_token=NULL,lease_until=NULL,last_error=? WHERE id=? AND lease_token=?",params:[attempts>=10?'dead':'pending',now+Math.min(3600,2**attempts*30)*1000,reason,row.id,token]}]);
     }
   }
 }

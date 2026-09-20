@@ -16,6 +16,9 @@ interface Env extends MallConfig {
   BOOTSTRAP_ADMIN_EMAIL?: string;
   BOOTSTRAP_ADMIN_USERNAME?: string;
   BOOTSTRAP_ADMIN_PASSWORD?: string;
+  RESEND_API_KEY?: string;
+  MALL_NOTIFY_EMAIL?: string;
+  MALL_EMAIL_FROM?: string;
 }
 
 interface D1PreparedStatement {
@@ -46,7 +49,7 @@ import { handleStaffMallApi, maintainMall } from './src/server/mallOrderAdminApi
 import { handleStaffMallListingApi } from './src/server/mallListingApi.js';
 import { handleStaffProductImageApi, handlePublicImageRequest } from './src/server/productImageApi.js';
 import type { ImageStore } from './src/server/imageStore.js';
-import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, MALL_SCHEMA_VERSION, isDuplicateColumnError, type MallConfig } from './src/server/mallOperations.js';
+import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, MALL_SCHEMA_VERSION, isDuplicateColumnError, signMallWebhook, type MallConfig } from './src/server/mallOperations.js';
 import { MALL_SAFETY_DDL, MALL_CATALOG_INDEX_COLUMNS, MALL_CATALOG_INDEXES } from './src/server/mallSafety.js';
 import { bootstrapAdmin } from './src/server/adminBootstrap.js';
 import type { QueryAll } from './src/server/relationalMapper.js';
@@ -128,6 +131,204 @@ function safeEqual(left: string, right: string) {
   let mismatch = 0;
   for (let i = 0; i < left.length; i += 1) mismatch |= left.charCodeAt(i) ^ right.charCodeAt(i);
   return mismatch === 0;
+}
+
+/** Human-readable label for the known Mall outbox events. */
+const MALL_EVENT_LABELS: Record<string, string> = {
+  ORDER_RECEIVED: 'Order received',
+  ORDER_PAID: 'Payment confirmed',
+  ORDER_DISPATCHED: 'Order dispatched',
+  ORDER_DELIVERED: 'Order delivered',
+  ORDER_CANCELLED: 'Order cancelled',
+  ORDER_REFUNDED: 'Order refunded',
+};
+
+interface MallWebhookOrder {
+  order_no?: string;
+  customer_phone?: string;
+  customer_name?: string;
+  total_kobo?: number;
+  status?: string;
+  delivery_address_json?: string;
+  payment_status?: string;
+  payment_method?: string;
+}
+
+interface MallWebhookBody {
+  id: string;
+  event: string;
+  occurredAt?: string;
+  data?: Record<string, unknown>;
+  order?: MallWebhookOrder;
+  instructions?: Record<string, unknown>;
+}
+
+/** #18 — email notification webhook receiver for the Mall. */
+async function handleMallWebhook(request: Request, env: Env): Promise<Response> {
+  const bodyText = await request.text();
+
+  // Verify HMAC signature using the constant-time helper.
+  const secret = env.MALL_WEBHOOK_SECRET || '';
+  const expectedSig = request.headers.get('x-mall-signature') || '';
+  const providedSig = expectedSig.startsWith('sha256=') ? expectedSig.slice(7) : expectedSig;
+  const timestampHeader = request.headers.get('x-mall-timestamp') || '';
+  const expected = await signMallWebhook(secret, timestampHeader, bodyText);
+  if (!providedSig || !safeEqual(providedSig, expected)) {
+    return json({ error: 'Signature verification failed.' }, 401);
+  }
+
+  // Reject stale timestamps (>5 min old).
+  const ts = Number(timestampHeader);
+  if (Number.isNaN(ts) || Math.abs(Date.now() / 1000 - ts) > 300) {
+    return json({ error: 'Request timestamp outside tolerance window.' }, 400);
+  }
+
+  let parsed: MallWebhookBody;
+  try {
+    parsed = JSON.parse(bodyText) as MallWebhookBody;
+  } catch {
+    return json({ error: 'Invalid JSON body.' }, 400);
+  }
+
+  if (!parsed.id) return json({ error: 'Missing event id.' }, 400);
+
+  // Idempotency: an outbox row id is stable across retries, so the event id is
+  // the dedupe key. `delivered_at` is ISO-8601 text, so the 7-day window is an
+  // ISO string too — comparing text against epoch millis would compare across
+  // SQLite storage classes and never expire.
+  const existing = await env.DB.prepare(
+    'SELECT id FROM mall_webhook_deliveries WHERE event_id=? AND delivered_at >= ? LIMIT 1',
+  ).bind(parsed.id, new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString()).all<{ id: string }>();
+  if (existing.results && existing.results.length > 0) {
+    return json({ status: 'already_delivered' });
+  }
+
+  // Delivery bookkeeping is deliberately best-effort: a failed audit insert must
+  // never fail the delivery, or the outbox would retry and email twice. Writes
+  // use .run() like the rest of this Worker (D1 executes writes that way).
+  const record = async (sql: string, params: unknown[]) => {
+    try { await env.DB.prepare(sql).bind(...params).run(); } catch { /* audit only */ }
+  };
+
+  // MALL_HEARTBEAT is an hourly liveness probe, not a customer event: it proves
+  // the signed wire is up but must not email the operator 24 times a day.
+  if (parsed.event === 'MALL_HEARTBEAT') {
+    await record(
+      'INSERT INTO mall_webhook_deliveries(id,event_id,event,status,delivered_at) VALUES(?,?,?,?,?)',
+      [crypto.randomUUID(), parsed.id, parsed.event, 'sent', new Date().toISOString()],
+    );
+    return json({ status: 'acknowledged', event: parsed.event });
+  }
+
+  // Build the email and send via Resend.
+  const to = env.MALL_NOTIFY_EMAIL;
+  if (!to || !env.RESEND_API_KEY) {
+    return json({ error: 'Email notification is not fully configured on the Worker.' }, 503);
+  }
+
+  const label = MALL_EVENT_LABELS[parsed.event] || parsed.event;
+  const order = parsed.order || {};
+  const totalNgn = order.total_kobo
+    ? (order.total_kobo / 100).toLocaleString('en-NG', { style: 'currency', currency: 'NGN' })
+    : '—';
+  const subject = `[Mall] ${label} — Order ${order.order_no || parsed.id}`;
+  const html = emailTemplate({
+    event: parsed.event, label,
+    orderNo: order.order_no || 'unknown',
+    customerName: order.customer_name || 'unknown',
+    customerPhone: order.customer_phone || 'unavailable',
+    totalNgn,
+    status: order.status,
+    paymentStatus: order.payment_status || 'unavailable',
+    paymentMethod: order.payment_method || 'unavailable',
+    occurredAt: parsed.occurredAt,
+    instructions: parsed.instructions,
+  });
+
+  const resendRes = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+    },
+    body: JSON.stringify({
+      // Resend only accepts senders on a domain you have verified. Until a real
+      // domain is verified, `onboarding@resend.dev` is the sandbox sender (it can
+      // only deliver to the Resend account owner's own address).
+      from: env.MALL_EMAIL_FROM || 'Mall Orders <onboarding@resend.dev>',
+      to: [to],
+      subject,
+      html,
+    }),
+  });
+
+  const deliveryId = crypto.randomUUID();
+  if (!resendRes.ok) {
+    const errText = await resendRes.text();
+    await record(
+      'INSERT INTO mall_webhook_deliveries(id,event_id,event,status,error,delivered_at) VALUES(?,?,?,?,?,?)',
+      [deliveryId, parsed.id, parsed.event, 'failed', errText, null],
+    );
+    return json({ error: 'Failed to send email', detail: errText }, 502);
+  }
+
+  const deliveredAt = new Date().toISOString();
+  await record(
+    'INSERT INTO mall_webhook_deliveries(id,event_id,event,status,delivered_at) VALUES(?,?,?,?,?)',
+    [deliveryId, parsed.id, parsed.event, 'sent', deliveredAt],
+  );
+
+  return json({ status: 'sent', eventId: parsed.id, deliveredAt });
+}
+
+const EMAIL_CSS = `
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; color: #333; }
+  .container { max-width: 600px; margin: 0 auto; background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden; }
+  .header { background: #6c5ce0; color: #fff; padding: 20px; }
+  .header h1 { margin: 0; font-size: 20px; }
+  .body { padding: 20px; }
+  .body table { width: 100%; border-collapse: collapse; }
+  .body td { padding: 8px 12px; border-bottom: 1px solid #eee; }
+  .body td:first-child { font-weight: 600; color: #555; }
+  .footer { padding: 16px 20px; background: #f8f9fa; font-size: 12px; color: #888; }
+`;
+
+function emailTemplate(params: {
+  event: string;
+  label: string;
+  orderNo: string;
+  customerName: string;
+  customerPhone: string;
+  totalNgn: string;
+  status?: string;
+  paymentStatus?: string;
+  paymentMethod?: string;
+  occurredAt?: string;
+  instructions?: Record<string, unknown>;
+}): string {
+  const fmt = (v: string | undefined) => v ? String(v).replace(/_/g, ' ') : '—';
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><style>${EMAIL_CSS}</style></head>
+<body>
+  <div class="container">
+    <div class="header"><h1>${params.label} — Order ${params.orderNo}</h1></div>
+    <div class="body">
+      <table>
+        <tr><td>Event</td><td>${params.event}</td></tr>
+        <tr><td>Order #</td><td>${params.orderNo}</td></tr>
+        <tr><td>Customer</td><td>${params.customerName}</td></tr>
+        <tr><td>Phone</td><td>${params.customerPhone}</td></tr>
+        <tr><td>Total</td><td>${params.totalNgn}</td></tr>
+        <tr><td>Order Status</td><td>${fmt(params.status)}</td></tr>
+        <tr><td>Payment</td><td>${fmt(params.paymentMethod)} — ${fmt(params.paymentStatus)}</td></tr>
+        <tr><td>Occurred At</td><td>${params.occurredAt || '—'}</td></tr>
+      </table>
+    </div>
+    <div class="footer">This is an automated notification from the Mall system. Do not reply to this email.</div>
+  </div>
+</body>
+</html>`;
 }
 
 function readCookie(request: Request, name: string) {
@@ -995,7 +1196,21 @@ export default {
     await maintainMall({config:env,queryAll:makeD1QueryAll(env),runBatch:async stmts=>{
       const result=await env.DB.batch(toD1Statements(env,stmts));
       return result.map((row:any)=>Number(row?.meta?.changes ?? 0));
-    }});
+    }}, async (input, init) => {
+      // Deliver the signed outbox POST to the receiver IN PROCESS. Reaching
+      // MALL_WEBHOOK_URL over the network would mean this Worker fetching a
+      // hostname its own route matches, which Cloudflare answers with error 1042
+      // ("Internal request count exceeded") once the subrequest chain grows.
+      // The receiver still verifies the HMAC, so the signature path is real.
+      // Only method/headers/body are carried over: `signal` and `redirect` are
+      // transport concerns that do not apply to an in-process call.
+      const request = new Request(String(input), {
+        method: init?.method || 'POST',
+        headers: init?.headers as Record<string, string>,
+        body: init?.body as string,
+      });
+      return await handleMallWebhook(request, env);
+    });
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -1117,6 +1332,11 @@ export default {
             return results.map((result: any) => Number(result?.meta?.changes ?? 0));
           },
         }, {id: actor.id, displayName: actor.display_name, role: actor.role});
+            }
+      // #18 — email notification webhook receiver (public, HMAC-signed).
+      if (request.method === 'POST' && url.pathname === '/api/mall-webhook') {
+        await ensureSchema(env);
+        return await handleMallWebhook(request, env);
       }
       // Phase 5: mall storefront API (public catalog/cart/checkout/track).
       if (url.pathname === '/api/mall' || url.pathname.startsWith('/api/mall/')) {

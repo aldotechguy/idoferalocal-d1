@@ -50,6 +50,19 @@ bucket_name = "idomall"
 # Non-sensitive Mall config. Update MALL_PICKUP_ADDRESS and MALL_PICKUP_HOURS
 # to your real pickup location and hours before accepting orders.
 MALL_CHECKOUT_ENABLED = "true"
-MALL_PICKUP_ADDRESS = "REPLACE_WITH_REAL_PICKUP_ADDRESS"
-MALL_PICKUP_HOURS = "REPLACE_WITH_REAL_PICKUP_HOURS"
+MALL_PICKUP_ADDRESS = "16 Atakpo Street, Uyo, Akwa Ibom"
+MALL_PICKUP_HOURS = "10AM - 6PM"
+  MALL_BANK_NAME = "MONIEPOINT"
+  MALL_BANK_ACCOUNT_NAME = "IDOFERA ENTERPRISE"
+  MALL_BANK_ACCOUNT_NUMBER = "8063766861"
+  MALL_WEBHOOK_URL = "https://idomall.olz.workers.dev/api/mall-webhook"
+  # Sender for order emails. `onboarding@resend.dev` is Resend's sandbox sender
+  # (verified-domain-free, but it may only deliver to the Resend account owner).
+  # Replace with an address on a domain you verified in Resend.
+  MALL_EMAIL_FROM = "Mall Orders <onboarding@resend.dev>"
+  # MALL_WEBHOOK_SECRET, MALL_NOTIFY_EMAIL and RESEND_API_KEY are Wrangler
+  # secrets (never committed): `npx wrangler secret put --env mall <NAME>`.
+  # The scheduled drain signs each outbox POST with MALL_WEBHOOK_SECRET and
+  # posts it to MALL_WEBHOOK_URL above; the receiver verifies that signature and
+  # emails the operator via Resend.
 

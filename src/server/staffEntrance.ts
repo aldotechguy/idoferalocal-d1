@@ -10,6 +10,10 @@ export function isStaffPage(path: string) {
 export function isPrivateApi(path: string) {
   if (!path.startsWith('/api/')) return false;
   if (path === '/api/health' || path === '/api/mall' || path.startsWith('/api/mall/')) return false;
+  // Machine-to-machine: the scheduled outbox drain posts to its own
+  // /api/mall-webhook with an HMAC signature and no staff cookie, so gating it
+  // behind the staff entrance would 401 (then dead-letter) every notification.
+  if (path === '/api/mall-webhook') return false;
   return !['/api/auth/entrance', '/api/auth/login', '/api/auth/google', '/api/auth/session', '/api/auth/logout'].includes(path);
 }
 

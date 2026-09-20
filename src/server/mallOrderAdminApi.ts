@@ -393,8 +393,8 @@ export async function handleStaffMallApi(request: Request, exec: MallExecutor, a
   }
 }
 
-export async function maintainMall(exec: MallExecutor) {
+export async function maintainMall(exec: MallExecutor, send?: typeof fetch) {
   return runMallMaintenance(exec, id => handleStaffMallApi(new Request(`https://internal/api/staff/mall-orders/${encodeURIComponent(id)}/cancel`,{
     method:'POST',body:JSON.stringify({reason:'Unpaid order expired; reserved stock released.'}),
-  }),exec,{id:'mall-scheduler',displayName:'Mall scheduler',role:'Administrator'}));
+  }),exec,{id:'mall-scheduler',displayName:'Mall scheduler',role:'Administrator'}), send);
 }

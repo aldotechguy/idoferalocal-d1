@@ -49,6 +49,9 @@ Monitor the expiry backlog and increase throughput deliberately if volume requir
 - The configured webhook receives hourly `MALL_HEARTBEAT` events. Configure an
   independent monitor for missing heartbeats and readiness failures. An outage of
   the webhook itself cannot be reported reliably through that same webhook.
+- In the deployed Mall Worker the receiver emails the operator, so readiness implies a
+  real message has been accepted by the email provider at least once — not merely that a
+  webhook URL is configured. See "Email notifications (deployed receiver)" below.
 - Configure platform exception/D1 error alerts in Cloudflare, and log collection/
   process-restart alerts for Node. Observability configuration is in Wrangler, but
   alert destinations and dashboard rules must be set in the deployment account.
@@ -84,6 +87,49 @@ after ten failed attempts the event is dead-lettered. Managers can explicitly re
 dead letters. Successful deliveries are retained for 30 days; undelivered events
 are not silently removed. The receiver URL is privileged configuration: never point
 it at an internal/private endpoint or accept it from public input.
+
+## Email notifications (deployed receiver)
+
+The deployed Worker is its own webhook receiver: `POST /api/mall-webhook`. It is public
+but not unauthenticated — every request must carry a valid `sha256=` HMAC signature, so
+it must stay exempt from the staff-entrance gate (a staff cookie cannot be presented by
+the scheduler) while never being reachable without the signature check.
+
+Delivery is IN PROCESS. The five-minute scheduler builds the signed POST and hands it
+straight to the receiver function instead of fetching `MALL_WEBHOOK_URL` over the
+network. The URL is a hostname this Worker's own route matches, and Cloudflare answers a
+self-referential fetch with error 1042 ("Internal request count exceeded") once the
+subrequest chain grows. The endpoint is still served publicly so an external monitor or
+integration can post signed events independently.
+
+Resend configuration:
+
+- `MALL_EMAIL_FROM` (var, non-sensitive): the `From` address. Resend only accepts senders
+  on a domain you have verified at resend.com/domains. The default sandbox sender
+  `onboarding@resend.dev` works without DNS but can deliver ONLY to the Resend account
+  owner's own address; set `MALL_NOTIFY_EMAIL` to that address, or verify a domain and
+  switch `MALL_EMAIL_FROM` to it for a branded sender and any recipient.
+- `MALL_NOTIFY_EMAIL` (secret): the operator mailbox receiving order events.
+- `RESEND_API_KEY` (secret): a valid key. A revoked/invalid key fails as HTTP 502 with
+  Resend's error captured (see below), not as a silent success.
+- `MALL_WEBHOOK_SECRET` (secret, 32+ chars) and `MALL_WEBHOOK_URL` (var): the HMAC secret
+  and the URL used as the signed request identity. Secrets are set with
+  `npx wrangler secret put --env mall <NAME>` and are never committed; only
+  non-sensitive values belong in `[env.mall.vars]`.
+
+Behaviour and diagnostics:
+
+- Hourly `MALL_HEARTBEAT` events are acknowledged and recorded but never emailed, so the
+  signed wire is provably up without one message per hour forever.
+- Order events (received, paid, dispatched, delivered, cancelled, refunded) email the
+  operator with order number, customer, total, status and payment state.
+- `mall_webhook_deliveries` deduplicates on the event ID for seven days, so a retry after
+  a crash or a lost 2xx re-acknowledges instead of emailing twice. Recording a delivery is
+  best-effort: a bookkeeping failure must never turn a sent email into a retry.
+- `mall_outbox.last_error` stores the real failure cause (for example `HTTP 502`) and
+  `mall_webhook_deliveries.error` stores the provider's raw error body. Read those two
+  columns first when notifications stop; both previously collapsed into one constant
+  string that could not distinguish a bad signature from an unverified sender domain.
 
 ## Lifecycle and returns
 
