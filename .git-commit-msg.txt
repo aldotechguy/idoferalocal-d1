@@ -1,23 +1,6 @@
-Add optional customer email at checkout with customer-facing order emails
+chore: drop temporary checkout-drill and commit-msg artifacts
 
-- Make customerEmail optional in mall checkout; validate and store it in
-  mall_orders.customer_email (schema/drizzle DDL/types updated, schema
-  version bumped to 6 with additive guarded ALTER).
-- Refactor the deployed webhook receiver so each event always sends the
-  authoritative operator copy first and then a best-effort customer-facing
-  copy to the stored customer email; a failed customer send never retries
-  the event and is recorded in mall_webhook_deliveries.error.
-- Exclude internal plumbing (customer_phone, payment_reference) from the
-  customer template; only show actionable payment/pickup instructions.
-- Extend useBuyerForm + validateBuyer with email and update
-  MallCheckoutBody/MallOrder/MallBuyerProfile types.
-- Surface customer_email in MallOrdersView + staff Mall orders API.
-- Update docs: email notification contract, readiness notes, and the
-  Resend verified-domain switch for real recipients.
-- Lint + all three suites green (backend 8, safety 68, frontend 38).
-- Deploy: switch MALL_EMAIL_FROM from the Resend sandbox sender to
-  orders@idofera.de5.net and redeploy the live mall worker.
-- Smoke-verify the customer-copy path live against
-  idomall.olz.workers.dev with idoferapackaging@gmail.com; checkout
-  returned 201 and echoed the email, best-effort customer email now in
-  flight from Mall Orders <orders@idofera.de5.net>.
+- Remove NODEJS_OUT.TXT and NODEJS_ERR.TXT leftover from the live
+  customer-copy checkout drill against idomall.olz.workers.dev.
+- Remove .git-commit-msg.txt used only for authoring this branch.
+- Stage the deletions so the tree stays clean before push.
