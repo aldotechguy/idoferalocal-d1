@@ -14,6 +14,45 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
+/**
+ * #18 — the Node runtime must serve the SAME `/api/mall-webhook` receiver the
+ * Worker does. Without it, the scheduled outbox drain fetched MALL_WEBHOOK_URL,
+ * hit this server's 404, and dead-lettered every order event: no email was ever
+ * sent. Registered BEFORE the global JSON parser and with express.raw so the
+ * HMAC is verified against the exact bytes the scheduler signed (re-serializing
+ * parsed JSON would change the bytes and fail every signature).
+ */
+const webhookDb: WebhookDatabase = {
+  prepare: (sql: string) => {
+    let params: unknown[] = [];
+    const statement = {
+      bind(...values: unknown[]) { params = values; return statement; },
+      async run() { return { meta: { changes: Number(db.prepare(sql).run(...(params as any[])).changes) } }; },
+      async all() { return { results: db.prepare(sql).all(...(params as any[])) as any[] }; },
+    };
+    return statement;
+  },
+};
+
+app.post("/api/mall-webhook", express.raw({ type: "*/*", limit: "1mb" }), async (req, res) => {
+  try {
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.from(String(req.body ?? ""));
+    const request = new globalThis.Request("http://localhost:3000/api/mall-webhook", {
+      method: "POST",
+      headers: {
+        "content-type": String(req.headers["content-type"] || "application/json"),
+        "x-mall-signature": String(req.headers["x-mall-signature"] || ""),
+        "x-mall-timestamp": String(req.headers["x-mall-timestamp"] || ""),
+      },
+      body,
+    });
+    const response = await handleMallWebhook(request, { ...process.env, DB: webhookDb });
+    return res.status(response.status).set("content-type", "application/json").send(await response.text());
+  } catch (error: any) {
+    return res.status(500).json({ error: error?.message || "Webhook receiver error" });
+  }
+});
+
 app.use(express.json({ limit: "50mb" }));
 app.use("/mall", express.json({ limit: "50mb" }));
 
@@ -59,6 +98,7 @@ import { handleStaffMallApi, maintainMall } from "./src/server/mallOrderAdminApi
 import { handleStaffMallListingApi } from "./src/server/mallListingApi";
 import { handleStaffProductImageApi, handlePublicImageRequest } from "./src/server/productImageApi";
 import { makeNodeImageStore } from "./src/server/nodeImageStore";
+import { handleMallWebhook, type WebhookDatabase } from "./src/server/mallWebhook";
 import { bootstrapAdmin } from "./src/server/adminBootstrap";
 import { buildSnapshot, SNAPSHOT_PUSH_DOC_LIMIT } from "./src/server/relationalSnapshot.js";
 import {

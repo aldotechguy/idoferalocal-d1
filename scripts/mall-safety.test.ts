@@ -11,6 +11,7 @@ import { handleStaffProductImageApi, handlePublicImageRequest } from '../src/ser
 import { decodeBase64Image, imageKeyFromUrl, imageUrl, newProductImageKey } from '../src/server/imageStore.ts';
 import { makeNodeImageStore } from '../src/server/nodeImageStore.ts';
 import { bootstrapAdmin } from '../src/server/adminBootstrap.ts';
+import { handleMallWebhook } from '../src/server/mallWebhook.ts';
 import { drainMallOutbox, signMallWebhook, mallReadiness, runMallMaintenance, mallRateLimitFor, mallRateLimitGroup, MALL_RATE_LIMITS, MALL_OPERATIONS_DDL, MALL_SCHEMA_VERSION } from '../src/server/mallOperations.ts';
 import { normalizeMallPhone, normalizedPhoneSql } from '../src/shared/mallPhone.ts';
 import { SNAPSHOT_PUSH_DOC_LIMIT } from '../src/server/relationalSnapshot.ts';
@@ -1272,6 +1273,58 @@ test('oversized snapshot pushes are rejected before any write', async (t) => {
     await worker.scheduled({}, env);
     assert.equal(sent.length, 2, 'heartbeats must never email anyone');
     assert.equal(f.scalar("SELECT COUNT(*) FROM mall_outbox WHERE status='dead'"), 0);
+  });
+
+  test('the Node runtime serves the webhook receiver, so its drain emails too', async (t) => {
+    const f = await fixture('node'); t.after(() => f.db.close());
+    // The Node server has no D1 `DB`; server.ts wraps node:sqlite in a
+    // `.prepare().bind()` shim with the same shape. This test drives that exact
+    // seam: before it existed, the Node drain fetched /api/mall-webhook, got a
+    // 404 from the Express server, retried and dead-lettered every order event.
+    const nodeWebhookDb = {
+      prepare(sql: string) {
+        let params: unknown[] = [];
+        const statement = {
+          bind(...values: unknown[]) { params = values; return statement; },
+          async run() { return { meta: { changes: Number(f.db.prepare(sql).run(...(params as any[])).changes) } }; },
+          async all() { return { results: f.db.prepare(sql).all(...(params as any[])) as any[] }; },
+        };
+        return statement;
+      },
+    };
+    const env: any = {
+      MALL_WEBHOOK_URL: 'https://idomall.example.test/api/mall-webhook',
+      MALL_WEBHOOK_SECRET: 'node-webhook-secret-0123456789abcdef',
+      MALL_NOTIFY_EMAIL: 'owner@test.invalid',
+      MALL_EMAIL_FROM: 'Mall Orders <orders@verified.test>',
+      RESEND_API_KEY: 're_node_key',
+    };
+    const sent: any[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
+      sent.push(JSON.parse(String(init.body)));
+      const headers = { 'content-type': 'application/json' };
+      return new Response(JSON.stringify({ id: 'resend-1' }), { status: 200, headers });
+    }) as unknown as typeof fetch;
+    t.after(() => { globalThis.fetch = realFetch; });
+
+    const placed = await f.checkout(attempt, { customerEmail: 'ada@example.com' });
+    assert.equal(placed.status, 201);
+    assert.equal(f.scalar("SELECT COUNT(*) FROM mall_outbox WHERE event='ORDER_RECEIVED' AND status='pending'"), 1);
+
+    const exec = makeNodeMallExecutor(f.db, env);
+    let hits = 0;
+    await runMallMaintenance(exec, async () => new Response(null, { status: 409 }), (async (input: unknown, init: any) => {
+      hits += 1;
+      const request = new Request(String(input), { method: init?.method || 'POST', headers: init?.headers, body: init?.body });
+      return await handleMallWebhook(request, { ...env, DB: nodeWebhookDb });
+    }) as unknown as typeof fetch);
+
+    assert.ok(hits >= 1, 'the Node drain must reach the in-process receiver');
+    assert.equal(sent.length, 2, 'the Node drain emails the operator and the customer copy');
+    assert.equal(sent[0].to[0], 'owner@test.invalid');
+    assert.equal(sent[1].to[0], 'ada@example.com');
+    assert.equal(f.scalar("SELECT status FROM mall_outbox WHERE event='ORDER_RECEIVED'"), 'delivered');
   });
 
   const documents = Array.from({ length: SNAPSHOT_PUSH_DOC_LIMIT + 1 }, (_, i) => ({ id: `bulk-${i}`, name: 'Bulk' }));
