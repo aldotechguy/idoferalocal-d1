@@ -136,11 +136,25 @@ export async function mallMetrics(exec: MallExecutor) {
 }
 
 /** Caller supplies a trusted runtime-derived IP. Never trust a browser header in Node. */
+export const MALL_RATE_LIMITS = { checkout: 10, tracking: 5, cart: 60, catalog: 120 } as const;
+/**
+ * Tracking serves `GET /api/mall/orders` — a phone+order-number lookup and a
+ * phone-enumeration vector — so its cap is intentionally stricter than checkout.
+ * @returns the route group name for a given pathname (the caller looks up `MALL_RATE_LIMITS[group]`).
+ */
+export function mallRateLimitGroup(pathname: string): keyof typeof MALL_RATE_LIMITS {
+  return pathname.includes('/checkout') ? 'checkout' : pathname.includes('/orders') ? 'tracking' : pathname.includes('/cart') ? 'cart' : 'catalog';
+}
+
+export function mallRateLimitFor(pathname: string): number {
+  return MALL_RATE_LIMITS[mallRateLimitGroup(pathname)];
+}
+
 export async function mallRateLimit(exec: MallExecutor, request: Request) {
   if (!exec.clientIp) return;
   const path = new URL(request.url).pathname;
-  const group = path.includes('/checkout') ? 'checkout' : path.includes('/orders') ? 'tracking' : path.includes('/cart') ? 'cart' : 'catalog';
-  const limit = { checkout: 10, tracking: 10, cart: 60, catalog: 120 }[group];
+  const group = mallRateLimitGroup(path);
+  const limit = MALL_RATE_LIMITS[group];
   const window = Math.floor(Date.now()/60_000);
   const bytes = await crypto.subtle.digest('SHA-256',new TextEncoder().encode(`${window}:${exec.clientIp}`));
   const hash = Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2,'0')).join('');

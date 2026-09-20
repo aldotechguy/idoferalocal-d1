@@ -1137,9 +1137,18 @@ export default {
       if (url.pathname.startsWith('/mall-images/')) {
         return await handlePublicImageRequest(request, makeR2ImageStore(env), decodeURIComponent(url.pathname.slice('/mall-images/'.length)));
       }
-      return await serveAsset(request, env);
+            return await serveAsset(request, env);
     } catch (error) {
-      return json({error: error instanceof Error ? error.message : 'Unexpected server error'}, 500);
+      // Preserve Mall domain semantics when an error propagates from the Mall
+      // handlers (status + structured payload). Anything else falls back to a
+      // generic 500 so unexpected failures never escape as non-Response throws.
+      const known = error as Error & { mallStatus?: number; mallPayload?: unknown };
+      const status = known?.mallStatus ?? 500;
+      const body: Record<string, unknown> = { error: error instanceof Error ? error.message : 'Unexpected server error' };
+      if (known?.mallPayload !== undefined) body.payload = known.mallPayload;
+      const resp = json(body, status);
+      resp.headers.set('cache-control', 'no-store');
+      return resp;
     }
   },
 };

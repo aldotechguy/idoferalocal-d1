@@ -11,7 +11,7 @@ import { handleStaffProductImageApi, handlePublicImageRequest } from '../src/ser
 import { decodeBase64Image, imageKeyFromUrl, imageUrl, newProductImageKey } from '../src/server/imageStore.ts';
 import { makeNodeImageStore } from '../src/server/nodeImageStore.ts';
 import { bootstrapAdmin } from '../src/server/adminBootstrap.ts';
-import { drainMallOutbox, signMallWebhook, mallReadiness, runMallMaintenance, MALL_OPERATIONS_DDL, MALL_SCHEMA_VERSION } from '../src/server/mallOperations.ts';
+import { drainMallOutbox, signMallWebhook, mallReadiness, runMallMaintenance, mallRateLimitFor, mallRateLimitGroup, MALL_RATE_LIMITS, MALL_OPERATIONS_DDL, MALL_SCHEMA_VERSION } from '../src/server/mallOperations.ts';
 import { normalizeMallPhone, normalizedPhoneSql } from '../src/shared/mallPhone.ts';
 import { SNAPSHOT_PUSH_DOC_LIMIT } from '../src/server/relationalSnapshot.ts';
 
@@ -614,14 +614,21 @@ for (const runtime of ['node', 'worker'] as const) {
   });
 }
 
-test('Worker static routes bypass Mall and unexpected async errors become responses', async (t) => {
+test('Worker static routes bypass Mall and unexpected async errors become safe responses', async (t) => {
   const f = await fixture('worker'); t.after(() => f.db.close());
   for (const path of ['/', '/mall', '/assets/app.js']) {
     const response = await worker.fetch(new Request(`http://test${path}`), f.env);
     assert.equal(response.status, 200); assert.match(await response.text(), /^asset:/);
   }
   f.env.DB.prepare = () => { throw new Error('database unavailable'); };
-  assert.equal((await worker.fetch(new Request('http://test/api/mall/products'), f.env)).status, 500);
+  const dbError = await worker.fetch(new Request('http://test/api/mall/products'), f.env);
+  // Unexpected errors must never escape as non-Response throws: a 500 JSON
+  // body with an `error` string is the contract (Mall domain errors are
+  // preserved at the route handler level; this catch is the generic fallback).
+  assert.equal(dbError.status, 500);
+  assert.equal(dbError.headers.get('content-type'), 'application/json; charset=utf-8');
+  const body = await dbError.json() as { error: string };
+  assert.equal(typeof body.error, 'string');
 });
 
 test('outbox signatures, exclusive leases, retry, dead letters and readiness',async t=>{
@@ -684,7 +691,29 @@ test('trusted-IP rate limits and missing production configuration fail closed',a
   assert.equal(limited.status,429);assert.equal(limited.headers.get('retry-after'),'60');
   f.exec.config={};
   assert.equal((await f.checkout()).status,503);
-  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_orders'),0);
+    assert.equal(f.scalar('SELECT COUNT(*) FROM mall_orders'),0);
+});
+
+test('tracking limit is stricter than checkout and only the 6th request is rejected', async (t) => {
+    // The tracking group serves `GET /api/mall/orders`, a phone+order-number
+  // lookup that is a phone-enumeration vector, so its cap must stay below
+  // checkout's. Importing the constants directly prevents silent drift.
+  assert.equal(MALL_RATE_LIMITS.tracking, 5);
+  assert.equal(MALL_RATE_LIMITS.checkout, 10);
+    assert.ok(MALL_RATE_LIMITS.tracking < MALL_RATE_LIMITS.checkout);
+  assert.equal(mallRateLimitGroup('/api/mall/orders'), 'tracking');
+  assert.equal(mallRateLimitFor('/api/mall/orders'), MALL_RATE_LIMITS.tracking);
+  const f = await fixture('node'); t.after(() => f.db.close()); f.exec.clientIp = 'tracking-client';
+    const url = 'http://test/api/mall/orders?phone=08031234567&orderNo=ORD-TEST';
+  // First five requests within the window must not be rate-limited.
+  for (let i = 0; i < 5; i++) {
+    const r = await f.send(new Request(url));
+    assert.notEqual(r.status, 429);
+  }
+  // The 6th request in the same minute window is rejected with 429.
+  const limited = await f.send(new Request(url));
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get('retry-after'), '60');
 });
 
 test('administrator bootstrap is disabled without explicit secrets and rejects incomplete/short credentials', () => {

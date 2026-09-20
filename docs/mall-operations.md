@@ -24,7 +24,13 @@ Never commit real bank configuration or secrets. These were NOT populated by the
 implementation. Existing administrator credentials and sessions still require
 rotation/revocation if they originated from the old default-account seed.
 
-Node uses a one-minute interval while the process is running. Worker uses the
+Secrets are injected per-environment through Wrangler (not committed). `wrangler.toml`
+defines the live `mall` environment (`name = "idomall"`), backed by relational D1
+`idofera` and the `idomall` R2 image bucket. Deploy against it with
+`npx wrangler deploy --env mall`; develop locally with `npx wrangler dev --env mall`.
+Set all Mall secrets as Wrangler variables on the `mall` environment — never pass them
+on the public command line. A local `.env` mirrors the variable names and is the
+canonical list of required secrets; verify it is git-ignored before deployment.
 configured five-minute Cron Trigger for both environments. Verify cron deployment
 and an external process supervisor for Node. At most one expired order is processed
 per maintenance invocation to bound database work; oldest orders are processed first.
@@ -124,7 +130,10 @@ Public tracking requires exact order number plus normalized phone; phone-only lo
 is rejected. This is a minimal privacy control, not customer authentication.
 
 Rate limits are shared database-backed minute windows keyed by a hash of the trusted
-runtime IP: checkout/tracking 10, cart 60, catalog 120 per minute. Worker takes the
+runtime IP: checkout 10, tracking 5, cart 60, catalog 120 per minute. The public order
+lookup (`GET /api/mall/orders`, phone + order number) is throttled more strictly than
+checkout because it is a phone-enumeration vector; exact order number plus normalized
+phone is a minimal privacy control, not customer authentication. Worker takes the
 Cloudflare IP; Node uses its connection IP (no untrusted forwarded headers). If Node
 is behind a proxy, configure/verify trusted-proxy behavior carefully to avoid all
 customers sharing one limit. Add perimeter Cloudflare abuse controls before high-volume
