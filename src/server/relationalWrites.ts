@@ -176,7 +176,7 @@ export function backfillStatementsFromDocumentRows(
 }
 
 const up = (table: string, row: Record<string, unknown>, conflict: string, updateCols: string[]): SqlStmt => ({
-  sql: `INSERT INTO ${table} (${Object.keys(row).join(', ')}) VALUES (${Object.keys(row).map(() => '?').join(', ')}) ON CONFLICT(${conflict}) DO UPDATE SET ${updateCols.map((c) => `${c}=excluded.${c}`).join(', ')}`,
+  sql: `INSERT INTO ${table} (${Object.keys(row).join(', ')}) VALUES (${Object.keys(row).map(() => '?').join(', ')}) ON CONFLICT(${conflict}) DO UPDATE SET ${updateCols.map((c) => `${c}=excluded.${c}`).join(', ')}${updateCols.length ? ` WHERE ${updateCols.map((c) => `excluded.${c} IS NOT ${table}.${c}`).join(' OR ')}` : ''}`,
   params: Object.values(row),
 });
 
@@ -196,7 +196,8 @@ export function upsertToStatements(collection: string, document: any, nowIso: st
       // Mirror the ETL exactly: unwrap legacy wrapper payloads and key by the
       // unwrapped document id when present.
       const settingsDoc = unwrapSettings(document) || document;
-      return [{ sql: `INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json`, params: [s((settingsDoc as any).id, s(document.id, 'app_settings')), JSON.stringify(settingsDoc), Date.now()] }];
+      const settingsValue = JSON.stringify(settingsDoc);
+      return [{ sql: `INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json WHERE excluded.value_json IS NOT settings.value_json`, params: [s((settingsDoc as any).id, s(document.id, 'app_settings')), settingsValue, Date.now()] }];
     }
     case 'heldOrders': return [up('held_orders', { id, cart_json: JSON.stringify(document), held_by: s(document.heldBy), created_at: s(document.createdAt, nowIso) }, 'id', ['cart_json'])];
     case 'deliveryOrders': return [up('delivery_orders', { id, delivery_no: s(document.deliveryNo || id), sale_id: document.saleId ? s(document.saleId) : null, invoice_no: s(document.invoiceNo), customer_id: document.customerId ? s(document.customerId) : null, customer_name: s(document.customerName), delivery_address: document.deliveryAddress ? s(document.deliveryAddress) : null, items_json: JSON.stringify(document.items || []), delivery_fee_kobo: Math.round(Number(document.deliveryFee || 0) * 100), status: s(document.status, 'Pending Pickup'), is_pickup_confirmed: document.isPickupConfirmed ? 1 : 0, created_by: s(document.createdBy), created_at: s(document.createdAt, nowIso), updated_at: document.updatedAt ? s(document.updatedAt) : null }, 'id', ['status'])];

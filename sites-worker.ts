@@ -41,13 +41,13 @@ import {
   replaceCollectionStatements,
   backfillStatementsFromDocumentRows,
 } from './src/server/relationalWrites.js';
-import { handleMallApi, MALL_OVERSELL_TRIGGER_SQL } from './src/server/mallApi.js';
+import { handleMallApi, MALL_OVERSELL_TRIGGER_SQL, invalidateMallFacetCache } from './src/server/mallApi.js';
 import { handleStaffMallApi, maintainMall } from './src/server/mallOrderAdminApi.js';
 import { handleStaffMallListingApi } from './src/server/mallListingApi.js';
 import { handleStaffProductImageApi, handlePublicImageRequest } from './src/server/productImageApi.js';
 import type { ImageStore } from './src/server/imageStore.js';
-import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, isDuplicateColumnError, type MallConfig } from './src/server/mallOperations.js';
-import { MALL_SAFETY_DDL } from './src/server/mallSafety.js';
+import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, MALL_SCHEMA_VERSION, isDuplicateColumnError, type MallConfig } from './src/server/mallOperations.js';
+import { MALL_SAFETY_DDL, MALL_CATALOG_INDEX_COLUMNS, MALL_CATALOG_INDEXES } from './src/server/mallSafety.js';
 import { bootstrapAdmin } from './src/server/adminBootstrap.js';
 import type { QueryAll } from './src/server/relationalMapper.js';
 import { isStaffPage, isPrivateApi, issueEntrance, hasEntrance, revokeEntrance, entranceCookie } from './src/server/staffEntrance.js';
@@ -169,8 +169,29 @@ function publicUser(user: AppUserRow) {
 const schemaReady = new WeakSet<D1Database>();
 let relationalBackfilled = false;
 
+/**
+ * Row-read guard. `schemaReady` is per-isolate, so before this check every cold
+ * isolate replayed the whole bootstrap (~80 DDL statements, plus 5 ALTERs that
+ * are expected to throw `duplicate column name`). A matching marker row means
+ * the schema is already in place: one primary-key lookup instead.
+ */
+async function schemaVersionCurrent(env: Env) {
+  try {
+    const rows = await env.DB.prepare('SELECT 1 AS present FROM mall_schema_versions WHERE version = ?')
+      .bind(MALL_SCHEMA_VERSION).all();
+    return Boolean(rows.results?.length);
+  } catch {
+    // The marker table itself is missing, so this is a fresh (or pre-marker) database.
+    return false;
+  }
+}
+
 async function ensureSchema(env: Env) {
   if (schemaReady.has(env.DB)) return;
+  if (await schemaVersionCurrent(env)) {
+    schemaReady.add(env.DB);
+    return;
+  }
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS app_documents (
       owner_id TEXT NOT NULL,
@@ -222,12 +243,22 @@ async function ensureSchema(env: Env) {
     await env.DB.batch(statements.slice(offset, offset + 50));
   }
   await env.DB.batch(MALL_OPERATIONS_DDL.map(sql=>env.DB.prepare(sql)));
-  // #10 merchandising columns: additive guarded ALTERs; a duplicate column is the
-  // expected no-op on every start after the first.
-  for (const column of MALL_MERCH_COLUMNS) {
+  // #10 merchandising columns + the status column the catalog indexes cover:
+  // additive guarded ALTERs; a duplicate column is the expected no-op on every
+  // start after the first.
+  for (const column of [...MALL_MERCH_COLUMNS, ...MALL_CATALOG_INDEX_COLUMNS]) {
     try { await env.DB.prepare(column.ddl).run(); }
     catch (error) { if (!isDuplicateColumnError(error)) throw error; }
   }
+  // Catalog read indexes: the visibility predicate, the merchandising order, and
+  // the two facet columns the category/brand lists group by.
+  for (const index of MALL_CATALOG_INDEXES) {
+    try { await env.DB.prepare(index).run(); }
+    catch (error) { console.warn('Catalog index skipped:', index, error instanceof Error ? error.message : error); }
+  }
+  // Record the marker last: the guard above must never pass before the work is done.
+  await env.DB.prepare('INSERT OR IGNORE INTO mall_schema_versions(version, installed_at) VALUES (?, ?)')
+    .bind(MALL_SCHEMA_VERSION, new Date().toISOString()).run();
   schemaReady.add(env.DB);
 }
 
@@ -250,7 +281,7 @@ async function ensureRelationalBackfill(env: Env): Promise<{ documents: number; 
     return none;
   }
   const rows = await env.DB.prepare(
-    'SELECT owner_id, collection, payload, updated_at FROM app_documents ORDER BY updated_at',
+    'SELECT owner_id, collection, payload, updated_at FROM app_documents ORDER BY owner_id, collection, document_id',
   ).bind().all<{collection: string; payload: string; owner_id?: string; updated_at?: number}>();
   const list = rows.results || [];
   if (!list.length) return none;
@@ -490,6 +521,8 @@ async function saveSnapshot(request: Request, env: Env) {
   );
 
   await runStatements(env, statements);
+  // A snapshot restore can replace every product; drop the catalog facet cache.
+  invalidateMallFacetCache();
   // Document mirror is authoritative for the revision; a relational failure is reported, not fatal.
   let relationalSynced = true;
   let relationalError: string | undefined;
@@ -524,29 +557,137 @@ async function runStatements(env: Env, statements: D1PreparedStatement[]) {
   }
 }
 
+/**
+ * Snapshot revalidation. The Dashboard read the whole store (1,592 documents /
+ * ~554 KB) on every boot even when nothing had changed since its last read.
+ * The revision already bumps on every snapshot write, so it is a sound
+ * validator: revision + the backend that served it, matching what the client
+ * stores after each successful read.
+ */
+const snapshotGuard = (revision: number, backend: string) => `"${revision}-${backend}"`;
+
+function snapshotNotModified(request: Request, revision: number, backend: string) {
+  const header = request.headers.get('if-none-match');
+  if (!revision || !header) return false;
+  return header.split(',').some((value) => value.trim() === snapshotGuard(revision, backend));
+}
+
+const snapshotUnchanged = (revision: number, backend: string) =>
+  new Response(null, {status: 304, headers: {'cache-control': 'no-store', 'etag': snapshotGuard(revision, backend)}});
+
+function snapshotResponse(body: Record<string, unknown>, revision: number, backend: string) {
+  const response = json(body);
+  response.headers.set('etag', snapshotGuard(revision, backend));
+  response.headers.set('cache-control', 'no-store');
+  return response;
+}
+
+/** One bounded page: a single edit must never trigger a whole-store read. */
+const SNAPSHOT_DELTA_LIMIT = 500;
+
+type SnapshotCursor = { ms: number; collection: string; documentId: string };
+
+/**
+ * Composite delta watermark. `updated_at` alone cannot bound a read: the bulk
+ * PUT path stamps every row with the same millisecond, so a watermark of
+ * `since.updated_at` would silently skip every row sharing that millisecond on
+ * the next page. The (collection, document_id) tail makes the watermark a
+ * strict keyset bound instead.
+ */
+function parseSnapshotCursor(since: string | null): SnapshotCursor | null {
+  if (!since) return null;
+  try {
+    const parsed = JSON.parse(since);
+    if (parsed && typeof parsed === 'object') {
+      const ms = Number((parsed as { ms?: unknown }).ms);
+      if (Number.isFinite(ms) && ms >= 0) {
+        return {
+          ms,
+          collection: String((parsed as { collection?: unknown }).collection || ''),
+          documentId: String((parsed as { documentId?: unknown }).documentId || ''),
+        };
+      }
+      return null;
+    }
+  } catch {
+    // Legacy ISO-string watermarks predate the composite cursor.
+  }
+  const ms = Date.parse(since);
+  return Number.isFinite(ms) ? { ms, collection: '', documentId: '' } : null;
+}
+
+/**
+ * Delta read for an open staff workspace, which already holds the full store and
+ * therefore only needs the rows written after its watermark. Returns one bounded
+ * page plus the next cursor; the client repeats while `bounded` is true.
+ */
+async function readSnapshotDelta(env: Env, ownerId: string, revision: number, since: string) {
+  const watermark = parseSnapshotCursor(since);
+  const sinceMs = watermark?.ms ?? 0;
+  const rows = await env.DB.prepare(
+    `SELECT collection, document_id, payload, updated_at FROM app_documents
+     WHERE owner_id = ?
+       AND (updated_at > ? OR (updated_at = ? AND (collection > ? OR (collection = ? AND document_id > ?))))
+     ORDER BY updated_at, collection, document_id LIMIT ?`,
+  ).bind(ownerId, sinceMs, sinceMs, watermark?.collection ?? '', watermark?.collection ?? '', watermark?.documentId ?? '', SNAPSHOT_DELTA_LIMIT)
+    .all<{collection: string; document_id: string; payload: string; updated_at: number}>();
+  const list = rows.results || [];
+  let cursor: SnapshotCursor = { ms: sinceMs, collection: watermark?.collection ?? '', documentId: watermark?.documentId ?? '' };
+  const stores: Record<string, unknown[]> = {};
+  for (const row of list) {
+    cursor = { ms: Number(row.updated_at) || 0, collection: row.collection, documentId: row.document_id };
+    try {
+      (stores[row.collection] ||= []).push(JSON.parse(row.payload));
+    } catch {
+      // Ignore a malformed row without losing the rest of the page.
+    }
+  }
+  return snapshotResponse({
+    stores,
+    hasData: Object.keys(stores).length > 0,
+    revision,
+    backend: 'documents',
+    delta: true,
+    cursor: JSON.stringify(cursor),
+    bounded: list.length >= SNAPSHOT_DELTA_LIMIT,
+  }, revision, 'documents');
+}
+
 async function readSnapshot(request: Request, env: Env) {
   await ensureSchema(env);
   const ownerId = BUSINESS_OWNER_ID;
+  // Read the revision first so an unchanged store can short-circuit below.
+  const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
+    .bind(ownerId).all<{revision: number}>();
+  const revision = Number(revisions.results?.[0]?.revision || 0);
+
+  // A supplied watermark means delta mode, and is handled before the relational
+  // branch so an automatic save never falls back to the 18-query snapshot builder.
+  const since = new URL(request.url).searchParams.get('since') || null;
+  if (since) return readSnapshotDelta(env, ownerId, revision, since);
 
   // Phase 4: relational read path. Falls back to the document store when the
   // relational tables are still empty (pre-ETL / fresh database).
   try {
     const backfill = await ensureRelationalBackfill(env);
     if (relationalBackfilled) {
+      if (snapshotNotModified(request, revision, 'relational')) return snapshotUnchanged(revision, 'relational');
       const stores = await buildSnapshot(makeD1QueryAll(env));
-      const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
-        .bind(ownerId).all<{revision: number}>();
-      return json({
+      return snapshotResponse({
         stores,
         hasData: Object.keys(stores).length > 0,
-        revision: Number(revisions.results?.[0]?.revision || 0),
+        revision,
         backend: 'relational',
         backfill: backfill.statements ? backfill : undefined,
-      });
+      }, revision, 'relational');
     }
   } catch (error) {
     console.warn('Relational snapshot failed, serving documents:', error instanceof Error ? error.message : error);
   }
+
+  // The document-store read is the most expensive query in the app; a matching
+  // validator skips it entirely.
+  if (snapshotNotModified(request, revision, 'documents')) return snapshotUnchanged(revision, 'documents');
 
   const rows = await env.DB.prepare(
     'SELECT collection, document_id, payload, updated_at FROM app_documents WHERE owner_id = ? ORDER BY collection, document_id',
@@ -559,14 +700,45 @@ async function readSnapshot(request: Request, env: Env) {
       // Ignore a malformed row without making the rest of the snapshot unreadable.
     }
   }
-  const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
-    .bind(ownerId).all<{revision: number}>();
-  return json({
+  return snapshotResponse({
     stores,
     hasData: Object.keys(stores).length > 0,
-    revision: Number(revisions.results?.[0]?.revision || 0),
+    revision,
     backend: 'documents',
-  });
+  }, revision, 'documents');
+}
+
+/** Volatile client markers excluded from the PATCH no-op comparison. */
+const VOLATILE_DOCUMENT_KEYS = new Set(['_lastSyncedAt', 'updatedAt']);
+
+/**
+ * Canonical payload for the PATCH no-op guard: sorted keys, volatile markers
+ * (`_lastSyncedAt`, `updatedAt`) removed. The client restamps both on every
+ * push, so comparing raw payloads would never detect an unchanged record.
+ */
+function canonicalDocumentPayload(raw: string | undefined): string {
+  if (!raw) return '';
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  const canonicalize = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonicalize);
+    if (value && typeof value === 'object') {
+      const entries = Object.entries(value as Record<string, unknown>)
+        .filter(([key]) => !VOLATILE_DOCUMENT_KEYS.has(key))
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+      return Object.fromEntries(entries.map(([key, entry]) => [key, canonicalize(entry)]));
+    }
+    return value;
+  };
+  try {
+    return JSON.stringify(canonicalize(parsed));
+  } catch {
+    return raw;
+  }
 }
 
 async function patchRecords(request: Request, env: Env) {
@@ -581,16 +753,49 @@ async function patchRecords(request: Request, env: Env) {
   const nowIso = new Date(now).toISOString();
   const statements: D1PreparedStatement[] = [];
   const relationalStmts: { sql: string; params: any[] }[] = [];
+  // Phase 3 no-op guard: an unchanged re-push must touch zero rows. The lookup
+  // below compares the incoming payload against what is already stored, so a
+  // repeated automatic-save batch costs reads, not writes. Relational mirrors
+  // are only built for documents whose payload actually differs.
+  const candidates: { collection: string; documentId: string; payload: string }[] = [];
   for (const item of upserts) {
     const collection = String(item?.collection || '');
     const document = item?.document;
     if (!ALLOWED_STORES.has(collection) || !document || typeof document !== 'object') continue;
     const documentId = String(document.id || 'singleton');
+    candidates.push({collection, documentId, payload: JSON.stringify(document)});
+  }
+  const storedPayloads = new Map<string, string>();
+  for (let offset = 0; offset < candidates.length; offset += 50) {
+    const page = candidates.slice(offset, offset + 50);
+    if (!page.length) break;
+    const placeholders = page.map(() => '(?, ?)').join(', ');
+    const rows = await env.DB.prepare(
+      `SELECT collection, document_id, payload FROM app_documents WHERE owner_id = ? AND (collection, document_id) IN (${placeholders})`,
+    ).bind(ownerId, ...page.flatMap((candidate) => [candidate.collection, candidate.documentId]))
+      .all<{collection: string; document_id: string; payload: string}>();
+    for (const row of rows.results || []) {
+      storedPayloads.set(`${row.collection}:${row.document_id}`, row.payload);
+    }
+  }
+  let skippedUnchanged = 0;
+  const writtenKeys: { collection: string; documentId: string }[] = [];
+  for (const candidate of candidates) {
+    // Compare the wire payload only: `_lastSyncedAt` is a local marker the
+    // client rewrites, and `updatedAt` is restamped on every push, so both are
+    // volatile and excluded from the equality check.
+    if (storedPayloads.get(`${candidate.collection}:${candidate.documentId}`) !== undefined
+      && canonicalDocumentPayload(storedPayloads.get(`${candidate.collection}:${candidate.documentId}`))
+        === canonicalDocumentPayload(candidate.payload)) {
+      skippedUnchanged += 1;
+      continue;
+    }
+    writtenKeys.push({collection: candidate.collection, documentId: candidate.documentId});
     statements.push(env.DB.prepare(
       'INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at',
-    ).bind(ownerId, collection, documentId, JSON.stringify(document), now));
+    ).bind(ownerId, candidate.collection, candidate.documentId, candidate.payload, now));
     // Phase 4: relational projection of the same document.
-    relationalStmts.push(...upsertToStatements(collection, document, nowIso));
+    relationalStmts.push(...upsertToStatements(candidate.collection, JSON.parse(candidate.payload), nowIso));
   }
   for (const item of deletes) {
     const collection = String(item?.collection || '');
@@ -602,6 +807,26 @@ async function patchRecords(request: Request, env: Env) {
     relationalStmts.push(...deleteToStatements(collection, documentId));
   }
 
+  // An unchanged batch writes nothing: bumping the revision or the cursor would
+  // invalidate every client's snapshot guard and force a full re-read for a
+  // push that changed zero rows.
+  if (skippedUnchanged === candidates.length && deletes.length === 0 && candidates.length > 0) {
+    const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
+      .bind(ownerId).all<{revision: number}>();
+    const revision = Number(revisions.results?.[0]?.revision || 0);
+    return json({
+      ok: true,
+      revision,
+      upserted: 0,
+      deleted: 0,
+      skippedUnchanged,
+      backend: 'relational',
+      relationalStatements: 0,
+      relationalSynced: true,
+      cursor: null,
+    });
+  }
+
   const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
     .bind(ownerId).all<{revision: number}>();
   const revision = Math.max(now, Number(revisions.results?.[0]?.revision || 0) + 1);
@@ -610,6 +835,9 @@ async function patchRecords(request: Request, env: Env) {
   ).bind(ownerId, revision, now));
 
   await runStatements(env, statements);
+  // Product writes change the catalog facet lists; drop the in-memory cache so
+  // the next catalog request rebuilds the counts including this write.
+  invalidateMallFacetCache();
   let relationalSynced = true;
   let relationalError: string | undefined;
   try {
@@ -619,15 +847,28 @@ async function patchRecords(request: Request, env: Env) {
     relationalError = error instanceof Error ? error.message : String(error);
     console.warn('Relational record mirror failed:', relationalError);
   }
+  // Keyset cursor for the next delta: the max key this batch wrote, so rows
+  // sharing the same millisecond with rows from another batch are never
+  // excluded by a bare `updated_at > ?` bound. Every written row shares this
+  // batch's `now`, so the max key is the lexicographically last written key.
+  const lastWritten = [...writtenKeys]
+    .sort((left, right) => (left.collection < right.collection ? -1 : left.collection > right.collection ? 1 : left.documentId < right.documentId ? -1 : left.documentId > right.documentId ? 1 : 0))
+    .pop();
+  const patchCursor = lastWritten
+    ? JSON.stringify({ms: now, collection: lastWritten.collection, documentId: lastWritten.documentId})
+    : nowIso;
   return json({
     ok: true,
     revision,
-    upserted: upserts.length,
+    upserted: candidates.length - skippedUnchanged,
     deleted: deletes.length,
+    skippedUnchanged,
     backend: 'relational',
     relationalStatements: relationalStmts.length,
     relationalSynced,
     relationalError,
+    // Server-clock watermark the client stores to bound its next delta read.
+    cursor: patchCursor,
   });
 }
 
@@ -775,24 +1016,32 @@ export default {
         await ensureSchema(env);
         const ownerId = BUSINESS_OWNER_ID;
         const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?').bind(ownerId).all<{revision: number}>();
-        const docCount = await env.DB.prepare('SELECT count(*) as count FROM app_documents WHERE owner_id = ?').bind(ownerId).all<{count: number}>();
-        let relational: Record<string, unknown> | null = null;
-        try {
-          const row = await d1Get(env, `SELECT
-            (SELECT COUNT(*) FROM products) as products,
-            (SELECT COUNT(*) FROM sales) as sales,
-            (SELECT COUNT(*) FROM customers) as customers,
-            (SELECT COUNT(*) FROM suppliers) as suppliers,
-            (SELECT COUNT(*) FROM sale_items) as sale_items`);
-          relational = {
-            products: Number(row?.products || 0),
-            sales: Number(row?.sales || 0),
-            customers: Number(row?.customers || 0),
-            suppliers: Number(row?.suppliers || 0),
-            saleItems: Number(row?.sale_items || 0),
-          };
-        } catch (error) {
-          relational = { error: error instanceof Error ? error.message : String(error) };
+        // Counting every document and five relational tables costs ~2,185 rows on
+        // each poll. Liveness only needs the revision, so the counts are opt-in
+        // (`?detail=1`) and used by the Settings panel rather than by every poll.
+        const wantsDetail = new URL(request.url).searchParams.get('detail') === '1';
+        let totalDocuments: number | undefined;
+        let relational: Record<string, unknown> | undefined;
+        if (wantsDetail) {
+          const docCount = await env.DB.prepare('SELECT count(*) as count FROM app_documents WHERE owner_id = ?').bind(ownerId).all<{count: number}>();
+          totalDocuments = Number(docCount.results?.[0]?.count || 0);
+          try {
+            const row = await d1Get(env, `SELECT
+              (SELECT COUNT(*) FROM products) as products,
+              (SELECT COUNT(*) FROM sales) as sales,
+              (SELECT COUNT(*) FROM customers) as customers,
+              (SELECT COUNT(*) FROM suppliers) as suppliers,
+              (SELECT COUNT(*) FROM sale_items) as sale_items`);
+            relational = {
+              products: Number(row?.products || 0),
+              sales: Number(row?.sales || 0),
+              customers: Number(row?.customers || 0),
+              suppliers: Number(row?.suppliers || 0),
+              saleItems: Number(row?.sale_items || 0),
+            };
+          } catch (error) {
+            relational = { error: error instanceof Error ? error.message : String(error) };
+          }
         }
         return json({
           status: 'healthy',
@@ -800,8 +1049,9 @@ export default {
           backend: 'relational',
           databaseId: '3e95a550-a091-490b-819d-f0acb7ea8dd8',
           revision: Number(revisions.results?.[0]?.revision || 0),
-          totalDocuments: Number(docCount.results?.[0]?.count || 0),
+          totalDocuments,
           relational,
+          detail: wantsDetail,
           endpoint: 'Cloudflare D1 Edge Worker',
           timestamp: new Date().toISOString(),
         });

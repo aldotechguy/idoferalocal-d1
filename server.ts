@@ -54,7 +54,7 @@ let db = createDatabaseInstance();
 // UI needs zero changes. Legacy app_documents tables are kept for rollback reads.
 import { makeNodeAdapter } from "./src/server/nodeAdapter";
 import { ensureRelationalSchemaNode, makeNodeMallExecutor } from "./src/server/nodeAdapter";
-import { handleMallApi } from "./src/server/mallApi";
+import { handleMallApi, invalidateMallFacetCache } from "./src/server/mallApi";
 import { handleStaffMallApi, maintainMall } from "./src/server/mallOrderAdminApi";
 import { handleStaffMallListingApi } from "./src/server/mallListingApi";
 import { handleStaffProductImageApi, handlePublicImageRequest } from "./src/server/productImageApi";
@@ -1211,6 +1211,9 @@ app.put("/api/storage/snapshot", async (req, res) => {
       throw txErr;
     }
 
+    // A snapshot restore can replace every product; drop the catalog facet cache.
+    invalidateMallFacetCache();
+
     // Replicate to Cloudflare D1 non-blocking so local SQLite commit is instant and reliable
     executeRemoteD1Statements(remoteStatements).catch((remoteErr: any) => {
       console.warn("Non-blocking Cloudflare D1 replication notice:", remoteErr?.message || remoteErr);
@@ -1301,6 +1304,10 @@ app.patch("/api/storage/records", async (req, res) => {
         }
       }
     }
+
+    // Product writes change the catalog facet lists; drop the in-memory cache
+    // so the next catalog request rebuilds the counts including this write.
+    invalidateMallFacetCache();
 
     const revRow = db.prepare("SELECT revision FROM sync_revisions WHERE owner_id = ?").get(ownerId) as any;
     const currentRevision = Number(revRow?.revision || 0);

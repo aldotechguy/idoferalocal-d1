@@ -6,6 +6,14 @@ import { normalizedPhoneSql } from '../shared/mallPhone.js';
  * a duplicate-column error means the column already exists, which is the normal
  * path on every start after the first. Both runtimes apply this before serving.
  */
+/**
+ * Bumped whenever the additive schema below changes. A deployed Worker checks
+ * this single row before re-running the DDL, so a cold isolate no longer repeats
+ * ~80 statements (and the 5 known-failing duplicate-column ALTERs) on every
+ * start. See `ensureSchema` in sites-worker.ts.
+ */
+export const MALL_SCHEMA_VERSION = 4;
+
 export const MALL_MERCH_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: 'mall_featured', ddl: 'ALTER TABLE products ADD COLUMN mall_featured INTEGER NOT NULL DEFAULT 0' },
   { name: 'mall_display_order', ddl: 'ALTER TABLE products ADD COLUMN mall_display_order INTEGER' },
@@ -91,7 +99,7 @@ export function webhookConfigured(config: MallConfig) {
 export async function mallReadiness(exec: MallExecutor) {
   const checks: Record<string, boolean> = {};
   try {
-    checks.schema = (await exec.queryAll('SELECT version FROM mall_schema_versions WHERE version=2')).length === 1;
+    checks.schema = (await exec.queryAll('SELECT version FROM mall_schema_versions WHERE version=?', [MALL_SCHEMA_VERSION])).length === 1;
     checks.stockTrigger = (await exec.queryAll("SELECT name FROM sqlite_master WHERE type='trigger' AND name='trg_products_no_oversell'")).length === 1;
     await exec.queryAll('SELECT o.id FROM mall_orders o JOIN mall_order_items i ON i.mall_order_id=o.id JOIN payments p ON p.order_id=o.id LIMIT 1');
     checks.database = true;

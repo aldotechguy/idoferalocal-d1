@@ -125,7 +125,54 @@ function publicProduct(r: any) {
     promoActive: n(r.promo_active) === 1,
   };
 }
+/**
+ * Facet cache (per runtime process/isolate). The category list is identical for
+ * every catalog and search request, and the brand list varies only with the
+ * base scope (search text excluded — it is computed in JS; category filter
+ * included). Both are GROUP BY scans over all visible products, so they are
+ * cached in memory for FACET_TTL_MS and invalidated by staff product writes
+ * (PATCH /api/storage/records, snapshot restore). Staleness can only ever
+ * affect the filter sidebar counts — product rows themselves are always read
+ * fresh. Multi-isolate deployments reconcile within the TTL even without an
+ * invalidation call, because each isolate owns its own cache.
+ */
+const FACET_TTL_MS = 60_000;
+const FACET_BRAND_SCOPES_MAX = 32;
+type FacetRows = { name: string; count: number }[];
+let cachedCategories: { expiresAt: number; rows: FacetRows } | null = null;
+const cachedBrandScopes = new Map<string, { expiresAt: number; rows: FacetRows }>();
 
+/** Staff product writes must call this so sidebar counts never outlive the write. */
+export function invalidateMallFacetCache(): void {
+  cachedCategories = null;
+  cachedBrandScopes.clear();
+}
+
+const facetFresh = <T extends { expiresAt: number }>(entry: T | null | undefined) =>
+  entry && entry.expiresAt > Date.now() ? entry : null;
+
+async function cachedCategoryFacets(exec: MallExecutor): Promise<FacetRows> {
+  const fresh = facetFresh(cachedCategories);
+  if (fresh) return fresh.rows;
+  const rows = (await exec.queryAll(
+    `SELECT category_name AS name, COUNT(*) AS count FROM products WHERE ${VISIBLE} GROUP BY category_name ORDER BY count DESC, name ASC`,
+  )) as FacetRows;
+  cachedCategories = { expiresAt: Date.now() + FACET_TTL_MS, rows };
+  return rows;
+}
+
+async function cachedBrandFacets(exec: MallExecutor, whereBase: string, baseParams: unknown[]): Promise<FacetRows> {
+  const key = `${whereBase}|${JSON.stringify(baseParams)}`;
+  const fresh = facetFresh(cachedBrandScopes.get(key));
+  if (fresh) return fresh.rows;
+  const rows = (await exec.queryAll(
+    `SELECT brand AS name, COUNT(*) AS count FROM products WHERE ${whereBase} AND brand <> '' GROUP BY brand ORDER BY count DESC, name ASC`,
+    baseParams,
+  )) as FacetRows;
+  if (cachedBrandScopes.size >= FACET_BRAND_SCOPES_MAX) cachedBrandScopes.clear();
+  cachedBrandScopes.set(key, { expiresAt: Date.now() + FACET_TTL_MS, rows });
+  return rows;
+}
 
 async function getCatalog(exec: MallExecutor, url: URL) {
   const q = s(url.searchParams.get('q')).trim().slice(0, 80);
@@ -142,6 +189,9 @@ async function getCatalog(exec: MallExecutor, url: URL) {
 
   const rawInStock = url.searchParams.get('inStock');
   if (rawInStock !== null && !['0', '1'].includes(rawInStock)) fail(400, 'inStock must be 0 or 1.');
+  const stockFirst = url.searchParams.get('stockFirst');
+  if (stockFirst !== null && !['0', '1'].includes(stockFirst)) fail(400, 'stockFirst must be 0 or 1.');
+  const stockOrder = stockFirst === '1' ? '(stock_qty > 0) DESC, ' : '';
 
   // Base scope: everything the storefront may show, minus brand/inStock. The brand
   // list is derived from this scope so the filter reflects the WHOLE catalog page
@@ -173,10 +223,10 @@ async function getCatalog(exec: MallExecutor, url: URL) {
       ? `(SELECT CAST(key AS INTEGER) FROM json_each(?) WHERE value = products.id)` : sort;
     const rows = ids.length ? await exec.queryAll(
       `SELECT ${CATALOG_COLUMNS} FROM products WHERE ${VISIBLE} AND id IN (SELECT value FROM json_each(?))
-       ORDER BY ${order} LIMIT ? OFFSET ?`,
+       ORDER BY ${stockOrder}${order} LIMIT ? OFFSET ?`,
       [encodedIds, ...(sortKey === 'relevance' ? [encodedIds] : []), limit, offset],
     ) : [];
-    const categories = await exec.queryAll(`SELECT category_name AS name, COUNT(*) AS count FROM products WHERE ${VISIBLE} GROUP BY category_name ORDER BY count DESC, name ASC`);
+    const categories = await cachedCategoryFacets(exec);
     return json({ products: rows.map(publicProduct), total: ids.length, limit, offset, sort: sortKey,
       search: { query: q, approximate: !strong && matches.length > 0 },
       categories: categories.map(row => ({ name: s(row.name, 'Uncategorized'), count: n(row.count) })),
@@ -194,23 +244,26 @@ async function getCatalog(exec: MallExecutor, url: URL) {
   if (rawInStock === '1') filters.push('stock_qty > 0');
   const where = filters.join(' AND ');
 
+  // Page + filtered total in ONE windowed query: a catalog page view previously
+  // scanned the products table twice (page, then COUNT). When the offset lands
+  // past the end no row is returned and the window value is absent, so fall
+  // back to the plain count — that only costs an extra query on the rare
+  // out-of-range page, not on any normal page view.
   const rows = await exec.queryAll(
-    `SELECT ${CATALOG_COLUMNS} FROM products WHERE ${where} ORDER BY ${sort} LIMIT ? OFFSET ?`,
+    `SELECT ${CATALOG_COLUMNS}, COUNT(*) OVER() AS page_total FROM products WHERE ${where} ORDER BY ${stockOrder}${sort} LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );
-  const totalRow = await exec.queryAll(`SELECT COUNT(*) AS n FROM products WHERE ${where}`, params);
-  const catRows = await exec.queryAll(
-    `SELECT category_name AS name, COUNT(*) AS count FROM products WHERE ${VISIBLE} GROUP BY category_name ORDER BY count DESC, name ASC`,
-  );
-  const brandRows = await exec.queryAll(
-    `SELECT brand AS name, COUNT(*) AS count FROM products WHERE ${whereBase} AND brand <> '' GROUP BY brand ORDER BY count DESC, name ASC`,
-    baseParams,
-  );
+  const total = n((rows[0] as any)?.page_total
+    ?? ((await exec.queryAll(`SELECT COUNT(*) AS n FROM products WHERE ${where}`, params))[0] as any)?.n);
+  // Facet lists (category/brand counts) are identical across requests until a
+  // staff product write lands; they are served from the short-TTL cache above.
+  const catRows = await cachedCategoryFacets(exec);
+  const brandRows = await cachedBrandFacets(exec, whereBase, baseParams);
   return json({
     products: rows.map(publicProduct),
     categories: catRows.map((c) => ({ name: s(c.name, 'Uncategorized'), count: n(c.count) })),
     brands: brandRows.map((b) => ({ name: s(b.name), count: n(b.count) })),
-    total: n((totalRow[0] as any)?.n),
+    total,
     limit,
     offset,
     sort: sortKey,
@@ -237,9 +290,9 @@ async function getHomeSections(exec: MallExecutor, session: string) {
       FROM candidates
     ) SELECT * FROM ranked WHERE stock_qty > 0 OR stock_rank = 1 ORDER BY ${order} LIMIT ${limit}`, params);
   const [flash, top, newest, again] = await Promise.all([
-    selectRail(`SELECT ${CATALOG_COLUMNS}, updated_at FROM products WHERE ${VISIBLE}
+    exec.queryAll(`SELECT ${CATALOG_COLUMNS} FROM products WHERE ${VISIBLE}
       AND ${effectivePrice('products')} > 0 AND ${effectivePrice('products')} < retail_price_kobo
-      `, CATALOG_SORTS.relevance, 10),
+      ORDER BY ${CATALOG_SORTS.relevance} LIMIT 10`),
     selectRail(`SELECT ${CATALOG_COLUMNS}, updated_at FROM products WHERE ${VISIBLE}`, CATALOG_SORTS.popular, 12),
     selectRail(`SELECT ${CATALOG_COLUMNS}, (${lastRestock}) AS last_restock FROM products
       WHERE ${VISIBLE} AND (${lastRestock}) IS NOT NULL`, 'last_restock DESC, id ASC', 12),

@@ -5,11 +5,10 @@ import type { MallCategory, MallProduct } from '../types/mall';
 import { MallProductCard } from './MallProductCard';
 import { ProductCardSkeleton } from './mallUi';
 import { AsyncState } from '../components/common/AsyncState';
-import { arrangeStockRows, mallGridColumns } from '../shared/mallStockRows';
 
 const PAGE_SIZE = 10;
 
-export type MallCatalogParams = { limit: number; offset: number; sort: string; brand?: string };
+export type MallCatalogParams = { limit: number; offset: number; sort: string; brand?: string; stockFirst?: 0 | 1 };
 export type MallCatalogFetcher = (params: MallCatalogParams) => Promise<{
   products: MallProduct[]; total: number; brands?: MallCategory[];
   search?: { query: string; approximate: boolean };
@@ -33,16 +32,8 @@ export const MallBrowseGrid: React.FC<{
   fetchKey: string;
   fetchFn: MallCatalogFetcher;
   emptyTitle?: string;
-  maxSoldOutPerRow?: number;
-}> = ({ title, sub, fetchKey, fetchFn, emptyTitle, maxSoldOutPerRow }) => {
-  const [columns, setColumns] = React.useState(() => mallGridColumns(typeof window === 'undefined' ? 0 : window.innerWidth));
-  React.useEffect(() => {
-    if (maxSoldOutPerRow === undefined) return;
-    const resize = () => setColumns(mallGridColumns(window.innerWidth));
-    resize();
-    window.addEventListener('resize', resize);
-    return () => window.removeEventListener('resize', resize);
-  }, [maxSoldOutPerRow]);
+  stockFirst?: boolean;
+}> = ({ title, sub, fetchKey, fetchFn, emptyTitle, stockFirst = false }) => {
   const [items, setItems] = React.useState<MallProduct[]>([]);
   const [total, setTotal] = React.useState(0);
   const [brands, setBrands] = React.useState<MallCategory[]>([]);
@@ -66,8 +57,9 @@ export const MallBrowseGrid: React.FC<{
     limit: PAGE_SIZE,
     offset,
     sort,
+    ...(stockFirst ? {stockFirst: 1 as const} : {}),
     ...(brand !== 'all' ? { brand } : {}),
-  }), [sort, brand]);
+  }), [sort, brand, stockFirst]);
 
   React.useEffect(() => {
     let alive = true;
@@ -150,14 +142,6 @@ export const MallBrowseGrid: React.FC<{
           {fetchKey.startsWith('search:') ? <SearchX className="w-9 h-9 mx-auto text-slate-300 dark:text-slate-600" /> : <Package className="w-9 h-9 mx-auto text-slate-300 dark:text-slate-600" />}
           <p className="mt-2 text-sm font-extrabold text-slate-700 dark:text-slate-200">{emptyTitle || 'No products found'}</p>
           <p className="text-xs text-slate-400 mt-1">Try a different search, brand or category.</p>
-        </div>
-      ) : maxSoldOutPerRow !== undefined ? (
-        <div className="space-y-2.5 sm:space-y-3" aria-busy={loadingMore}>
-          {arrangeStockRows<MallProduct>(items, columns, maxSoldOutPerRow).map((row, index) => (
-            <div key={index} className="grid gap-2.5 sm:gap-3" style={{gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`}}>
-              {row.map(product => <MallProductCard key={product.id} product={product} />)}
-            </div>
-          ))}
         </div>
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5 sm:gap-3" aria-busy={loadingMore}>

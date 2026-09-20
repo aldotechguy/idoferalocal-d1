@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
-import { arrangeStockRows, mallGridColumns } from '../src/shared/mallStockRows.ts';
 import { catalogStatus, productStockLabel } from '../src/shared/productStatus.ts';
 import { productToRow } from '../src/server/relationalMapper.ts';
 import { parseRoute } from '../src/hooks/useRoute.ts';
@@ -23,26 +22,12 @@ function entranceFixture() {
   return { db, query, DB };
 }
 
-test('Explore rows cap sold-out items without dropping or duplicating products across pages and widths', () => {
-  const items = Array.from({length: 37}, (_, id) => ({id, stock: id % 4 === 0 ? 5 : 0}));
-  for (const count of [10, 20, 37]) {
-    for (const columns of [2, 3, 4, 5]) {
-      const input = items.slice(0, count);
-      const rows = arrangeStockRows(input, columns, 2);
-      const flat = rows.flat();
-      assert.equal(flat.length, count);
-      assert.equal(new Set(flat.map(p => p.id)).size, count);
-      assert.ok(rows.every(row => row.length <= columns && row.filter(p => p.stock <= 0).length <= 2));
-      for (const inStock of [true, false]) {
-        assert.deepEqual(flat.filter(p => (p.stock > 0) === inStock), input.filter(p => (p.stock > 0) === inStock));
-      }
-    }
-  }
-  assert.deepEqual(arrangeStockRows([], 5, 2), []);
-  assert.deepEqual(arrangeStockRows([{stock: 0}, {stock: -1}, {stock: 0}], 5, 2).map(row => row.length), [2, 1]);
-  assert.deepEqual([639, 640, 1023, 1024, 1279, 1280].map(mallGridColumns), [2, 3, 3, 4, 4, 5]);
+test('Explore requests stock-first ordering without a per-row cap', () => {
   const home = fs.readFileSync('src/mall-site/MallHome.tsx', 'utf8');
-  assert.match(home, /maxSoldOutPerRow=\{2\}/);
+  assert.match(home, /fetchFn=\{fetchSearch\(''\)\} stockFirst/);
+  const grid = fs.readFileSync('src/mall-site/MallBrowseGrid.tsx', 'utf8');
+  assert.doesNotMatch(grid, /maxSoldOutPerRow|arrangeStockRows/);
+  assert.match(grid, /stockFirst: 1 as const/);
 });
 
 test('catalog visibility is independent of stock and archive survives normalization', () => {
@@ -472,4 +457,117 @@ test('checkout customer card does not scroll over the payment method fieldset', 
   const checkout = fs.readFileSync('src/mall-site/MallCheckout.tsx', 'utf8');
   assert.match(checkout, /Payment method/);
   assert.doesNotMatch(checkout, /lg:sticky/);
+});
+test('schema marker is checked before the bootstrap so cold isolates do not replay it', () => {
+  const workerSource = fs.readFileSync('sites-worker.ts', 'utf8');
+  assert.ok(
+    workerSource.indexOf('await schemaVersionCurrent(env)') < workerSource.indexOf('const statements: D1PreparedStatement[] = ['),
+    'the marker lookup must run before the DDL list is built',
+  );
+  assert.match(workerSource, /SELECT 1 AS present FROM mall_schema_versions WHERE version = \?/);
+  // The marker is recorded only after the additive schema is in place.
+  assert.ok(
+    workerSource.indexOf('for (const index of MALL_CATALOG_INDEXES)') <
+      workerSource.indexOf('INSERT OR IGNORE INTO mall_schema_versions(version, installed_at) VALUES (?, ?)'),
+  );
+});
+
+test('dashboard revalidates the snapshot instead of re-reading every document', () => {
+  const source = fs.readFileSync('src/services/d1StorageService.ts', 'utf8');
+  const read = source.slice(source.indexOf('async function readCloudSnapshot'), source.indexOf('async function writeSnapshot'));
+  assert.match(read, /headers\['if-none-match'\] = `"\$\{knownGuard\}"`/);
+  assert.match(read, /if \(response\.status === 304\)/);
+  assert.match(read, /rememberSnapshotGuard\(cloud\.revision, cloud\.backend \|\| 'documents'\)/);
+  // A 304 carries no revision of its own: never overwrite the stored one.
+  assert.doesNotMatch(read, /localStorage\.setItem\(REVISION_KEY/);
+  const init = source.slice(source.indexOf('export async function initializeD1Storage'), source.indexOf('export async function pullLatestFromD1'));
+  assert.ok(init.indexOf('if (cloud.notModified) return null;') >= 0, 'a 304 must merge nothing');
+  const pull = source.slice(source.indexOf('export async function pullLatestFromD1'), source.indexOf('export function queueD1Snapshot'));
+  assert.ok(pull.indexOf('if (cloud.notModified) return null;') >= 0, 'a 304 must merge nothing on pull');
+});
+
+test('open staff workspaces revalidate sessions without polling hidden tabs', () => {
+  const auth = fs.readFileSync('src/context/AuthContext.tsx', 'utf8');
+  assert.match(auth, /const SESSION_RECHECK_MS = 120000;/);
+  assert.match(auth, /const poll = \(\) => \{ if \(!document\.hidden\) void check\(\); \};/);
+  assert.match(auth, /window\.setInterval\(poll, SESSION_RECHECK_MS\)/);
+  assert.match(auth, /document\.addEventListener\('visibilitychange', onVisibilityChange\)/);
+  assert.doesNotMatch(auth, /setInterval\(check, 30000\)/);
+});
+
+test('staff sync stays quiet in the background and counts stay opt-in', () => {
+  const hook = fs.readFileSync('src/hooks/useCloudSync.ts', 'utf8');
+  assert.match(hook, /const AUTO_PING_INTERVAL_MS = 15 \* 60 \* 1000;/);
+  assert.doesNotMatch(hook, /const AUTO_PING_INTERVAL_MS = 5 \* 60 \* 1000;/);
+  assert.match(hook, /function sharedD1Health\(detail: boolean, force: boolean\)/);
+  assert.match(hook, /if \(healthInFlight && !detail\) return healthInFlight;/);
+  assert.match(hook, /if \(!detail && !force && lastHealthStatus && Date\.now\(\) - lastHealthPingAt < AUTO_PING_INTERVAL_MS\)/);
+  const health = fs.readFileSync('src/services/d1StorageService.ts', 'utf8');
+  assert.match(health, /const healthUrl = detail \? '\/api\/storage\/d1\/health\?detail=1' : '\/api\/storage\/d1\/health';/);
+  const workerSource = fs.readFileSync('sites-worker.ts', 'utf8');
+  assert.match(workerSource, /searchParams\.get\('detail'\) === '1'/);
+});
+
+test('automatic save batches only changed records with a bounded follow-up read', () => {
+  const hook = fs.readFileSync('src/hooks/useCloudSync.ts', 'utf8');
+  assert.match(hook, /autoSyncChangedRecords\(changes, deps\)/);
+  assert.match(hook, /getItem<Record<string, unknown>>\(collection, documentId\)/);
+  assert.match(hook, /readDeltaCursor\(\)/);
+  const flush = hook.slice(hook.indexOf('const flushAutoSync = useCallback'), hook.indexOf('}, []);', hook.indexOf('const flushAutoSync = useCallback')));
+  assert.doesNotMatch(flush, /getAllItems/);
+  const service = fs.readFileSync('src/services/d1StorageService.ts', 'utf8');
+  assert.match(service, /export const AUTO_SYNC_DEBOUNCE_MS = 2000;/);
+  assert.match(service, /const query = since \? `\?since=\$\{encodeURIComponent\(since\)\}` : '';/);
+  const workerSource = fs.readFileSync('sites-worker.ts', 'utf8');
+  assert.match(workerSource, /const SNAPSHOT_DELTA_LIMIT = 500;/);
+});
+
+test('unchanged store answers 304 and a stale token still returns the catalog', async t => {
+  const db = new DatabaseSync(':memory:');
+  t.after(() => db.close());
+  const prepare = (sql: string) => ({
+    sql, params: [] as unknown[],
+    bind(...params: unknown[]) { this.params = params; return this; },
+    async all() { return { results: db.prepare(sql).all(...this.params as any[]) }; },
+    async run() { return { meta: { changes: Number(db.prepare(sql).run(...this.params as any[]).changes) } }; },
+  });
+  const env = {
+    DB: {
+      prepare,
+      async batch(statements: ReturnType<typeof prepare>[]) {
+        return statements.map((st) => ({ meta: { changes: Number(db.prepare(st.sql).run(...st.params as any[]).changes) } }));
+      },
+    },
+    ASSETS: { fetch: async () => new Response('asset') },
+  } as unknown as Parameters<typeof worker.fetch>[1];
+
+  await worker.fetch(new Request('https://test/api/mall/health'), env);
+  const token = 'snapshot-guard-session';
+  const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))]
+    .map((b) => b.toString(16).padStart(2, '0')).join('');
+  db.prepare(`INSERT INTO app_users(id,email,display_name,role,status,password_hash,password_salt,created_at)
+    VALUES ('staff','staff@test.invalid','Manager','Administrator','Active','x','y','now')`).run();
+  db.prepare('INSERT INTO app_sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)')
+    .run(hash, 'staff', Date.now(), Date.now() + 60000);
+  db.prepare('INSERT INTO sync_revisions(owner_id,revision,updated_at) VALUES (?,?,?)')
+    .run('idofera-business', 7, Date.now());
+  const cookie = { cookie: `idofera_session=${token}` };
+
+  const first = await worker.fetch(new Request('https://test/api/storage/snapshot?fresh=true', { headers: cookie }), env);
+  assert.equal(first.status, 200);
+  assert.equal(first.headers.get('etag'), '"7-documents"');
+  assert.equal((await first.json() as any).hasData, false);
+
+  const guarded = await worker.fetch(new Request('https://test/api/storage/snapshot?fresh=true', {
+    headers: { ...cookie, 'if-none-match': '"7-documents"' },
+  }), env);
+  assert.equal(guarded.status, 304);
+  assert.equal(guarded.headers.get('etag'), '"7-documents"');
+  assert.equal(await guarded.text(), '');
+
+  const stale = await worker.fetch(new Request('https://test/api/storage/snapshot?fresh=true', {
+    headers: { ...cookie, 'if-none-match': '"6-documents"' },
+  }), env);
+  assert.equal(stale.status, 200);
+  assert.ok((await stale.json() as any).revision === 7);
 });

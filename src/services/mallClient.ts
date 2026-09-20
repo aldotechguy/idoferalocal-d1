@@ -152,12 +152,13 @@ export const mallClient = {
   configuration: () => fetchMall('/config'),
   product: (id: string) => fetchMall(`/products/${encodeURIComponent(id)}`) as Promise<{product:MallProduct}>,
 
-  products: (params?: { q?: string; category?: string; brand?: string; inStock?: 0 | 1; sort?: string; limit?: number; offset?: number }, options?: { signal?: AbortSignal }) => {
+  products: (params?: { q?: string; category?: string; brand?: string; inStock?: 0 | 1; stockFirst?: 0 | 1; sort?: string; limit?: number; offset?: number }, options?: { signal?: AbortSignal }) => {
     const qs = new URLSearchParams();
     if (params?.q) qs.set('q', params.q);
     if (params?.category) qs.set('category', params.category);
     if (params?.brand) qs.set('brand', params.brand);
     if (params?.inStock != null) qs.set('inStock', String(params.inStock));
+    if (params?.stockFirst != null) qs.set('stockFirst', String(params.stockFirst));
     if (params?.sort) qs.set('sort', params.sort);
     if (params?.limit != null) qs.set('limit', String(params.limit));
     if (params?.offset != null) qs.set('offset', String(params.offset));

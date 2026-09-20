@@ -53,6 +53,13 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+/**
+ * Session revalidation cadence for an OPEN staff workspace. Polling only while
+ * the tab is visible keeps a backgrounded Dashboard from hitting `/api/auth/session`
+ * every 30 seconds; focus/visibility changes still revalidate immediately.
+ */
+const SESSION_RECHECK_MS = 120000;
+
 export const SUPER_ADMIN_USER: UserProfile = {
   id: 'usr-superadmin-idofera',
   email: 'michaelidongesit5@gmail.com',
@@ -227,9 +234,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (active && !user && !entranceAllowed) window.location.replace('/');
       } catch { /* A transient network error is not a confirmed expired session. */ }
     };
-    const timer = window.setInterval(check, 30000);
+    // A backgrounded tab must not keep reading the session table on a timer;
+    // focus and visibility changes still revalidate as soon as the user returns.
+    const poll = () => { if (!document.hidden) void check(); };
+    const onVisibilityChange = () => { if (!document.hidden) void check(); };
+    const timer = window.setInterval(poll, SESSION_RECHECK_MS);
     window.addEventListener('focus', check);
-    return () => { active = false; window.clearInterval(timer); window.removeEventListener('focus', check); };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', check);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, []);
 
   // Load users from IndexedDB and Central Cloud Firestore on boot

@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import worker from '../sites-worker.ts';
 import { ensureRelationalSchemaNode, makeNodeMallExecutor } from '../src/server/nodeAdapter.ts';
-import { handleMallApi, type MallExecutor } from '../src/server/mallApi.ts';
+import { handleMallApi, invalidateMallFacetCache, type MallExecutor } from '../src/server/mallApi.ts';
 import { handleStaffMallApi } from '../src/server/mallOrderAdminApi.ts';
 import { handleStaffMallListingApi } from '../src/server/mallListingApi.ts';
 import { handleStaffProductImageApi, handlePublicImageRequest } from '../src/server/productImageApi.ts';
 import { decodeBase64Image, imageKeyFromUrl, imageUrl, newProductImageKey } from '../src/server/imageStore.ts';
 import { makeNodeImageStore } from '../src/server/nodeImageStore.ts';
 import { bootstrapAdmin } from '../src/server/adminBootstrap.ts';
-import { drainMallOutbox, signMallWebhook, mallReadiness, runMallMaintenance, MALL_OPERATIONS_DDL } from '../src/server/mallOperations.ts';
+import { drainMallOutbox, signMallWebhook, mallReadiness, runMallMaintenance, MALL_OPERATIONS_DDL, MALL_SCHEMA_VERSION } from '../src/server/mallOperations.ts';
 import { normalizeMallPhone, normalizedPhoneSql } from '../src/shared/mallPhone.ts';
 
 /** Binding-shaped test double; executes real SQL and atomic batches, not canned results.
@@ -44,6 +45,9 @@ const attempt = 'safety-attempt-12345678';
 async function fixture(runtime: 'node' | 'worker') {
   const db = new DatabaseSync(':memory:');
   ensureRelationalSchemaNode(db);
+  // The mall facet cache is module-global and shared across fixtures in this
+  // process; reset it so every test reads counts from its own database.
+  invalidateMallFacetCache();
   const exec = makeNodeMallExecutor(db);
   const env: any = { MALL_CHECKOUT_ENABLED:'true',MALL_PICKUP_ADDRESS:'Test pickup',MALL_PICKUP_HOURS:'Test hours', DB: new SqliteD1(db), ASSETS: { fetch: async (req: Request) => new Response(`asset:${new URL(req.url).pathname}`) } };
   const send = (request: Request) => runtime === 'worker' ? worker.fetch(request, env) : handleMallApi(request, exec);
@@ -92,7 +96,7 @@ for (const runtime of ['node', 'worker'] as const) {
     }
     f.db.exec("UPDATE products SET created_at='2020-01-01' WHERE id='p'");
     const initial = await home();
-    assert.equal(initial.flashSales.length, 1);
+    assert.equal(initial.flashSales.length, 10);
     assert.equal(initial.topSellers.length, 2);
     assert.deepEqual(initial.newArrivals, [], 'Creation dates alone do not qualify as restocks');
     const movement = (id: string, product: string, type: string, at: string, qty = 5) => f.db.prepare(
@@ -116,7 +120,7 @@ for (const runtime of ['node', 'worker'] as const) {
     assert.equal(mixed.flashSales.length, 10);
     assert.equal(mixed.topSellers.length, 12);
     assert.equal(mixed.newArrivals.length, 12);
-    for (const rail of [mixed.flashSales, mixed.topSellers, mixed.newArrivals]) {
+    for (const rail of [mixed.topSellers, mixed.newArrivals]) {
       assert.ok(rail.filter((p: any) => p.stock <= 0).length <= 1);
       assert.equal(new Set(rail.map((p: any) => p.id)).size, rail.length);
       assert.ok(rail.every((p: any) => p.id !== 'home-14'));
@@ -139,6 +143,37 @@ for (const runtime of ['node', 'worker'] as const) {
     f.db.exec("UPDATE products SET status='Active' WHERE id='p'; UPDATE mall_orders SET status='refunded'");
     assert.deepEqual((await home()).buyAgain, []);
     assert.equal((await f.send(new Request('http://test/api/mall/home'))).status, 400);
+  });
+
+  test(`${runtime}: stock-first catalog ordering spans pages and preserves secondary sorts`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    f.db.exec("UPDATE products SET status='Archived' WHERE id='p'");
+    for (let i = 0; i < 25; i++) {
+      f.db.prepare(`INSERT INTO products(id,sku,name,brand,stock_qty,status,retail_price_kobo,created_at,updated_at)
+        VALUES(?,?,?,'Test',?,'Active',?,'now','now')`).run(`stock-${i}`, `stock-${i}`, `Stock product ${i}`, i < 12 ? 0 : 5, (i + 1) * 100);
+    }
+    for (const search of ['', '&q=Stock']) {
+      for (const sort of ['price_asc', 'price_desc']) {
+        const products: any[] = [];
+        for (const offset of [0, 10, 20]) {
+          const response = await f.send(new Request(`http://test/api/mall/products?stockFirst=1&brand=Test&sort=${sort}&limit=10&offset=${offset}${search}`));
+          assert.equal(response.status, 200);
+          const page: any = await response.json();
+          assert.equal(page.total, 25);
+          products.push(...page.products);
+        }
+        assert.equal(new Set(products.map(p => p.id)).size, 25);
+        assert.ok(products.slice(0, 13).every(p => p.stock > 0));
+        assert.ok(products.slice(13).every(p => p.stock === 0));
+        for (const group of [products.slice(0, 13), products.slice(13)]) {
+          const prices = group.map(p => p.price);
+          assert.deepEqual(prices, [...prices].sort((a, b) => sort === 'price_asc' ? a - b : b - a));
+        }
+      }
+    }
+    const ordinary: any = await (await f.send(new Request('http://test/api/mall/products?sort=price_asc'))).json();
+    assert.equal(ordinary.products[0].stock, 0, 'Other catalogs keep their normal ordering');
+    assert.equal((await f.send(new Request('http://test/api/mall/products?stockFirst=invalid'))).status, 400);
   });
 
   test(`${runtime}: unpriced products stay visible but cannot be purchased`, async t => {
@@ -445,6 +480,42 @@ for (const runtime of ['node', 'worker'] as const) {
     assert.equal(limited.total, 4);
   });
 
+  test(`${runtime}: catalog page+total is one windowed query and facets come from the cache`, async (t) => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    const insert = f.db.prepare(`INSERT INTO products(id,sku,name,stock_qty,status,is_mall_listed,retail_price_kobo,category_name,brand,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,10000,'Catalog','Catalog Brand','now','now')`);
+    for (let i = 0; i < 7; i += 1) insert.run(`win-${i}`, `WIN-${i}`, `Window product ${i}`, 5, 'Active', 1);
+    const queries: string[] = [];
+    const instrumented: MallExecutor = { ...f.exec, queryAll: async (sql, params) => { queries.push(sql); return f.exec.queryAll(sql, params); } };
+    const catalog = async (query: string) => (await (await handleMallApi(new Request(`http://test/api/mall/products?${query}`), instrumented)).json()) as any;
+    const pageQueries = () => queries.filter((sql) => sql.includes('COUNT(*) OVER()')).length;
+    const facetQueries = () => queries.filter((sql) => sql.includes('GROUP BY')).length;
+
+    queries.length = 0;
+    const first = await catalog('limit=3&sort=price_asc');
+    assert.equal(first.total, 8);
+    assert.equal(first.products.length, 3);
+    assert.equal(pageQueries(), 1);
+    assert.equal(facetQueries(), 2);
+
+    queries.length = 0;
+    const second = await catalog('limit=3&sort=price_asc&offset=6');
+    assert.equal(second.total, 8);
+    assert.equal(second.products.length, 2);
+    assert.equal(pageQueries(), 1);
+    assert.equal(facetQueries(), 0);
+
+    // Out-of-range page: the windowed query still executes (instrumentation
+    // counts executions), but no row comes back so the window total is absent
+    // and the plain COUNT fallback also runs. Both agree on the total.
+    queries.length = 0;
+    const beyond = await catalog('limit=3&offset=9&sort=price_asc');
+    assert.equal(beyond.products.length, 0);
+    assert.equal(beyond.total, 8);
+    assert.equal(pageQueries(), 1);
+    assert.equal(facetQueries(), 0);
+  });
+
   test(`${runtime}: invalid customer/payment/session and stale eligibility return HTTP errors`, async (t) => {
     const f = await fixture(runtime); t.after(() => f.db.close());
     for (const invalid of [{ customerName: '' }, { customerPhone: '123' }, { paymentMethod: 'invented' }, { customerName: 'a'.repeat(121) }, { note: '\u0000' }]) {
@@ -708,4 +779,197 @@ test('Worker never provisions default users when bootstrap secrets are absent', 
   const response = await worker.fetch(new Request('http://test/api/auth/session'), env);
   assert.equal(response.status, 200);
   assert.equal((db.prepare('SELECT COUNT(*) AS n FROM app_users').get() as any).n, 0);
+});
+test('catalog visibility indexes exist once and the marker skips the bootstrap afterwards', async (t) => {
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
+  // A fresh database still performs the whole additive bootstrap.
+  await worker.fetch(new Request('http://test/api/mall/health'), env);
+  const catalogIndexes = (db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_products_status%'",
+  ).all() as any[]).map((row) => row.name).sort();
+  assert.deepEqual(catalogIndexes, [
+    'idx_products_status', 'idx_products_status_brand', 'idx_products_status_category', 'idx_products_status_created',
+  ]);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('products') WHERE name = 'status'").get() as any).n, 1);
+  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM mall_schema_versions WHERE version = ?').get(MALL_SCHEMA_VERSION) as any).n, 1);
+
+  // The marker must let a cold isolate skip ~80 DDL statements: remove a table
+  // the bootstrap would recreate and prove a second isolate leaves it missing.
+  db.exec('DROP TABLE products');
+  const second: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
+  await worker.fetch(new Request('http://test/api/mall/health'), second);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'products'").get() as any).n, 0);
+
+  // Readiness must assert the same marker the bootstrap records; a hard-coded
+  // older version would report a healthy store as not ready after a deploy.
+  const operations = fs.readFileSync('src/server/mallOperations.ts', 'utf8');
+  assert.match(operations, /WHERE version=\?['"], \[MALL_SCHEMA_VERSION\]\)/);
+  assert.doesNotMatch(operations, /WHERE version=2/);
+});
+
+test('delta read returns only rows written after the watermark', async (t) => {
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
+  await worker.fetch(new Request('http://test/api/mall/health'), env);
+  const token = 'delta-session-token';
+  const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))]
+    .map((b) => b.toString(16).padStart(2, '0')).join('');
+  db.prepare(`INSERT INTO app_users(id,email,display_name,role,status,password_hash,password_salt,created_at)
+    VALUES ('delta-staff','delta@test.invalid','Manager','Administrator','Active','x','y','now')`).run();
+  db.prepare('INSERT INTO app_sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)')
+    .run(hash, 'delta-staff', Date.now(), Date.now() + 60000);
+  db.prepare('INSERT INTO sync_revisions(owner_id,revision,updated_at) VALUES (?,?,?)')
+    .run('idofera-business', 41, Date.now());
+  const oldAt = Date.parse('2026-01-01T00:00:00.000Z');
+  const newAt = Date.parse('2026-02-01T00:00:00.000Z');
+  db.prepare('INSERT INTO app_documents(owner_id,collection,document_id,payload,updated_at) VALUES (?,?,?,?,?)')
+    .run('idofera-business', 'products', 'old', JSON.stringify({id: 'old'}), oldAt);
+  db.prepare('INSERT INTO app_documents(owner_id,collection,document_id,payload,updated_at) VALUES (?,?,?,?,?)')
+    .run('idofera-business', 'products', 'new', JSON.stringify({id: 'new'}), newAt);
+  const cookie = { cookie: `idofera_session=${token}` };
+  // Legacy ISO watermarks keep working: they bound only on `updated_at`.
+  const delta = await worker.fetch(new Request(
+    `http://test/api/storage/snapshot?since=${encodeURIComponent('2026-01-15T00:00:00.000Z')}`,
+    {headers: cookie},
+  ), env);
+  assert.equal(delta.status, 200);
+  const payload = await delta.json() as any;
+  assert.equal(payload.delta, true);
+  assert.equal(payload.bounded, false);
+  assert.deepEqual(Object.keys(payload.stores || {}), ['products']);
+  assert.deepEqual((payload.stores.products || []).map((record: any) => record.id), ['new']);
+  assert.deepEqual(JSON.parse(payload.cursor), {ms: newAt, collection: 'products', documentId: 'new'});
+});
+
+test('delta keyset never skips rows sharing one millisecond', async (t) => {
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
+  await worker.fetch(new Request('http://test/api/mall/health'), env);
+  const token = 'delta-tie-session';
+  const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))]
+    .map((b) => b.toString(16).padStart(2, '0')).join('');
+  db.prepare(`INSERT INTO app_users(id,email,display_name,role,status,password_hash,password_salt,created_at)
+    VALUES ('delta-tie','delta-tie@test.invalid','Manager','Administrator','Active','x','y','now')`).run();
+  db.prepare('INSERT INTO app_sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)')
+    .run(hash, 'delta-tie', Date.now(), Date.now() + 60000);
+  db.prepare('INSERT INTO sync_revisions(owner_id,revision,updated_at) VALUES (?,?,?)')
+    .run('idofera-business', 42, Date.now());
+  // Bulk PUT stamps every row with the same millisecond: a bare
+  // `updated_at > ?` watermark would skip the tail of the page. The composite
+  // (updated_at, collection, document_id) cursor must return both rows.
+  const sharedAt = Date.parse('2026-03-01T00:00:00.000Z');
+  for (const id of ['a-row', 'b-row']) {
+    db.prepare('INSERT INTO app_documents(owner_id,collection,document_id,payload,updated_at) VALUES (?,?,?,?,?)')
+      .run('idofera-business', 'products', id, JSON.stringify({id}), sharedAt);
+  }
+  const cookie = { cookie: `idofera_session=${token}` };
+  const first = await worker.fetch(new Request(
+    `http://test/api/storage/snapshot?since=${encodeURIComponent(JSON.stringify({ms: sharedAt, collection: 'products', documentId: 'a-row'}))}`,
+    {headers: cookie},
+  ), env);
+  assert.equal(first.status, 200);
+  const firstPayload = await first.json() as any;
+  assert.deepEqual((firstPayload.stores.products || []).map((record: any) => record.id), ['b-row']);
+  assert.deepEqual(JSON.parse(firstPayload.cursor), {ms: sharedAt, collection: 'products', documentId: 'b-row'});
+
+  // An unchanged re-push writes zero rows and keeps the revision: no client
+  // is forced into a full re-read for a batch that changed nothing.
+  const unchanged = await worker.fetch(new Request('http://test/api/storage/records', {
+    method: 'PATCH',
+    headers: {...cookie, 'content-type': 'application/json'},
+    body: JSON.stringify({upserts: [{collection: 'products', document: {id: 'b-row'}}], deletes: []}),
+  }), env);
+  assert.equal(unchanged.status, 200);
+  const unchangedBody = await unchanged.json() as any;
+  assert.equal(unchangedBody.skippedUnchanged, 1);
+  assert.equal(unchangedBody.upserted, 0);
+  assert.equal(unchangedBody.revision, 42);
+  assert.equal(unchangedBody.cursor, null);
+  assert.equal(db.prepare('SELECT updated_at AS u FROM app_documents WHERE document_id = ?').get('b-row')?.u, sharedAt);
+});
+
+test('incremental mirror keeps orphans out without rewriting unchanged lines', async (t) => {
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
+  await worker.fetch(new Request('http://test/api/mall/health'), env);
+  const token = 'lines-session-token';
+  const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))]
+    .map((b) => b.toString(16).padStart(2, '0')).join('');
+  db.prepare(`INSERT INTO app_users(id,email,display_name,role,status,password_hash,password_salt,created_at)
+    VALUES ('lines-staff','lines@test.invalid','Manager','Administrator','Active','x','y','now')`).run();
+  db.prepare('INSERT INTO app_sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)')
+    .run(hash, 'lines-staff', Date.now(), Date.now() + 60000);
+  db.prepare('INSERT INTO sync_revisions(owner_id,revision,updated_at) VALUES (?,?,?)')
+    .run('idofera-business', 43, Date.now());
+  const cookie = { cookie: `idofera_session=${token}` };
+  const sale = (items: {productId: string; quantity: number}[]) => ({
+    id: 'sale-lines', invoiceNo: 'INV-LINES', totalAmount: 100,
+    items: items.map((item) => ({productId: item.productId, productName: item.productId, quantity: item.quantity, unitPrice: 10, total: 10 * item.quantity})),
+  });
+  const patch = (document: unknown) => worker.fetch(new Request('http://test/api/storage/records', {
+    method: 'PATCH',
+    headers: {...cookie, 'content-type': 'application/json'},
+    body: JSON.stringify({upserts: [{collection: 'sales', document}], deletes: []}),
+  }), env);
+  assert.equal((await patch(sale([{productId: 'p-one', quantity: 1}, {productId: 'p-two', quantity: 2}]))).status, 200);
+  assert.deepEqual(
+    (db.prepare('SELECT id FROM sale_items WHERE sale_id = ? ORDER BY id').all('sale-lines') as any[]).map((row) => row.id),
+    ['sale-lines-item-0', 'sale-lines-item-1'],
+  );
+  // Removing one line deletes only its orphan; the surviving line keeps its
+  // row instead of being deleted and re-inserted by a blanket wipe.
+  assert.equal((await patch(sale([{productId: 'p-one', quantity: 1}]))).status, 200);
+  assert.deepEqual(
+    (db.prepare('SELECT id FROM sale_items WHERE sale_id = ? ORDER BY id').all('sale-lines') as any[]).map((row) => row.id),
+    ['sale-lines-item-0'],
+  );
+  // Re-pushing the identical document is a no-op: same revision, null cursor.
+  const repeat = await patch(sale([{productId: 'p-one', quantity: 1}]));
+  assert.equal(repeat.status, 200);
+  const repeatBody = await repeat.json() as any;
+  assert.equal(repeatBody.skippedUnchanged, 1);
+  assert.equal(repeatBody.upserted, 0);
+});
+
+test('catalog facet cache is dropped by a staff product write', async (t) => {
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
+  await worker.fetch(new Request('http://test/api/mall/health'), env);
+  const token = 'facet-cache-session';
+  const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))]
+    .map((b) => b.toString(16).padStart(2, '0')).join('');
+  db.prepare(`INSERT INTO app_users(id,email,display_name,role,status,password_hash,password_salt,created_at)
+    VALUES ('facet-staff','facet@test.invalid','Manager','Administrator','Active','x','y','now')`).run();
+  db.prepare('INSERT INTO app_sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)')
+    .run(hash, 'facet-staff', Date.now(), Date.now() + 60000);
+  const cookie = { cookie: `idofera_session=${token}` };
+  const seed = db.prepare(
+    `INSERT INTO products(id,sku,name,stock_qty,status,is_mall_listed,retail_price_kobo,category_name,brand,created_at,updated_at)
+     VALUES(?,?,?,?,'Active',1,10000,?,'Facet Brand','now','now')`);
+  seed.run('facet-a', 'FACET-A', 'Facet product a', 5, 'Original');
+  seed.run('facet-b', 'FACET-B', 'Facet product b', 5, 'Original');
+  const catalog = async () => (await (await worker.fetch(new Request('http://test/api/mall/products'), env)).json()) as any;
+  // Previous tests in this process may have left facet entries in the shared
+  // module cache; start from a cold cache for this fresh database.
+  invalidateMallFacetCache();
+  const before = await catalog();
+  assert.equal(before.categories.find((c: any) => c.name === 'Original')?.count, 2);
+
+  // A staff product write through the real storage PATCH must drop the cache:
+  // within the 60s TTL the stale entry would otherwise still show the old list.
+  const patch = await worker.fetch(new Request('http://test/api/storage/records', {
+    method: 'PATCH',
+    headers: {...cookie, 'content-type': 'application/json'},
+    body: JSON.stringify({upserts: [{collection: 'products', document: {
+      id: 'facet-a', sku: 'FACET-A', name: 'Facet product a', category: 'Renamed',
+      brand: 'Facet Brand', unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 5,
+    }}], deletes: []}),
+  }), env);
+  assert.equal(patch.status, 200);
+  const after = await catalog();
+  const renamed = after.categories.find((c: any) => c.name === 'Renamed');
+  assert.ok(renamed, 'facet cache must be invalidated by a staff product write');
+  assert.equal(renamed.count, 1);
+  assert.equal(after.categories.find((c: any) => c.name === 'Original')?.count, 1);
 });

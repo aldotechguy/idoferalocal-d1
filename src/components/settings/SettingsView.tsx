@@ -284,7 +284,7 @@ export const SettingsView: React.FC = () => {
 
       if (isManualClick) {
         const total = Object.values(counts).reduce((acc: number, curr: number) => acc + curr, 0);
-        const health = await pingD1Health().catch(() => null);
+        const health = await pingD1Health({detail: true}).catch(() => null);
         showToast({
           title: 'Database Record Counts Refreshed',
           message: `IndexedDB: ${total} local records. Cloudflare D1: ${health?.totalDocuments ?? d1Health?.totalDocuments ?? 'Connected'} remote records.`,

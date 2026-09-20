@@ -2,8 +2,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { RELATIONAL_DDL, RELATIONAL_INDEXES } from './relationalDdl.js';
 import { MALL_OVERSELL_TRIGGER_SQL, type MallExecutor } from './mallApi.js';
-import { MALL_SAFETY_DDL } from './mallSafety.js';
-import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, isDuplicateColumnError, type MallConfig } from './mallOperations.js';
+import { MALL_SAFETY_DDL, MALL_CATALOG_INDEX_COLUMNS, MALL_CATALOG_INDEXES } from './mallSafety.js';
+import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, MALL_SCHEMA_VERSION, isDuplicateColumnError, type MallConfig } from './mallOperations.js';
 
 
 export type Tx = {
@@ -41,6 +41,17 @@ export function ensureRelationalSchemaNode(db: DatabaseSync): number {
     try { db.exec(`${column.ddl};`); }
     catch (error) { if (!isDuplicateColumnError(error)) throw error; }
   }
+  for (const column of MALL_CATALOG_INDEX_COLUMNS) {
+    try { db.exec(`${column.ddl};`); }
+    catch (error) { if (!isDuplicateColumnError(error)) throw error; }
+  }
+  for (const index of MALL_CATALOG_INDEXES) {
+    try {
+      db.exec(index.endsWith(';') ? index : `${index};`);
+    } catch {
+      // index already present or table missing in an older local db — safe to continue
+    }
+  }
   for (const index of RELATIONAL_INDEXES) {
     try {
       db.exec(index.endsWith(';') ? index : `${index};`);
@@ -50,6 +61,10 @@ export function ensureRelationalSchemaNode(db: DatabaseSync): number {
   }
   // Phase 5: oversell is impossible store-wide once this trigger exists.
   db.exec(MALL_OVERSELL_TRIGGER_SQL.endsWith(';') ? MALL_OVERSELL_TRIGGER_SQL : `${MALL_OVERSELL_TRIGGER_SQL};`);
+// NOTE: intentionally no MALL_SCHEMA_VERSION marker here. That marker means
+  // "the deployed Worker bootstrap ran", and this Node bootstrap creates a
+  // smaller table set (no app_users/app_sessions), so claiming the version would
+  // make the Worker skip tables it still needs to create.
   return RELATIONAL_DDL.length;
 }
 
@@ -84,5 +99,11 @@ export function makeNodeMallExecutor(db: DatabaseSync, config?: MallConfig, clie
 
 /** Same bootstrap for Cloudflare D1 (statement-per-call, tolerant). */
 export function relationalSchemaStatements(): string[] {
-  return [...RELATIONAL_DDL, ...RELATIONAL_INDEXES, ...MALL_SAFETY_DDL, ...MALL_OPERATIONS_DDL, MALL_OVERSELL_TRIGGER_SQL].map((s) => (s.endsWith(';') ? s : `${s};`));
+  return [...RELATIONAL_DDL, ...RELATIONAL_INDEXES, ...MALL_SAFETY_DDL, ...MALL_OPERATIONS_DDL,
+    ...MALL_MERCH_COLUMNS.map((column) => column.ddl),
+    ...MALL_CATALOG_INDEX_COLUMNS.map((column) => column.ddl),
+    ...MALL_CATALOG_INDEXES,
+    MALL_OVERSELL_TRIGGER_SQL,
+    `INSERT OR IGNORE INTO mall_schema_versions(version, installed_at) VALUES (${MALL_SCHEMA_VERSION}, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+  ].map((s) => (s.endsWith(';') ? s : `${s};`));
 }

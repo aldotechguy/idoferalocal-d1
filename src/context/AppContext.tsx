@@ -49,7 +49,7 @@ import { saveDocument, removeDocument } from '../firebase/services';
 import { subscribeTabSync, markIdDeleted } from '../firebase/syncManager';
 import { useToast } from './ToastContext';
 import { getAllItems, putManyItems, replaceStoreItems, putItem, clearStore, deleteItem, writeD1SnapshotToIndexedDB } from '../db/indexedDB';
-import { initializeD1Storage, queueD1Snapshot, pullLatestFromD1, type D1Snapshot } from '../services/d1StorageService';
+import { initializeD1Storage, queueD1Snapshot, pullLatestFromD1, registerDeltaApplier, type D1Snapshot } from '../services/d1StorageService';
 import { removeLegacyBusinessStorage, safeSetLocalStorage } from '../utils/localStorage';
 
 const isAutoSyncLog = (log: any): boolean => {
@@ -968,6 +968,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     window.addEventListener('idofera_pull_d1', handlePullEvent);
     return () => window.removeEventListener('idofera_pull_d1', handlePullEvent);
   }, [pullFromD1]);
+
+  // Automatic-save delta reads are merged here, through the same path the manual
+  // pull uses, so React state and IndexedDB cannot diverge between the two.
+  useEffect(() => {
+    const unregister = registerDeltaApplier(async (stores) => {
+      isApplyingD1Ref.current = true;
+      applyCloudData(stores);
+      await persistSnapshotToIndexedDB(stores);
+      window.setTimeout(() => {
+        isApplyingD1Ref.current = false;
+      }, 250);
+    });
+    return unregister;
+  }, [applyCloudData]);
 
   const logAudit = (action: string, entity: string, entityId: string | undefined, performedBy: string, details: string) => {
     const newLog: AuditLog = {
