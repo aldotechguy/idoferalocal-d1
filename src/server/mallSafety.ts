@@ -4,6 +4,11 @@ import type { MallExecutor, MallStmt } from './mallApi.js';
 export const MALL_SAFETY_DDL = [
   `CREATE TABLE IF NOT EXISTS mall_write_guards (id TEXT PRIMARY KEY, valid INTEGER NOT NULL CONSTRAINT mall_state_conflict CHECK(valid = 1))`,
   `CREATE TABLE IF NOT EXISTS mall_checkout_attempts (attempt_key TEXT PRIMARY KEY, session_id TEXT NOT NULL, request_json TEXT NOT NULL, order_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL)`,
+  // Buy-again walks only this browser's orders. Cover each hop so unrelated
+  // sessions, order items and payments do not contribute to rows read.
+  `CREATE INDEX IF NOT EXISTS idx_mall_checkout_session_order ON mall_checkout_attempts (session_id, order_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_mall_order_items_order_product ON mall_order_items (mall_order_id, product_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_payments_order_status ON payments (order_id, status)`,
   // Sync-mirror write path (sites-worker PATCH + Node PATCH): bounds the delta
   // read to rows written after a composite (updated_at, collection, document_id)
   // watermark instead of scanning the whole document store per staff edit.
@@ -29,6 +34,21 @@ export const MALL_CATALOG_INDEXES: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_products_status_created ON products (status, created_at DESC, id DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_products_status_category ON products (status, category_name)`,
   `CREATE INDEX IF NOT EXISTS idx_products_status_brand ON products (status, brand)`,
+
+  // Top-sellers ranking joins sale_items -> sales per candidate product.
+  // Without a product_id index the planner drove that subquery off
+  // idx_sale_items_sale and read EVERY sale_items row for EVERY candidate
+  // product, which is what produced multi-million rows-read figures on the
+  // home rail. Leading with product_id turns each lookup into a seek, and
+  // the trailing qty covers the SUM without touching the table.
+  `CREATE INDEX IF NOT EXISTS idx_sale_items_product ON sale_items (product_id, sale_id, qty)`,
+  // Same aggregate, one hop shorter: carrying qty after product_id lets the
+  // SUM be served entirely from THIS index -- `SEARCH si USING COVERING INDEX
+  // idx_sale_items_product_sale_qty`, so the sale_items table itself is never
+  // read. The paired `sales` status/join check then costs one primary-key seek
+  // per matching sale line, which is why the rail dropped from ~1.8K reads to a
+  // few hundred. This supersedes idx_sale_items_product for this aggregate.
+  `CREATE INDEX IF NOT EXISTS idx_sale_items_product_sale_qty ON sale_items (product_id, sale_id, qty)`,
 ];
 
 /** A failed assertion aborts the entire batch, including all earlier writes. */

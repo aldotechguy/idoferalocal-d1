@@ -1395,3 +1395,130 @@ test('storefront catalog reads drop the sold_qty join; detail and top rail keep 
     assert.equal(soldQueries(), 0, 'a warm homepage must not re-run the top-seller join');
   }
 });
+
+test('buy-again seeks session history and product IDs instead of scanning a 10K catalog', async t => {
+  const f = await fixture('node'); t.after(() => f.db.close());
+  const product = f.db.prepare(`INSERT INTO products(id,sku,name,status,stock_qty,retail_price_kobo,created_at,updated_at)
+    VALUES(?,?,?,'Active',?,10000,'2026-01-01','2026-01-01')`);
+  const order = f.db.prepare('INSERT INTO mall_orders(id,order_no,status,created_at) VALUES(?,?,?,?)');
+  const checkout = f.db.prepare("INSERT INTO mall_checkout_attempts VALUES(?,?,'{}',?,?)");
+  const item = f.db.prepare(`INSERT INTO mall_order_items(id,mall_order_id,product_id,qty,unit_price_kobo,total_kobo)
+    VALUES(?,?,?,1,10000,10000)`);
+  const payment = f.db.prepare("INSERT INTO payments(id,order_id,reference,status,created_at) VALUES(?,?,?,'paid','2026-01-01')");
+  const purchase = (id: string, sid: string, status: string, at: string, ids: (string | null)[], paid = false) => {
+    order.run(id, id, status, at);
+    checkout.run(id, sid, id, at);
+    ids.forEach((pid, i) => item.run(`${id}-${i}`, id, pid));
+    if (paid) payment.run(id, id, id);
+  };
+  f.db.exec('BEGIN');
+  for (let i = 0; i < 10000; i++) product.run(`noise-${i}`, `noise-${i}`, 'Unrelated', 10);
+  for (let i = 0; i < 1000; i++) purchase(`noise-order-${i}`, 'other-browser-session', 'completed', '2026-06-01', [`noise-${i}`]);
+  const ids = Array.from({ length: 15 }, (_, i) => `bought-${String(i).padStart(2, '0')}`);
+  ids.forEach((id, i) => product.run(id, id, id, i < 3 ? 0 : 10));
+  // Duplicate lines and multiple orders must still produce one row per product.
+  purchase('old', session, 'completed', '2026-01-01', [...ids, ids[3], null, 'deleted-product']);
+  purchase('recent', session, 'confirmed', '2026-03-01', [ids[4], ids[4]], true);
+  payment.run('second-payment', 'recent', 'second-payment');
+  purchase('pending', session, 'pending', '2026-05-01', ['noise-1', ids[5]]);
+  purchase('cancelled', session, 'cancelled', '2026-05-01', ['noise-2', ids[6]], true);
+  purchase('refunded', session, 'refunded', '2026-05-01', ['noise-3', ids[7]], true);
+  f.db.prepare("UPDATE products SET status='Archived' WHERE id=?").run(ids[14]);
+  f.db.exec('COMMIT; ANALYZE');
+
+  let captured: { sql: string; params: any[] } | undefined;
+  const instrumented: MallExecutor = { ...f.exec, queryAll: async (sql, params = []) => {
+    // Isolate this rail: the three shared homepage rails have separate coverage.
+    if (!sql.includes('last_purchase')) return [];
+    captured = { sql, params };
+    return f.exec.queryAll(sql, params);
+  } };
+  const response = await handleMallApi(new Request('http://test/api/mall/home', {
+    headers: { 'x-mall-session': session },
+  }), instrumented);
+  assert.equal(response.status, 200);
+  const result = await response.json() as any;
+  assert.deepEqual(result.buyAgain.map((p: any) => p.id),
+    [ids[4], ids[0], ids[3], ...ids.slice(5, 12)]);
+  assert.equal(result.buyAgain.filter((p: any) => !p.available).length, 1);
+  assert.ok(captured);
+  assert.deepEqual(captured.params, [session], 'history is evaluated once for one bound session');
+
+  // Compare ranking and last-purchase timestamps with the original semantics.
+  const legacyHistory = `SELECT MAX(o.created_at) FROM mall_order_items oi
+    JOIN mall_orders o ON o.id=oi.mall_order_id WHERE oi.product_id=products.id
+    AND o.status NOT IN ('cancelled','refunded')
+    AND (o.status='completed' OR EXISTS(SELECT 1 FROM payments pay WHERE pay.order_id=o.id AND pay.status='paid'))
+    AND EXISTS(SELECT 1 FROM mall_checkout_attempts a WHERE a.order_id=o.id AND a.session_id=?)`;
+  const legacy = f.db.prepare(`WITH candidates AS (
+    SELECT id,stock_qty,(${legacyHistory}) AS last_purchase FROM products
+    WHERE status='Active' AND (${legacyHistory}) IS NOT NULL
+  ), ranked AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY (stock_qty<=0) ORDER BY last_purchase DESC,id ASC) AS stock_rank FROM candidates)
+    SELECT id,last_purchase FROM ranked WHERE stock_qty>0 OR stock_rank=1 ORDER BY last_purchase DESC,id ASC LIMIT 10`).all(session, session);
+  const actual = f.db.prepare(captured.sql).all(...captured.params).map(row => ({ id: row.id, last_purchase: row.last_purchase }));
+  assert.deepEqual(actual, legacy.map(row => ({ ...row })));
+  assert.deepEqual(f.db.prepare(captured.sql).all('brand-new-browser'), []);
+
+});
+
+test('Worker upgrades the previous schema marker with buy-again indexes', async t => {
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  ensureRelationalSchemaNode(db);
+  const indexes = ['idx_mall_checkout_session_order', 'idx_mall_order_items_order_product', 'idx_payments_order_status'];
+  indexes.forEach(name => db.exec(`DROP INDEX ${name}`));
+  db.prepare("INSERT OR IGNORE INTO mall_schema_versions VALUES(?,'old')").run(MALL_SCHEMA_VERSION - 1);
+  const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
+  await worker.fetch(new Request('http://test/api/mall/health'), env);
+  for (const name of indexes) assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?").get(name));
+  assert.ok(db.prepare('SELECT 1 FROM mall_schema_versions WHERE version=?').get(MALL_SCHEMA_VERSION));
+});
+
+
+test('top-sellers ranks by key and sums sales from the covering index, not per-product table reads', async t => {
+  const f = await fixture('node'); t.after(() => f.db.close());
+  const product = f.db.prepare(`INSERT INTO products(id,sku,name,status,stock_qty,retail_price_kobo,created_at,updated_at)
+    VALUES(?,?,?,'Active',?,10000,'2026-01-01','2026-01-01')`);
+  const sale = f.db.prepare(`INSERT INTO sales(id,receipt_no,status,created_at) VALUES(?,?,?,?)`);
+  const line = f.db.prepare('INSERT INTO sale_items(id,sale_id,product_id,qty) VALUES(?,?,?,?)');
+  f.db.exec('BEGIN');
+  f.db.exec("UPDATE products SET status='Archived' WHERE id='p'");
+  for (let i = 0; i < 200; i++) product.run(`noise-${i}`, `noise-${i}`, `Noise ${i}`, i % 3 === 0 ? 0 : 10);
+  sale.run('s-old', 'R1', 'Completed', '2026-01-01');
+  sale.run('s-new', 'R2', 'PAID', '2026-02-01');
+  sale.run('s-void', 'R3', 'cancelled', '2026-03-01');
+  const sold = (product, saleId, qty, n) => line.run(`${product}-${saleId}-${n}`, saleId, product, qty);
+  sold('noise-1', 's-old', 4, 0);
+  sold('noise-1', 's-new', 6, 1);
+  sold('noise-1', 's-void', 99, 2);
+  sold('noise-2', 's-old', 5, 0);
+  sold('noise-4', 's-new', 5, 0);
+  sold('noise-5', 's-new', 7, 0);
+  f.db.exec('COMMIT; ANALYZE');
+
+  let rail;
+  const instrumented = { ...f.exec, queryAll: async (sql, params = []) => {
+    if (!rail && sql.includes('AS sold_qty')) rail = { sql };
+    return f.exec.queryAll(sql, params);
+  } };
+  const response = await handleMallApi(new Request('http://test/api/mall/home', {
+    headers: { 'x-mall-session': session },
+  }), instrumented);
+  assert.equal(response.status, 200);
+  const top = (await response.json()).topSellers;
+  assert.deepEqual(top.map(p => p.id).slice(0, 4), ['noise-1', 'noise-5', 'noise-2', 'noise-4']);
+  assert.deepEqual(top.map(p => p.sold).slice(0, 4), [10, 7, 5, 5]);
+  assert.deepEqual(top.map(p => p.available).slice(0, 4), [true, true, true, true]);
+
+  assert.ok(rail, 'the top-sellers rail must issue one ranking query');
+  const rows = f.db.prepare(rail.sql).all();
+  assert.deepEqual(rows.map(r => r.id).slice(0, 4), ['noise-1', 'noise-5', 'noise-2', 'noise-4']);
+  assert.deepEqual(rows.map(r => r.sold_qty).slice(0, 4), [10, 7, 5, 5]);
+  const plan = f.db.prepare(`EXPLAIN QUERY PLAN ${rail.sql}`).all().map(r => String(r.detail)).join(String.fromCharCode(10));
+  // Verified plan: the SUM is served from the covering index (no sale_items
+  // table read), products is never scanned, and the OLD narrower index is unused.
+  assert.match(plan, /SEARCH si USING COVERING INDEX idx_sale_items_product_sale_qty/);
+  assert.doesNotMatch(plan, /SCAN si\b/);
+  assert.doesNotMatch(plan, /SEARCH si USING INDEX idx_sale_items_product \(/);
+  assert.doesNotMatch(plan, /SCAN products\b/);
+  assert.doesNotMatch(plan, /SCAN sale\b/);
+});

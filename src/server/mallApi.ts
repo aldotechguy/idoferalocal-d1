@@ -67,12 +67,15 @@ const CATALOG_COLUMNS = `id, sku, name, COALESCE(NULLIF(mall_description, ''), d
   ${effectivePrice('products')} AS price_kobo`;
 
 /**
- * Popularity join, split out of CATALOG_COLUMNS on purpose. sale_items has no
- * product_id index, so the correlated subquery scanned the WHOLE sale_items
- * table once per returned catalog row -- a cost that grows with total sales.
- * Only the two consumers that genuinely rank or display sold quantities pay it
- * now: product detail (one row) and the 60s-cached top-sellers rail. Catalog
- * and search rows report sold: 0.
+ * Popularity join, split out of CATALOG_COLUMNS on purpose: only the two
+ * consumers that genuinely rank or display sold quantities pay it -- product
+ * detail (one row) and the 60s-cached top-sellers rail. Catalog and search rows
+ * report sold: 0.
+ *
+ * The correlated subquery is served by idx_sale_items_product
+ * (product_id, sale_id, qty). Driving it from `sale_items` by product_id is a
+ * seek per product instead of a whole-table read per product, which is what
+ * previously produced multi-million rows-read counts on the home rail.
  */
 const CATALOG_SOLD_COLUMNS = `${CATALOG_COLUMNS},
   COALESCE((
@@ -213,6 +216,31 @@ const selectRail = (exec: MallExecutor, selection: string, order: string, limit:
     ) SELECT * FROM ranked WHERE stock_qty > 0 OR stock_rank = 1 ORDER BY ${order} LIMIT ${limit}`, params);
 
 /**
+ * Same rail semantics as selectRail, for a selection whose ORDER BY key is an
+ * expensive per-row aggregate (top sellers: SUM(sale_items.qty) per product).
+ *
+ * selectRail re-runs that aggregate for every candidate row in the projection
+ * window AND again in its ROW_NUMBER window, so the cost is paid twice across
+ * the whole Active catalog. Here the ranking CTE carries ONLY the primary key
+ * plus the keys the ORDER BY can use, so the aggregate is computed once per
+ * catalog row by the window itself, then the payload is fetched by primary key
+ * for the handful of rows that survive the LIMIT. Returned rows are
+ * byte-identical to selectRail's, in the same order.
+ */
+const selectRankedByKey = (
+  exec: MallExecutor, selection: string, order: string, limit: number, params: any[] = [],
+) => exec.queryAll(`
+    WITH candidates AS (${selection}), ranked AS (
+      SELECT id, CASE WHEN stock_qty > 0 THEN 0 ELSE 1 END AS stock_group,
+        ROW_NUMBER() OVER (PARTITION BY (stock_qty <= 0) ORDER BY ${order}) AS stock_rank
+      FROM candidates
+    ), winners AS (
+      SELECT id FROM ranked WHERE stock_group = 0 OR stock_rank = 1
+    )
+    SELECT ${CATALOG_SOLD_COLUMNS}, updated_at FROM products
+      WHERE id IN (SELECT id FROM winners) ORDER BY ${order} LIMIT ${limit}`, params);
+
+/**
  * Home rail cache. flashSales/topSellers/newArrivals are identical for every
  * visitor (only buyAgain is session-scoped), yet they re-ran three whole-catalog
  * scans on EVERY homepage view. They share the facet cache's TTL and
@@ -226,7 +254,7 @@ async function cachedHomeRails(exec: MallExecutor) {
     exec.queryAll(`SELECT ${CATALOG_COLUMNS} FROM products WHERE ${VISIBLE}
       AND ${effectivePrice('products')} > 0 AND ${effectivePrice('products')} < retail_price_kobo
       ORDER BY ${CATALOG_SORTS.relevance} LIMIT 10`),
-    selectRail(exec, `SELECT ${CATALOG_SOLD_COLUMNS}, updated_at FROM products WHERE ${VISIBLE}`, CATALOG_SORTS.popular, 12),
+    selectRankedByKey(exec, `SELECT ${CATALOG_SOLD_COLUMNS}, updated_at FROM products WHERE ${VISIBLE}`, CATALOG_SORTS.popular, 12),
     selectRail(exec, `SELECT ${CATALOG_COLUMNS}, (${lastRestockSql}) AS last_restock FROM products
       WHERE ${VISIBLE} AND (${lastRestockSql}) IS NOT NULL`, 'last_restock DESC, id ASC', 12),
   ]);
@@ -337,16 +365,24 @@ async function getHomeSections(exec: MallExecutor, session: string) {
   // Mall order history is browser-scoped: an order counts as a purchase for
   // buyAgain only when THIS checkout session placed it AND it is paid or
   // completed. Pending orders are not purchases.
-  const history = `SELECT MAX(o.created_at) FROM mall_order_items oi
-    JOIN mall_orders o ON o.id = oi.mall_order_id
-    WHERE oi.product_id = products.id
+  // Start with this session's indexed checkout attempts, not every active product.
+  // CROSS JOIN fixes SQLite's loop order: session -> orders -> items, then one
+  // product PK seek per distinct purchase. Even an empty history avoids a catalog
+  // scan. Aggregate once before joining products or applying the stock ranking.
+  const history = `SELECT oi.product_id, MAX(o.created_at) AS last_purchase
+    FROM mall_checkout_attempts a
+    CROSS JOIN mall_orders o ON o.id = a.order_id
+    CROSS JOIN mall_order_items oi ON oi.mall_order_id = o.id
+    WHERE a.session_id = ?
       AND o.status NOT IN ('cancelled', 'refunded')
       AND (o.status = 'completed' OR EXISTS (SELECT 1 FROM payments pay WHERE pay.order_id = o.id AND pay.status = 'paid'))
-      AND EXISTS (SELECT 1 FROM mall_checkout_attempts a WHERE a.order_id = o.id AND a.session_id = ?)`;
+      AND oi.product_id IS NOT NULL
+    GROUP BY oi.product_id`;
   const [rails, again] = await Promise.all([
     cachedHomeRails(exec),
-    selectRail(exec, `SELECT ${CATALOG_COLUMNS}, (${history}) AS last_purchase FROM products
-      WHERE ${VISIBLE} AND (${history}) IS NOT NULL`, 'last_purchase DESC, id ASC', 10, [session, session]),
+    selectRail(exec, `SELECT ${CATALOG_COLUMNS}, history.last_purchase FROM (${history}) history
+      CROSS JOIN products ON products.id = history.product_id
+      WHERE ${VISIBLE}`, 'last_purchase DESC, id ASC', 10, [session]),
   ]);
   return json({ flashSales: rails.flash.map(publicProduct), topSellers: rails.top.map(publicProduct),
     newArrivals: rails.newest.map(publicProduct), buyAgain: again.map(publicProduct) });

@@ -12,7 +12,9 @@ import { normalizedPhoneSql } from '../shared/mallPhone.js';
  * ~80 statements (and the 5 known-failing duplicate-column ALTERs) on every
  * start. See `ensureSchema` in sites-worker.ts.
  */
-export const MALL_SCHEMA_VERSION = 6;
+// v7 installs the session-first buy-again indexes on existing D1 databases;
+// v8 adds the covering sold-quantity index behind the top-sellers rail.
+export const MALL_SCHEMA_VERSION = 8;
 
 export const MALL_MERCH_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: 'mall_featured', ddl: 'ALTER TABLE products ADD COLUMN mall_featured INTEGER NOT NULL DEFAULT 0' },
