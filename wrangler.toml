@@ -56,10 +56,10 @@ MALL_PICKUP_HOURS = "10AM - 6PM"
   MALL_BANK_ACCOUNT_NAME = "IDOFERA ENTERPRISE"
   MALL_BANK_ACCOUNT_NUMBER = "8063766861"
   MALL_WEBHOOK_URL = "https://idomall.olz.workers.dev/api/mall-webhook"
-  # Sender for order emails. `onboarding@resend.dev` is Resend's sandbox sender
-  # (verified-domain-free, but it may only deliver to the Resend account owner).
-  # Replace with an address on a domain you verified in Resend.
-  MALL_EMAIL_FROM = "Mall Orders <orders@idofera.de5.net>"
+  # Sender for order emails. Must be an address on a domain verified in Resend.
+  # `idofera.de5.net` (apex) is verified, so this delivers to any recipient;
+  # the sandbox sender `onboarding@resend.dev` would only reach the account owner.
+  MALL_EMAIL_FROM = "Idofera <orders@idofera.de5.net>"
   # MALL_WEBHOOK_SECRET, MALL_NOTIFY_EMAIL and RESEND_API_KEY are Wrangler
   # secrets (never committed): `npx wrangler secret put --env mall <NAME>`.
   # The scheduled drain signs each outbox POST with MALL_WEBHOOK_SECRET and

@@ -1139,7 +1139,7 @@ test('oversized snapshot pushes are rejected before any write', async (t) => {
       RESEND_API_KEY: 're_safety_key',
     };
     // Resend is an outbound HTTP call, so the only seam is global fetch.
-    const sent: { from: string; to: string[]; subject: string; html: string }[] = [];
+    const sent: { from: string; to: string[]; subject: string; html: string; text: string; reply_to?: string; headers: Record<string, string> }[] = [];
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
       sent.push(JSON.parse(String(init.body)));
@@ -1223,6 +1223,19 @@ test('oversized snapshot pushes are rejected before any write', async (t) => {
     assert.match(sent[3].subject, /your order MALL-1/);
     assert.match(sent[3].html, /Hi Ada/, 'the customer copy greets the buyer by name');
     assert.doesNotMatch(sent[3].html, /customer_phone|payment_reference/, 'the customer copy stays free of internal plumbing');
+
+    // Deliverability: Gmail spam-classifies HTML-only transactional mail from a
+    // young domain, so every send must carry a plain-text alternative, a Reply-To
+    // and a one-click List-Unsubscribe. Asserted on both copies.
+    for (const copy of [sent[2], sent[3]]) {
+      assert.equal(typeof copy.text, 'string');
+      assert.ok(copy.text.length > 0, 'a plain-text alternative must accompany the HTML part');
+      assert.doesNotMatch(copy.text, /<[a-z][^>]*>/i, 'the text part must not contain HTML tags');
+      assert.equal(copy.reply_to, 'owner@test.invalid', 'Reply-To points at the monitored operator inbox');
+      assert.match(copy.headers['List-Unsubscribe'], /^<mailto:/);
+      assert.equal(copy.headers['List-Unsubscribe-Post'], 'List-Unsubscribe=One-Click');
+    }
+    assert.match(sent[3].text, /Hi Ada/, 'the customer text part keeps the greeting');
 
     // A malformed stored address is skipped (and reported) rather than emailed.
     const badCustomer = await post({ ...event, id: 'created:mall-order-5', order: { ...event.order, customer_email: 'not-an-email' } });

@@ -30,6 +30,7 @@ export interface WebhookEnv extends MallConfig {
   RESEND_API_KEY?: string;
   MALL_NOTIFY_EMAIL?: string;
   MALL_EMAIL_FROM?: string;
+  MALL_EMAIL_REPLY_TO?: string;
 }
 
 interface MallWebhookOrder {
@@ -151,7 +152,12 @@ export async function handleMallWebhook(request: Request, env: WebhookEnv): Prom
     ? (order.total_kobo / 100).toLocaleString('en-NG', { style: 'currency', currency: 'NGN' })
     : '—';
   const from = env.MALL_EMAIL_FROM || 'Mall Orders <onboarding@resend.dev>';
-  const sendEmail = (to: string, subject: string, html: string) =>
+  // Deliverability: a plain-text alternative and a real Reply-To measurably
+  // reduce spam classifications for transactional mail from a young domain.
+  // Gmail treats an HTML-only body from a low-reputation sender as a negative
+  // signal, and an unreciprocated address (no way to reply) as another.
+  const replyTo = env.MALL_EMAIL_REPLY_TO || operator;
+  const sendEmail = (to: string, subject: string, html: string, text: string) =>
     fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
@@ -164,12 +170,21 @@ export async function handleMallWebhook(request: Request, env: WebhookEnv): Prom
         // only deliver to the Resend account owner's own address).
         from,
         to: [to],
+        reply_to: replyTo,
         subject,
         html,
+        text,
+        headers: {
+          // One-click unsubscribe is expected from senders and downgrades a
+          // complaint into a harmless opt-out. Mailto is a valid fallback when
+          // no unsubscribe URL/endpoint exists yet.
+          'List-Unsubscribe': `<mailto:${operator}?subject=unsubscribe>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        },
       }),
     });
 
-  const resendRes = await sendEmail(operator, `[Mall] ${label} — Order ${orderNo}`, emailTemplate({
+  const operatorHtml = emailTemplate({
     event: parsed.event, label,
     orderNo,
     customerName: order.customer_name || 'unknown',
@@ -180,7 +195,13 @@ export async function handleMallWebhook(request: Request, env: WebhookEnv): Prom
     paymentMethod: order.payment_method || 'unavailable',
     occurredAt: parsed.occurredAt,
     instructions: parsed.instructions,
-  }));
+  });
+  const resendRes = await sendEmail(
+    operator,
+    `[Mall] ${label} — Order ${orderNo}`,
+    operatorHtml,
+    textFromHtml(operatorHtml),
+  );
 
   const deliveryId = crypto.randomUUID();
   if (!resendRes.ok) {
@@ -201,7 +222,7 @@ export async function handleMallWebhook(request: Request, env: WebhookEnv): Prom
   let customerOutcome = 'none';
   if (customerEmail) {
     if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail) && parsed.event in MALL_EVENT_LABELS) {
-      const customerRes = await sendEmail(customerEmail, `${label} — your order ${orderNo}`, customerEmailTemplate({
+      const customerHtml = customerEmailTemplate({
         label, orderNo,
         customerName: order.customer_name || '',
         totalNgn,
@@ -209,7 +230,13 @@ export async function handleMallWebhook(request: Request, env: WebhookEnv): Prom
         paymentMethod: order.payment_method,
         paymentStatus: order.payment_status,
         instructions: parsed.instructions,
-      }));
+      });
+      const customerRes = await sendEmail(
+        customerEmail,
+        `${label} — your order ${orderNo}`,
+        customerHtml,
+        textFromHtml(customerHtml),
+      );
       if (customerRes.ok) {
         customerOutcome = 'sent';
         await customerRes.body?.cancel();
@@ -230,6 +257,30 @@ export async function handleMallWebhook(request: Request, env: WebhookEnv): Prom
   );
 
   return json({ status: 'sent', eventId: parsed.id, deliveredAt, customer: customerOutcome });
+}
+
+/**
+ * A minimal, dependency-free HTML-to-text projection for the plain-text part.
+ * Transactional mail should never ship HTML-only: Gmail treats a missing text/
+ * alternative from a young/low-reputation domain as a spam signal. This strips
+ * tags, decodes the handful of entities these templates emit, and keeps table
+ * rows on their own lines so the text part stays readable.
+ */
+export function textFromHtml(html: string): string {
+  const entities: Record<string, string> = {
+    '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'", '&nbsp;': ' ',
+  };
+  return html
+    .replace(/<(style|head)[\s\S]*?<\/\1>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|h1|h2|li)>/gi, '\n')
+    .replace(/<td[^>]*>/gi, ' | ')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&[a-z#0-9]+;/gi, (m) => entities[m.toLowerCase()] ?? m)
+      .replace(/[ \t]+/g, ' ')
+      .replace(/ *\n */g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
 }
 
 const EMAIL_CSS = `

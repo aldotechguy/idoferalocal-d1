@@ -20,3 +20,5 @@ tmp_*.txt
 *.err
 # Local wrangler/miniflare dev state (recreated by `wrangler dev`)
 .wrangler/
+# Editor state (may hold local API keys / machine-specific settings)
+.vscode/

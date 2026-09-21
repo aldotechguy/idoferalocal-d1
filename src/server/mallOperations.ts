@@ -104,6 +104,19 @@ export function webhookConfigured(config: MallConfig) {
   } catch { return false; }
 }
 
+/**
+ * The HMAC secret is the only credential the receiver actually verifies, so it
+ * is the only thing an in-process delivery needs. This is deliberately separate
+ * from `webhookConfigured`: that gate also bans loopback/non-HTTPS URLs because
+ * a *network* deliverer would otherwise POST to an unreachable or dev target.
+ * An in-process deliverer has no network target at all (both runtimes hand the
+ * drain a `send` that calls the receiver directly), so requiring a public HTTPS
+ * URL there only makes local delivery impossible.
+ */
+export function webhookSecretReady(config: MallConfig) {
+  return (config.MALL_WEBHOOK_SECRET?.length || 0) >= 32;
+}
+
 export async function mallReadiness(exec: MallExecutor) {
   const checks: Record<string, boolean> = {};
   try {
@@ -178,8 +191,14 @@ export async function signMallWebhook(secret: string, timestamp: string, body: s
   return Array.from(new Uint8Array(signature),b=>b.toString(16).padStart(2,'0')).join('');
 }
 
-export async function drainMallOutbox(exec: MallExecutor, send: typeof fetch = fetch, now = Date.now()) {
-  if (!webhookConfigured(exec.config || {})) return;
+export async function drainMallOutbox(exec: MallExecutor, send?: typeof fetch, now = Date.now()) {
+  // A caller-supplied `send` delivers in-process (both runtimes do this, so the
+  // receiver never has to be reachable over the network); only its HMAC secret
+  // must be present. The default global fetch is a real network call and keeps
+  // the full URL gate.
+  const inProcess = typeof send === 'function';
+  if (!(inProcess ? webhookSecretReady(exec.config || {}) : webhookConfigured(exec.config || {}))) return;
+  const deliver = send ?? fetch;
   const config = exec.config!;
   const rows = await exec.queryAll("SELECT * FROM mall_outbox WHERE (status='pending' AND next_attempt_at<=?) OR (status='sending' AND lease_until<?) ORDER BY created_at LIMIT 10",[now,now]);
   for (const row of rows) {
@@ -192,7 +211,7 @@ export async function drainMallOutbox(exec: MallExecutor, send: typeof fetch = f
         FROM mall_orders o LEFT JOIN payments p ON p.order_id=o.id WHERE o.id=? LIMIT 1`,[row.order_id]))[0] : null;
       const body = JSON.stringify({id:row.id,event:row.event,occurredAt:row.created_at,data:JSON.parse(row.payload_json),order, instructions:publicMallConfig(config)});
       const timestamp = String(Math.floor(Date.now()/1000));
-      const response = await send(config.MALL_WEBHOOK_URL!,{method:'POST',redirect:'error',signal:AbortSignal.timeout(10_000),headers:{'content-type':'application/json','x-mall-event-id':row.id,'x-mall-timestamp':timestamp,'x-mall-signature':`sha256=${await signMallWebhook(config.MALL_WEBHOOK_SECRET!,timestamp,body)}`},body});
+      const response = await deliver(config.MALL_WEBHOOK_URL || 'http://localhost/api/mall-webhook',{method:'POST',redirect:'error',signal:AbortSignal.timeout(10_000),headers:{'content-type':'application/json','x-mall-event-id':row.id,'x-mall-timestamp':timestamp,'x-mall-signature':`sha256=${await signMallWebhook(config.MALL_WEBHOOK_SECRET!,timestamp,body)}`},body});
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       await response.body?.cancel();
       await exec.runBatch([{sql:"UPDATE mall_outbox SET status='delivered',delivered_at=?,lease_token=NULL,lease_until=NULL,last_error=NULL WHERE id=? AND lease_token=?",params:[new Date().toISOString(),row.id,token]}]);
@@ -207,7 +226,7 @@ export async function drainMallOutbox(exec: MallExecutor, send: typeof fetch = f
   }
 }
 
-export async function runMallMaintenance(exec: MallExecutor, expire: (id:string)=>Promise<Response>, send:typeof fetch=fetch) {
+export async function runMallMaintenance(exec: MallExecutor, expire: (id:string)=>Promise<Response>, send?:typeof fetch) {
   const now=Date.now();
   await exec.runBatch([{sql:"INSERT OR IGNORE INTO mall_outbox(id,event,payload_json,next_attempt_at,created_at) VALUES (?,'MALL_HEARTBEAT','{}',0,?)",params:[`heartbeat:${new Date(now).toISOString().slice(0,13)}`,new Date(now).toISOString()]}]);
   const configured=Number(exec.config?.MALL_UNPAID_EXPIRY_HOURS || 48);

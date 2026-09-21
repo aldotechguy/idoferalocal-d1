@@ -809,7 +809,24 @@ let mallMaintenanceRunning = false;
 const mallMaintenanceTimer = setInterval(async () => {
   if (mallMaintenanceRunning) return;
   mallMaintenanceRunning = true;
-  try { await maintainMall(makeNodeMallExecutor(db,process.env)); }
+  try {
+    // Deliver the signed outbox POST to THIS server's receiver in-process, the
+    // same way the scheduled Worker does. Reaching MALL_WEBHOOK_URL over the
+    // network would mean the Node server fetching its own hostname — and
+    // `webhookConfigured()` rejects localhost/127.0.0.1 URLs outright, so a
+    // local drain could never send at all. The receiver still verifies the HMAC,
+    // so the signature path stays real. Only method/headers/body are carried
+    // over: `signal` and `redirect` are transport concerns that do not apply to
+    // an in-process call.
+    await maintainMall(makeNodeMallExecutor(db, process.env), async (input, init) => {
+      const request = new globalThis.Request(String(input), {
+        method: init?.method || 'POST',
+        headers: init?.headers as Record<string, string>,
+        body: init?.body as string,
+      });
+      return await handleMallWebhook(request, { ...process.env, DB: webhookDb });
+    });
+  }
   catch { console.error('[mall-maintenance] Failed; check staff operations/readiness.'); }
   finally { mallMaintenanceRunning = false; }
 }, 60_000);
