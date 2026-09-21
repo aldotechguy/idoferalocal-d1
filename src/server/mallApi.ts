@@ -83,7 +83,7 @@ const CATALOG_SOLD_COLUMNS = `${CATALOG_COLUMNS},
     FROM sale_items si
     JOIN sales sale ON sale.id = si.sale_id
     WHERE si.product_id = products.id
-      AND LOWER(COALESCE(sale.status, '')) IN ('completed', 'paid', 'fulfilled', 'delivered')
+      AND sale.status IN ('Completed', 'Paid', 'Fulfilled', 'Delivered', 'completed', 'paid', 'fulfilled', 'delivered')
   ), 0) AS sold_qty`;
 
 /**
@@ -255,8 +255,8 @@ async function cachedHomeRails(exec: MallExecutor) {
       AND ${effectivePrice('products')} > 0 AND ${effectivePrice('products')} < retail_price_kobo
       ORDER BY ${CATALOG_SORTS.relevance} LIMIT 10`),
     selectRankedByKey(exec, `SELECT ${CATALOG_SOLD_COLUMNS}, updated_at FROM products WHERE ${VISIBLE}`, CATALOG_SORTS.popular, 12),
-    selectRail(exec, `SELECT ${CATALOG_COLUMNS}, (${lastRestockSql}) AS last_restock FROM products
-      WHERE ${VISIBLE} AND (${lastRestockSql}) IS NOT NULL`, 'last_restock DESC, id ASC', 12),
+    selectRail(exec, `WITH p AS (SELECT *, (${lastRestockSql}) AS last_restock FROM products)
+      SELECT *, last_restock FROM p WHERE ${VISIBLE} AND last_restock IS NOT NULL`, 'last_restock DESC, id ASC', 12),
   ]);
   cachedHomeRailEntry = { expiresAt: Date.now() + FACET_TTL_MS, flash, top, newest };
   return cachedHomeRailEntry;

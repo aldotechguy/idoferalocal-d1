@@ -180,8 +180,9 @@ export async function mallRateLimit(exec: MallExecutor, request: Request) {
   const bytes = await crypto.subtle.digest('SHA-256',new TextEncoder().encode(`${window}:${exec.clientIp}`));
   const hash = Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2,'0')).join('');
   const key = `${group}:${window}:${hash}`;
-  await exec.runBatch([{sql:'INSERT INTO mall_rate_limits(key,count,expires_at) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1',params:[key,(window+2)*60_000]}]);
-  const count = (await exec.queryAll('SELECT count FROM mall_rate_limits WHERE key=?',[key]))[0]?.count;
+  const rows = await exec.queryAll(`INSERT INTO mall_rate_limits(key,count,expires_at) VALUES (?,1,?)
+    ON CONFLICT(key) DO UPDATE SET count=count+1 RETURNING count`, [key, (window+2)*60_000]);
+  const count = rows[0]?.count;
   if (count > limit) throw Object.assign(new Error('Too many requests. Please wait a minute.'),{mallStatus:429});
 }
 

@@ -1497,7 +1497,7 @@ test('top-sellers ranks by key and sums sales from the covering index, not per-p
   f.db.exec("UPDATE products SET status='Archived' WHERE id='p'");
   for (let i = 0; i < 200; i++) product.run(`noise-${i}`, `noise-${i}`, `Noise ${i}`, i % 3 === 0 ? 0 : 10);
   sale.run('s-old', 'R1', 'Completed', '2026-01-01');
-  sale.run('s-new', 'R2', 'PAID', '2026-02-01');
+  sale.run('s-new', 'R2', 'Paid', '2026-02-01');
   sale.run('s-void', 'R3', 'cancelled', '2026-03-01');
   const sold = (product, saleId, qty, n) => line.run(`${product}-${saleId}-${n}`, saleId, product, qty);
   sold('noise-1', 's-old', 4, 0);

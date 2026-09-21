@@ -103,11 +103,17 @@ async function counts(exec: MallExecutor) {
 
 async function detail(exec: MallExecutor, id: string) {
   const row = await getOrderRow(exec, id);
-  return json({ order: { ...publicOrder(row, await getOrderItems(exec, id)),
-    timeline: await exec.queryAll('SELECT action,actor_id AS actorId,details,status,created_at AS createdAt FROM mall_order_events WHERE order_id=? ORDER BY created_at,rowid',[id]),
-    returnRecord: (await exec.queryAll('SELECT * FROM mall_returns WHERE order_id=?',[id]))[0] || null,
-    dispatch: (await exec.queryAll('SELECT courier_notes AS courier,notes,status,updated_at AS updatedAt FROM delivery_orders WHERE sale_id=?',[row.linked_sale_id]))[0] || null,
-  } });
+  const [items, timeline, returnRecord, dispatch] = await Promise.all([
+    getOrderItems(exec, id),
+    exec.queryAll('SELECT action,actor_id AS actorId,details,status,created_at AS createdAt FROM mall_order_events WHERE order_id=? ORDER BY created_at,rowid',[id]),
+    exec.queryAll('SELECT * FROM mall_returns WHERE order_id=?',[id]),
+    exec.queryAll('SELECT courier_notes AS courier,notes,status,updated_at AS updatedAt FROM delivery_orders WHERE sale_id=?',[row.linked_sale_id]),
+  ]);
+  return json({ order: { ...publicOrder(row, items),
+    timeline,
+    returnRecord: returnRecord[0] || null,
+    dispatch: dispatch[0] || null,
+  }});
 }
 
 async function confirmOrder(exec: MallExecutor, id: string, actor: StaffActor) {

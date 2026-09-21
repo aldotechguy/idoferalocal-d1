@@ -215,8 +215,12 @@ async function listListings(exec: MallExecutor, url: URL) {
   if (view === 'hidden') filters.push("status <> 'Active'");
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
 
+  // Single windowed query: page rows + page_total in one round-trip.
+  // COUNT(*) OVER() gives the full filtered count without a separate
+  // COUNT query, exactly like getCatalog() already does.
   const rows = await exec.queryAll(
-    `SELECT ${LISTING_COLUMNS} FROM products ${where} ORDER BY mall_featured DESC, name ASC LIMIT ? OFFSET ?`,
+    `SELECT ${LISTING_COLUMNS}, COUNT(*) OVER() AS page_total FROM products ${where}
+     ORDER BY mall_featured DESC, name ASC LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );
   const mapped = rows.map((row) => {
@@ -224,12 +228,12 @@ async function listListings(exec: MallExecutor, url: URL) {
     return { ...listingView(row), issues: validation.issues };
   });
   const listings = mapped;
-  const total = (await exec.queryAll(`SELECT COUNT(*) AS n FROM products ${where}`, params))[0];
+  const total = rows.length ? n(rows[0].page_total) : 0;
   const counts = (await exec.queryAll(`SELECT
     SUM(CASE WHEN status = 'Active' THEN 1 ELSE 0 END) AS active,
     SUM(CASE WHEN status <> 'Active' THEN 1 ELSE 0 END) AS hidden FROM products`))[0];
   return json({
-    listings, total: n(total?.n), limit, offset, view,
+    listings, total, limit, offset, view,
     counts: { active: n(counts?.active), hidden: n(counts?.hidden) },
   });
 }

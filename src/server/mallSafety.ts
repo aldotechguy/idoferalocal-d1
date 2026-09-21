@@ -13,6 +13,16 @@ export const MALL_SAFETY_DDL = [
   // read to rows written after a composite (updated_at, collection, document_id)
   // watermark instead of scanning the whole document store per staff edit.
   `CREATE INDEX IF NOT EXISTS idx_app_documents_owner_updated ON app_documents (owner_id, updated_at, collection, document_id)`,
+  // Stock-movement restock lookups: the newArrivals rail correlates
+  // lastRestockSql against every product row; a covering index lets each
+  // aggregate run entirely from the index without touching the table heap.
+  // List order: product_id first (seek), then type/qty filters (index-only),
+  // then created_at DESC (aggregate reads newest-first).
+  `CREATE INDEX IF NOT EXISTS idx_stock_movements_product_type_qty_time ON stock_movements (product_id, type, qty, new_stock, prev_stock, created_at DESC)`,
+  // Sales status lookup: top-sellers and product-detail sold_qty aggregates
+  // join sale_items -> sales and filter on status. A plain status index
+  // lets the planner filter sales by status before touching the table.
+  `CREATE INDEX IF NOT EXISTS idx_sales_status ON sales (status)`,
 ];
 
 /**

@@ -45,14 +45,33 @@ export async function buildSnapshot(q: QueryAll): Promise<BoundedSnapshot> {
       return rows;
     });
   };
-  const [productRows, customerRows, supplierRows, saleRows, saleItemRows, purchaseRows, purchaseItemRows, recvRows, expenseRows, stockRows, pricingRows, moneyRows, deliveryRows, heldRows, wapoRows, notifRows, auditRows, settingsRows] = await Promise.all([
+  // Fetch capped parent rows FIRST so we can scope child-table reads to
+  // only those parents. Without this, sale_items/purchase_items/receiving_history
+  // scanned their full tables even though only the capped parents' children
+  // were ever used — the largest read-amplification in the app on busy stores.
+  const [productRows, customerRows, supplierRows, saleRows, purchaseRows] = await Promise.all([
     q('SELECT * FROM products ORDER BY updated_at DESC'),
     q('SELECT * FROM customers ORDER BY created_at DESC'),
     q('SELECT * FROM suppliers ORDER BY created_at DESC'),
-    q('SELECT * FROM sales ORDER BY created_at DESC'),
-    q('SELECT * FROM sale_items'),
-    q('SELECT * FROM purchases ORDER BY created_at DESC'),
-    q('SELECT * FROM purchase_items'),
+    qCapped('SELECT * FROM sales ORDER BY created_at DESC', 'sales'),
+    qCapped('SELECT * FROM purchases ORDER BY created_at DESC', 'purchases'),
+  ]);
+  // Collect parent IDs to scope child reads. The comment in SNAPSHOT_ROW_CAPS
+  // says capping child tables independently could orphan line items — the fix is
+  // the opposite: load only children of the parents we actually fetched.
+  const saleIds = saleRows.map(r => r.id);
+  const purchaseIds = purchaseRows.map(r => r.id);
+  const saleIdJson = saleIds.length ? JSON.stringify(saleIds) : '[]';
+  const purchaseIdJson = purchaseIds.length ? JSON.stringify(purchaseIds) : '[]';
+  const [saleItemRows, purchaseItemRows, recvRows, expenseRows, stockRows, pricingRows, moneyRows, deliveryRows, heldRows, wapoRows, notifRows, auditRows, settingsRows] = await Promise.all([
+    // Only load sale_items belonging to the (capped) fetched sales.
+    saleIds.length
+      ? q(`SELECT * FROM sale_items WHERE sale_id IN (SELECT value FROM json_each(?))`, [saleIdJson])
+      : q('SELECT * FROM sale_items'),
+    // Only load purchase_items belonging to the (capped) fetched purchases.
+    purchaseIds.length
+      ? q(`SELECT * FROM purchase_items WHERE purchase_id IN (SELECT value FROM json_each(?))`, [purchaseIdJson])
+      : q('SELECT * FROM purchase_items'),
     q('SELECT * FROM receiving_history'),
     qCapped('SELECT * FROM expenses ORDER BY date DESC', 'expenses'),
     qCapped('SELECT * FROM stock_movements ORDER BY created_at DESC', 'stock_movements'),
