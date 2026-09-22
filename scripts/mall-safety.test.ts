@@ -85,7 +85,7 @@ async function fixture(runtime: 'node' | 'worker') {
   };
   const scalar = (sql: string) => Object.values(db.prepare(sql).get()!)[0];
   const pay = () => op('collect-payment', { paymentMethod: 'Cash', amountKobo: 20000 });
-  return { db, exec, env, send, fill, checkout, id, op, pay, scalar };
+  return { db, exec, env, send, fill, checkout, id, op, pay, scalar, token };
 }
 
 for (const runtime of ['node', 'worker'] as const) {
@@ -321,6 +321,50 @@ for (const runtime of ['node', 'worker'] as const) {
     assert.equal(f.scalar('SELECT status FROM delivery_orders'), 'Returned');
     assert.equal(f.scalar('SELECT receipt_reference FROM mall_returns'), 'GRN-TEST');
     assert.equal(f.scalar('SELECT stock_qty FROM products'), 10);
+  });
+
+  test(`${runtime}: mall writes bump the sync revision so a guarded snapshot returns the mirrored sale`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    await f.checkout();
+    const guardedGet = (guard?: string) => worker.fetch(new Request('http://test/api/storage/snapshot?fresh=true', {
+      headers: { cookie: `idofera_session=${f.token}`, ...(guard ? { 'if-none-match': `"${guard}"` } : {}) },
+    }), f.env);
+    const before = await guardedGet();
+    assert.equal(before.status, 200);
+    const beforeBody = await before.json() as any;
+    assert.ok(beforeBody.revision > 0, 'checkout already bumped the revision (stock and movements are client-visible)');
+    const guard = `${beforeBody.revision}-${beforeBody.backend}`;
+    await f.pay();
+    const stale = await guardedGet(guard);
+    assert.equal(stale.status, 200, 'settlement bumped the revision: the pre-settlement guard must not 304');
+    const staleBody = await stale.json() as any;
+    const sale = (staleBody.stores.sales || []).find((s: any) => s.id === `sale-${f.id()}`);
+    assert.ok(sale, 'the re-read returns the Mall-mirrored sale');
+    assert.equal(sale.status, 'Completed');
+    const fresh = await guardedGet(`${staleBody.revision}-${staleBody.backend}`);
+    assert.equal(fresh.status, 304, 'the post-settlement guard 304s until the next write');
+  });
+
+  test(`${runtime}: settlement mirror-writes the sale so an open workspace's delta read delivers it`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    await f.checkout();
+    await f.pay();
+    // An open workspace polls with its composite watermark; since=<zero>
+    // replays every mirror row it has not confirmed yet.
+    const delta = await worker.fetch(new Request('http://test/api/storage/snapshot?since=' + encodeURIComponent(JSON.stringify({ ms: 0, collection: '', documentId: '' })), {
+      headers: { cookie: `idofera_session=${f.token}` },
+    }), f.env);
+    assert.equal(delta.status, 200);
+    const body = await delta.json() as any;
+    const sale = (body.stores.sales || []).find((s: any) => s.id === `sale-${f.id()}`);
+    assert.ok(sale, 'the delta read delivers the Mall-mirrored sale');
+    assert.ok(sale.invoiceNo.startsWith('INV-'), 'the mirror payload keeps the snapshot sale shape');
+    assert.equal(sale.totalAmount, 200, 'the mirror payload is in naira like every other sale doc');
+    assert.ok((body.stores.customers || []).some((c: any) => c.id === `cust-${f.id()}`), 'the delta delivers the settlement customer');
+    assert.ok((body.stores.moneyMovements || []).some((m: any) => m.id === `mm-sale-${f.id()}`), 'the delta delivers the Sale Inflow');
+    assert.ok((body.stores.products || []).some((p: any) => p.id === 'p' && p.currentStock === 8), 'the delta delivers the checkout stock change');
+    assert.ok((body.stores.stockMovements || []).some((m: any) => String(m.referenceNo) === `checkout:${f.id()}`), 'the delta delivers the checkout stock movement');
+    assert.ok((body.stores.notifications || []).some((x: any) => x.id === `mall:${f.id()}`), 'the delta delivers the new-order notification');
   });
   test(`${runtime}: simultaneous checkout retries return one order; new attempt permits repeat purchase`, async (t) => {
     const f = await fixture(runtime); t.after(() => f.db.close());

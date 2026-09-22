@@ -7,6 +7,7 @@ import { parseRoute } from '../src/hooks/useRoute.ts';
 import { computeMenuStyle, PORTAL_DROPDOWN_Z } from '../src/components/common/PortalDropdown.tsx';
 import { validateBuyer } from '../src/mall-site/useBuyerForm.ts';
 import { mallDeliveryFeeKobo, mallDeliveryZone } from '../src/shared/mallDelivery.ts';
+import { localIsoDate } from '../src/shared/localDate.ts';
 import { mallStockLabel } from '../src/shared/mallProductPresentation.ts';
 import { mallClient } from '../src/services/mallClient.ts';
 import { createMallSearchMatcher, mallOneTypo } from '../src/shared/mallSearch.ts';
@@ -378,6 +379,23 @@ test('fixed delivery zones expose canonical fees', () => {
   assert.equal(mallDeliveryFeeKobo('uyo_outer'), 250000);
   assert.equal(mallDeliveryFeeKobo('other'), null);
   assert.equal(mallDeliveryZone('invalid'), 'pickup');
+});
+
+test('day keys are built from the local calendar, not UTC', () => {
+  // Constructed locally: 00:30 on June 15 is the local June 15 in ANY
+  // timezone, while toISOString() renders June 14 under UTC+1 — the exact
+  // way a WAT sale taken after midnight used to drop out of Today's Sales.
+  const earlyMorning = new Date(2026, 5, 15, 0, 30);
+  assert.equal(localIsoDate(earlyMorning), '2026-06-15');
+  assert.equal(localIsoDate(new Date(2026, 11, 31, 23, 59)), '2026-12-31');
+});
+
+test('dashboard and AI day filters use localIsoDate, never toISOString', () => {
+  for (const file of ['src/components/dashboard/DashboardView.tsx', 'src/components/ai/AiAssistantView.tsx']) {
+    const source = fs.readFileSync(file, 'utf8');
+    assert.doesNotMatch(source, /toISOString\(\)\.split\('T'\)\[0\]/, `${file} must not build day keys from UTC`);
+    assert.match(source, /localIsoDate\(/, `${file} must build day keys from the local calendar`);
+  }
 });
 
 test('development bootstrap prevents stale service workers from mixing React modules', () => {

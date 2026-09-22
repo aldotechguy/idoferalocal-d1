@@ -44,6 +44,7 @@ import {
   Pie,
   Cell,
 } from 'recharts';
+import { localIsoDate } from '../../shared/localDate';
 
 interface DashboardViewProps {
   onNavigate: (page: string) => void;
@@ -73,7 +74,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const priorMonthStr = `${priorMonthDate.getFullYear()}-${String(priorMonthDate.getMonth() + 1).padStart(2, '0')}`;
   const priorMonthShort = priorMonthDate.toLocaleDateString('en-US', { month: 'short' });
 
-  const todayStr = now.toISOString().split('T')[0];
+  // Local calendar day key: createdAt is a UTC ISO timestamp, and Nigeria runs
+  // UTC+1, so a 00:30 WAT sale carries the previous UTC date — toISOString()
+  // would drop it from Today's Sales.
+  const todayStr = localIsoDate(now);
   const todaySales = validSales
     .filter((s) => s.createdAt && s.createdAt.startsWith(todayStr))
     .reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
@@ -138,7 +142,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   // Realtime Day-over-Day Sales Comparison for StatCard
   const yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayStr = yesterday.toISOString().split('T')[0];
+  const yesterdayStr = localIsoDate(yesterday);
   const yesterdaySales = validSales
     .filter((s) => s.createdAt && s.createdAt.startsWith(yesterdayStr))
     .reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
@@ -160,7 +164,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const last7Days = Array.from({ length: 7 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - (6 - i));
-    const isoDate = d.toISOString().split('T')[0];
+    const isoDate = localIsoDate(d);
     const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
     return { isoDate, name: dayName };
   });

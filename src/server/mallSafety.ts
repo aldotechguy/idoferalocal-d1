@@ -111,6 +111,26 @@ export function assertSql(condition: string, params: unknown[] = []): MallStmt[]
   ];
 }
 
+/**
+ * One statement that belongs in EVERY Mall write batch. Mall writes go
+ * straight to the relational tables, but a staff workspace only re-reads
+ * the store when `sync_revisions` moves: delta reads are bounded by the
+ * app_documents watermark (which Mall writes never touch), and a guarded
+ * snapshot GET answers 304 while the revision is unchanged. Without this
+ * bump a settled Mall sale — and the stock it moved — stays invisible to
+ * every client until an unrelated storage PATCH happens to bump the
+ * revision. MAX() mirrors the storage paths' Math.max(now, current + 1):
+ * a lagging clock can advance but never rewind the revision.
+ */
+export function revisionBumpStatement(): MallStmt {
+  const now = Date.now();
+  return {
+    sql: `INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES ('idofera-business', ?, ?)
+      ON CONFLICT(owner_id) DO UPDATE SET revision = MAX(excluded.revision, sync_revisions.revision + 1), updated_at = excluded.updated_at`,
+    params: [now, now],
+  };
+}
+
 export async function runOrderBatch(exec: MallExecutor, row: any, statements: MallStmt[]) {
   const guard = assertSql(`EXISTS (SELECT 1 FROM mall_orders o JOIN payments p ON p.order_id = o.id
     WHERE o.id = ? AND o.status = ? AND o.linked_sale_id IS ? AND o.total_kobo = ?

@@ -18,7 +18,8 @@ import { KoboToNaira, parseJsonArray, s, n } from './relationalMapper.js';
 import { hasMallPrice } from '../shared/mallProductPresentation.js';
 import { createMallSearchMatcher } from '../shared/mallSearch.js';
 import { MALL_DELIVERY_ZONE_IDS, mallDeliveryFeeKobo, mallDeliveryLabel, mallDeliveryZone } from '../shared/mallDelivery.js';
-import { assertSql } from './mallSafety.js';
+import { assertSql, revisionBumpStatement } from './mallSafety.js';
+import { mirrorMallWrites } from './mallMirror.js';
 import { normalizeMallPhone, normalizedPhoneSql } from '../shared/mallPhone.js';
 import { mallReadiness, mallRateLimit, publicMallConfig, type MallConfig } from './mallOperations.js';
 
@@ -642,7 +643,10 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
       createdAt,
     ],
   }];
+  const stockMovementIds: string[] = [];
   items.forEach((it, index) => {
+    const movementId = `mv-${uuid()}`;
+    stockMovementIds.push(movementId);
     stmts.push({
       sql: 'INSERT INTO mall_order_items (id, mall_order_id, product_id, product_name, qty, unit_price_kobo, total_kobo) VALUES (?, ?, ?, ?, ?, ?, ?)',
       params: [`${orderId}-item-${index}`, orderId, it.productId, it.name, it.qty, it.unitPriceKobo, it.totalKobo],
@@ -660,7 +664,7 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
             SELECT ?, p.id, ?, 'Mall Order', ?, p.stock_qty + ?, p.stock_qty, ?, ?, ?, ?
             FROM products p WHERE p.id = ?`,
       params: [
-        `mv-${uuid()}`, it.name, -it.qty, it.qty,
+        movementId, it.name, -it.qty, it.qty,
         `checkout:${orderId}`, `Mall order ${orderNo}`, 'Mall Storefront', createdAt, it.productId,
       ],
     });
@@ -672,6 +676,9 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
   });
   stmts.push({ sql: 'DELETE FROM mall_cart_items WHERE cart_id = ?', params: [cartId] });
   stmts.push({ sql: "UPDATE mall_carts SET status = 'converted', updated_at = ? WHERE id = ?", params: [Date.now(), cartId] });
+  // Stock and stock_movements changed: bump the sync revision so guarded
+  // snapshot clients re-read instead of 304-ing a pre-checkout world.
+  stmts.push(revisionBumpStatement());
 
   try { await exec.runBatch(stmts); }
   catch (error) {
@@ -680,6 +687,14 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
     if (/mall_state_conflict|INSUFFICIENT_STOCK/.test(String(error))) fail(409, 'Cart, price, or availability changed. Refresh your cart and retry.');
     throw error;
   }
+  // Option B delta acceleration: the revision bump makes a reload converge,
+  // and these mirror rows let an ALREADY-OPEN workspace see the committed
+  // stock (and the new-order notification) through its next delta read.
+  await mirrorMallWrites(exec, {
+    products: items.map((it) => it.productId),
+    stockMovements: stockMovementIds,
+    notifications: [`mall:${orderId}`],
+  });
   // Stock and purchase counts changed: the cached home rails must not show a
   // pre-checkout world past this write.
   invalidateMallFacetCache();

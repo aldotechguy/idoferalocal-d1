@@ -1,6 +1,7 @@
 import type { MallExecutor, MallStmt } from './mallApi.js';
 import { n, s } from './relationalMapper.js';
-import { runOrderBatch } from './mallSafety.js';
+import { revisionBumpStatement, runOrderBatch } from './mallSafety.js';
+import { mirrorMallWrites } from './mallMirror.js';
 import { normalizedPhoneSql, normalizeMallPhone } from '../shared/mallPhone.js';
 import { mallMetrics, runMallMaintenance } from './mallOperations.js';
 import { registerMallCacheInvalidator } from './mallApi.js';
@@ -188,6 +189,7 @@ async function confirmOrder(exec: MallExecutor, id: string, actor: StaffActor) {
   await runOrderBatch(exec, row, [
     { sql: `UPDATE mall_orders SET status = 'confirmed' WHERE id = ? AND status = 'pending'`, params: [id] },
     { sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'CONFIRM_MALL_ORDER', 'MallOrder', ?, ?, ?)`, params: [`audit-${uuid()}`, actor.id, id, `${actor.displayName} confirmed ${s(row.order_no)}.`, at] },
+    revisionBumpStatement(),
   ]);
   return detail(exec, id);
 }
@@ -206,7 +208,10 @@ async function cancelOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
     sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'CANCEL_MALL_ORDER', 'MallOrder', ?, ?, ?)`,
     params: [`audit-cancel-${id}`, actor.id, id, `${actor.displayName} cancelled ${s(row.order_no)} and restored committed stock. Reason: ${reason}`, at],
   }];
+  const cancelMovementIds: string[] = [];
   for (const item of items) {
+    const cancelMovementId = `mv-${uuid()}`;
+    cancelMovementIds.push(cancelMovementId);
     stmts.push({ sql: 'UPDATE products SET stock_qty = stock_qty + ?, updated_at = ? WHERE id = ?', params: [n(item.qty), at, item.product_id] });
     stmts.push({
       // One products seek instead of two correlated subqueries (same shape as the
@@ -214,11 +219,13 @@ async function cancelOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
       sql: `INSERT INTO stock_movements (id, product_id, product_name, type, qty, prev_stock, new_stock, ref_id, notes, performed_by, created_at)
         SELECT ?, p.id, ?, 'Returned', ?, p.stock_qty - ?, p.stock_qty, ?, ?, ?, ?
         FROM products p WHERE p.id = ?`,
-      params: [`mv-${uuid()}`, item.product_name, n(item.qty), n(item.qty), `cancel:${id}`, `Cancelled Mall order ${s(row.order_no)}: ${reason}`, actor.displayName, at, item.product_id],
+      params: [cancelMovementId, item.product_name, n(item.qty), n(item.qty), `cancel:${id}`, `Cancelled Mall order ${s(row.order_no)}: ${reason}`, actor.displayName, at, item.product_id],
     });
   }
   stmts.push({ sql: `UPDATE mall_orders SET status = 'cancelled' WHERE id = ? AND status = ?`, params: [id, status] });
   stmts.push({ sql: `UPDATE payments SET status = 'cancelled', raw_json = ? WHERE order_id = ? AND status = 'pending'`, params: [JSON.stringify({ orderNo: row.order_no, cancellationReason: reason, cancelledBy: actor.displayName, cancelledAt: at }), id] });
+  // Restocked products and stock_movements are client-visible: bump the revision.
+  stmts.push(revisionBumpStatement());
   try {
     await runOrderBatch(exec, row, stmts);
   } catch (error) {
@@ -226,6 +233,12 @@ async function cancelOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
     if (s(concurrent[0]?.status) === 'cancelled') return detail(exec, id);
     throw error;
   }
+  // Option B delta acceleration: an open workspace's next delta read sees the
+  // restored stock without a reload.
+  await mirrorMallWrites(exec, {
+    products: items.map((item) => String(item.product_id)),
+    stockMovements: cancelMovementIds,
+  });
   return detail(exec, id);
 }
 
@@ -252,6 +265,7 @@ async function quoteDelivery(exec: MallExecutor, id: string, actor: StaffActor, 
     { sql: 'UPDATE mall_orders SET delivery_fee_kobo = ?, total_kobo = ?, delivery_address_json = ? WHERE id = ? AND status = ?', params: [feeKobo, totalKobo, JSON.stringify(updatedDelivery), id, 'pending'] },
     { sql: `UPDATE payments SET amount_kobo = ?, raw_json = ? WHERE order_id = ? AND status = 'pending'`, params: [totalKobo, JSON.stringify({ orderNo: row.order_no, deliveryFeeKobo: feeKobo, quotedBy: actor.displayName, quotedAt: at }), id] },
     { sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'QUOTE_MALL_DELIVERY', 'MallOrder', ?, ?, ?)`, params: [`audit-${uuid()}`, actor.id, id, `${actor.displayName} quoted delivery for ${row.order_no} at ${feeKobo} kobo.`, at] },
+    revisionBumpStatement(),
   ]);
   return detail(exec, id);
 }
@@ -308,6 +322,10 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
   stmts.push({ sql: `INSERT INTO money_movements (id, date, type, subtype, source_account, dest_account, amount_kobo, notes, ref_no, ref_id, performed_by, created_at) VALUES (?, ?, 'Sale Inflow', ?, NULL, ?, ?, ?, ?, ?, ?, ?)`, params: [`mm-${saleId}`, at, method, paymentDestination(method), row.total_kobo, `Mall order payment for ${row.order_no}`, invoiceNo, saleId, actor.displayName, at] });
   if (customer) stmts.push({ sql: `UPDATE customers SET purchase_history_count = purchase_history_count + 1, lifetime_value_kobo = lifetime_value_kobo + ?, loyalty_points = loyalty_points + ? WHERE id = ?`, params: [row.total_kobo, Math.floor(n(row.total_kobo) / 10_000), customer.id] });
   stmts.push({ sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'CONVERT_MALL_ORDER_SALE', 'MallOrder', ?, ?, ?)`, params: [`audit-${uuid()}`, actor.id, id, `${actor.displayName} converted ${row.order_no} to ${invoiceNo} via ${method}.`, at] });
+  // The mirrored Sale, payment, money movement, customer metrics and audit
+  // trail are all client-visible: bump the sync revision in the same atomic
+  // batch or guarded snapshot clients 304 a world without the Mall sale.
+  stmts.push(revisionBumpStatement());
   try {
     await runOrderBatch(exec, row, stmts);
   } catch (error) {
@@ -315,6 +333,13 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
     if (s(concurrent[0]?.linked_sale_id)) return detail(exec, id);
     throw error;
   }
+  // Option B delta acceleration: an open workspace's next delta read sees the
+  // mirrored Sale, the customer and the Sale Inflow without a reload.
+  await mirrorMallWrites(exec, {
+    sales: [saleId],
+    customers: [customerId],
+    moneyMovements: [`mm-${saleId}`],
+  });
   return detail(exec, id);
 }
 
@@ -356,7 +381,13 @@ async function transitionOrder(exec: MallExecutor, id: string, actor: StaffActor
   }
   if (action === 'mark-out-for-delivery') stmts.push({sql:"UPDATE delivery_orders SET status='In Transit',courier_notes=?,updated_at=? WHERE sale_id=?",params:[body.courier.trim(),at,row.linked_sale_id]});
   if (action === 'complete' && zone !== 'pickup') stmts.push({sql:"UPDATE delivery_orders SET status='Delivered',updated_at=? WHERE sale_id=?",params:[at,row.linked_sale_id]});
+  // Transitions write audit_logs and (on dispatch) a delivery_order — both
+  // client-visible stores: bump the revision.
+  stmts.push(revisionBumpStatement());
   await runOrderBatch(exec, row, stmts);
+  // Option B delta acceleration for dispatch/delivery: the SELECT inside
+  // mirrorMallWrites no-ops for transitions that touched no delivery_order.
+  await mirrorMallWrites(exec, { deliveryOrders: [`del-${id}`] });
   return detail(exec, id);
 }
 
@@ -392,11 +423,27 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
     });
   }
   stmts.push({ sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'REFUND_MALL_ORDER', 'MallOrder', ?, ?, ?)`, params: [`audit-refund-${id}`, actor.id, id, `${actor.displayName} refunded ${row.order_no}. ${reason}`, at] });
+  // The unwind rewrites sales, payments, money movements, customer metrics,
+  // stock and the delivery order — all client-visible: bump the revision.
+  stmts.push(revisionBumpStatement());
   try { await runOrderBatch(exec, row, stmts); } catch (error) {
     const concurrent = await exec.queryAll('SELECT status FROM mall_orders WHERE id = ?', [id]);
     if (s(concurrent[0]?.status) === 'refunded') return detail(exec, id);
     throw error;
   }
+  // Option B delta acceleration: an open workspace's next delta read sees the
+  // refunded Sale, the reverse money movement, the rolled-back customer, the
+  // returned delivery order and the restocked goods without a reload.
+  await mirrorMallWrites(exec, {
+    sales: [s(row.linked_sale_id)],
+    ...(row.customer_id ? { customers: [s(row.customer_id)] } : {}),
+    ...(returnStock ? {
+      products: items.map((item) => String(item.product_id)),
+      stockMovements: items.map((item) => `mv-refund-${id}-${item.id}`),
+    } : {}),
+    moneyMovements: [`mm-refund-${s(row.linked_sale_id)}`],
+    deliveryOrders: [`del-${id}`],
+  });
   return detail(exec, id);
 }
 
@@ -421,6 +468,7 @@ async function reviewDelivery(exec:MallExecutor,id:string,actor:StaffActor,body:
   await runOrderBatch(exec,row,[
     {sql:'UPDATE mall_orders SET delivery_address_json=? WHERE id=?',params:[JSON.stringify({...delivery,addressVerified:true,addressVerifiedBy:actor.id,addressVerifiedAt:at}),id]},
     {sql:"INSERT INTO audit_logs(id,actor_id,action,entity,entity_id,details,created_at) VALUES (?,?,'VERIFY_MALL_DELIVERY','MallOrder',?,?,?)",params:[crypto.randomUUID(),actor.id,id,`Address and ${delivery.zone} serviceability verified`,at]},
+    revisionBumpStatement(),
   ]);
   return detail(exec,id);
 }

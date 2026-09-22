@@ -119,6 +119,23 @@ test('staff payment creates one canonical sale without deducting stock twice', a
   assert.equal((db.prepare('SELECT COUNT(*) AS n FROM sales').get() as any).n, 1);
 });
 
+test('every mall write batch bumps the sync revision', async () => {
+  const { db, exec, session } = fixture();
+  const revision = () => Number((db.prepare(`SELECT revision FROM sync_revisions WHERE owner_id = 'idofera-business'`).get() as any)?.revision || 0);
+  assert.equal(revision(), 0, 'a fresh database starts with no revision row');
+  await checkout(exec, session);
+  const afterCheckout = revision();
+  assert.ok(afterCheckout > 0, 'checkout bumps the revision (stock + stock_movements changed)');
+  const id = (db.prepare('SELECT id FROM mall_orders LIMIT 1').get() as any).id;
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/confirm`, { method: 'POST', body: '{}' }), exec, actor);
+  const afterConfirm = revision();
+  assert.ok(afterConfirm > afterCheckout, 'confirmation bumps the revision (audit_logs changed)');
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/collect-payment`, {
+    method: 'POST', body: JSON.stringify({ paymentMethod: 'Cash', amountKobo: 20000 }),
+  }), exec, actor);
+  assert.ok(revision() > afterConfirm, 'settlement bumps the revision so guarded snapshot clients re-read the mirrored sale');
+});
+
 test('staff cancellation restores committed stock exactly once', async () => {
   const { db, exec, session } = fixture();
   await checkout(exec, session);

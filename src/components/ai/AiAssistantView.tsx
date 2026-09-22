@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { NairaSign } from '../common/NairaSign';
+import { localIsoDate } from '../../shared/localDate';
 
 export const AiAssistantView: React.FC = () => {
   const { products, sales, expenses, settings } = useApp();
@@ -49,7 +50,7 @@ export const AiAssistantView: React.FC = () => {
     try {
       const validSales = sales.filter((s) => s.status !== 'Refunded' && s.status !== 'Held' && s.status !== 'Draft');
       const now = new Date();
-      const todayStr = now.toISOString().split('T')[0];
+      const todayStr = localIsoDate(now);
       const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
       const calculatedTodaySales = validSales
         .filter((s) => s.createdAt && s.createdAt.startsWith(todayStr))
