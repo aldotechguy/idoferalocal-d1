@@ -484,10 +484,8 @@ test('Mall exposes the paginated catalog and disables sold-out purchase controls
   assert.match(card, /bg-emerald-50 dark:bg-emerald-900\/30/);
   assert.match(cartLines, /it\.listPrice != null && it\.price < it\.listPrice/);
   assert.match(cartLines, />Wholesale</);
-  assert.match(cartLines, /Add \{it\.wholesaleOffer!\.minQty - it\.qty\} more → pay \{formatNaira\(it\.wholesaleOffer!\.price\)\} each/);
-  assert.match(cartLines, /Save \{formatNaira\(\(it\.price - it\.wholesaleOffer!\.price\) \* it\.wholesaleOffer!\.minQty\)\} on this item/);
-  assert.match(cartLines, /mt-1\.5 w-full rounded-lg/, 'the per-item CTA is block-level so it can never overflow its column');
-  assert.match(cartLines, /flex flex-col items-start/, 'the per-item CTA packs its lines to the left');
+  assert.match(cartLines, /Add \{it\.wholesaleOffer!\.minQty - it\.qty\} more → pay \{formatNaira\(it\.wholesaleOffer!\.price\)\} each, save \{formatNaira\(\(it\.price - it\.wholesaleOffer!\.price\) \* it\.wholesaleOffer!\.minQty\)\} on this item/);
+  assert.match(cartLines, /inline-flex items-center gap-1\.5 self-start rounded-lg/, 'the per-item CTA is the compact inline pill');
   assert.match(cartLines, /it\.wholesaleOffer\.minQty <= it\.stock/, 'the CTA only invites thresholds the stock can reach');
   assert.match(cartLines, /Add \{formatNaira\(unlock\.extra\)\} more → wholesale/);
   assert.match(cartLines, /\{unlock\.it\.name\}: \{formatNaira\(unlock\.offer\.price\)\} each, save \{formatNaira\(unlock\.saving\)\}/);
