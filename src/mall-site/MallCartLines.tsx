@@ -30,19 +30,19 @@ export const MallCartLines: React.FC = () => {
   return (
     <div className="space-y-3">
       {unlock && (
-        <div className="flex items-center gap-3 rounded-2xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-900/20 p-3">
-          <TrendingUp className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+        <div className="flex gap-3 rounded-2xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-900/20 p-3">
+          <TrendingUp className="w-5 h-5 mt-0.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
           <div className="min-w-0 flex-1">
             <p className="text-sm font-black text-emerald-700 dark:text-emerald-300 truncate">Add {formatNaira(unlock.extra)} more to unlock wholesale on {unlock.it.name}</p>
             <p className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">Pay {formatNaira(unlock.offer.price)} each on that item and save {formatNaira(unlock.saving)}.</p>
+            <button
+              type="button"
+              onClick={() => setCartQty(unlock.it.productId, unlock.offer.minQty)}
+              className="mt-2 h-9 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold transition-colors w-full sm:w-auto"
+            >
+              Unlock
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => setCartQty(unlock.it.productId, unlock.offer.minQty)}
-            className="shrink-0 h-9 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold transition-colors"
-          >
-            Unlock
-          </button>
         </div>
       )}
       <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 divide-y divide-slate-100 dark:divide-slate-800">
@@ -66,10 +66,13 @@ export const MallCartLines: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setCartQty(it.productId, it.wholesaleOffer!.minQty)}
-                  className="mt-1.5 inline-flex items-center gap-1.5 self-start rounded-lg bg-emerald-50 dark:bg-emerald-900/30 px-2 py-1 text-[11px] font-extrabold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 transition-colors text-left"
+                  className="mt-1.5 w-full rounded-lg bg-emerald-50 dark:bg-emerald-900/30 px-2 py-1.5 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 transition-colors text-left"
                 >
-                  <Layers className="w-3 h-3 shrink-0" />
-                  Add {it.wholesaleOffer!.minQty - it.qty} more → pay {formatNaira(it.wholesaleOffer!.price)} each, save {formatNaira((it.price - it.wholesaleOffer!.price) * it.wholesaleOffer!.minQty)} on this item
+                  <span className="flex items-center gap-1.5 text-[11px] font-extrabold text-emerald-700 dark:text-emerald-300">
+                    <Layers className="w-3 h-3 shrink-0" />
+                    Add {it.wholesaleOffer!.minQty - it.qty} more → pay {formatNaira(it.wholesaleOffer!.price)} each
+                  </span>
+                  <span className="block pl-[18px] text-[10px] font-bold text-emerald-600 dark:text-emerald-400">Save {formatNaira((it.price - it.wholesaleOffer!.price) * it.wholesaleOffer!.minQty)} on this item</span>
                 </button>
               )}
             </div>

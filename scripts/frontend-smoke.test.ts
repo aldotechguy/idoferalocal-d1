@@ -485,11 +485,12 @@ test('Mall exposes the paginated catalog and disables sold-out purchase controls
   assert.match(cartLines, /it\.listPrice != null && it\.price < it\.listPrice/);
   assert.match(cartLines, />Wholesale</);
   assert.match(cartLines, /Add \{it\.wholesaleOffer!\.minQty - it\.qty\} more → pay \{formatNaira\(it\.wholesaleOffer!\.price\)\} each/);
-  assert.match(cartLines, /save \{formatNaira\(\(it\.price - it\.wholesaleOffer!\.price\) \* it\.wholesaleOffer!\.minQty\)\} on this item/);
+  assert.match(cartLines, /Save \{formatNaira\(\(it\.price - it\.wholesaleOffer!\.price\) \* it\.wholesaleOffer!\.minQty\)\} on this item/);
+  assert.match(cartLines, /mt-1\.5 w-full rounded-lg/, 'the per-item CTA is block-level so it can never overflow its column');
   assert.match(cartLines, /it\.wholesaleOffer\.minQty <= it\.stock/, 'the CTA only invites thresholds the stock can reach');
   assert.match(cartLines, /Add \{formatNaira\(unlock\.extra\)\} more to unlock wholesale on \{unlock\.it\.name\}/);
+  assert.match(cartLines, /w-full sm:w-auto/, 'the banner Unlock button stacks under the text on phones');
   assert.match(cartLines, /setCartQty\(unlock\.it\.productId, unlock\.offer\.minQty\)/, 'one-tap Unlock jumps the line to the threshold');
-  assert.match(cartLines, /Unlock/);
   const search = fs.readFileSync('src/mall-site/MallHeaderSearch.tsx', 'utf8');
   assert.match(search, /product\.wholesaleOffer \? ` · \$\{formatNaira\(product\.wholesaleOffer\.price\)\} each at \$\{product\.wholesaleOffer\.minQty\}\+`/);
 });
