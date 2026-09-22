@@ -484,7 +484,7 @@ test('Mall exposes the paginated catalog and disables sold-out purchase controls
   assert.match(card, /bg-emerald-50 dark:bg-emerald-900\/30/);
   assert.match(cartLines, /it\.listPrice != null && it\.price < it\.listPrice/);
   assert.match(cartLines, />Wholesale</);
-  assert.match(cartLines, /Add \{it\.wholesaleOffer!\.minQty - it\.qty\} more → pay \{formatNaira\(it\.wholesaleOffer!\.price\)\} each, save \{formatNaira\(\(it\.price - it\.wholesaleOffer!\.price\) \* it\.wholesaleOffer!\.minQty\)\} on this item/);
+  assert.match(cartLines, /Add \{it\.wholesaleOffer!\.minQty - it\.qty\} more → \{formatNaira\(it\.wholesaleOffer!\.price\)\} each · save \{formatNaira\(\(it\.price - it\.wholesaleOffer!\.price\) \* it\.wholesaleOffer!\.minQty\)\}/);
   assert.match(cartLines, /inline-flex items-center gap-1\.5 self-start rounded-lg/, 'the per-item CTA is the compact inline pill');
   assert.match(cartLines, /it\.wholesaleOffer\.minQty <= it\.stock/, 'the CTA only invites thresholds the stock can reach');
   assert.match(cartLines, /Add \{formatNaira\(unlock\.extra\)\} more → wholesale/);

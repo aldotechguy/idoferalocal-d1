@@ -69,7 +69,7 @@ export const MallCartLines: React.FC = () => {
                   className="mt-1.5 inline-flex items-center gap-1.5 self-start rounded-lg bg-emerald-50 dark:bg-emerald-900/30 px-2 py-1 text-[11px] font-extrabold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 transition-colors text-left"
                 >
                   <Layers className="w-3 h-3 shrink-0" />
-                  Add {it.wholesaleOffer!.minQty - it.qty} more → pay {formatNaira(it.wholesaleOffer!.price)} each, save {formatNaira((it.price - it.wholesaleOffer!.price) * it.wholesaleOffer!.minQty)} on this item
+                  Add {it.wholesaleOffer!.minQty - it.qty} more → {formatNaira(it.wholesaleOffer!.price)} each · save {formatNaira((it.price - it.wholesaleOffer!.price) * it.wholesaleOffer!.minQty)}
                 </button>
               )}
             </div>
