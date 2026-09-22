@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShoppingCart } from 'lucide-react';
+import { Layers, ShoppingCart } from 'lucide-react';
 import { useMall } from '../context/MallContext';
 import { useNavigateMall } from '../hooks/useRoute';
 import type { MallProduct } from '../types/mall';
@@ -45,6 +45,14 @@ export const MallProductCard: React.FC<{ product: MallProduct }> = ({ product })
             <span className="text-[11px] text-slate-400 line-through">{formatNaira(product.retailPriceKobo)}</span>
           )}
         </div>
+        {product.wholesaleOffer && (
+          <p className="inline-flex items-center gap-1 self-start rounded-md bg-emerald-50 dark:bg-emerald-900/30 px-1.5 py-0.5 text-[10px] font-extrabold text-emerald-700 dark:text-emerald-300">
+            <Layers className="w-3 h-3 shrink-0" />
+            {qty >= product.wholesaleOffer.minQty
+              ? 'Wholesale price applied'
+              : `${formatNaira(product.wholesaleOffer.price)} each at ${product.wholesaleOffer.minQty}+`}
+          </p>
+        )}
         <p className="text-xs text-slate-500 font-medium">{product.unit}{product.unit ? ' • ' : ''}{mallStockLabel(product.stock)}</p>
         <div className="mt-auto pt-1.5">
           {qty > 0 && purchasable ? (

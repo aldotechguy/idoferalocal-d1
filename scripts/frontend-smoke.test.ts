@@ -478,6 +478,10 @@ test('Mall exposes the paginated catalog and disables sold-out purchase controls
   assert.match(detail, /Buy \{product\.wholesaleOffer\.minQty\}\+ at \{formatNaira\(product\.wholesaleOffer\.price\)\} each/);
   assert.match(detail, /Wholesale price \{formatNaira\(product\.wholesaleOffer\.price\)\} each applies at this quantity/);
   const cartLines = fs.readFileSync('src/mall-site/MallCartLines.tsx', 'utf8');
+  assert.match(card, /product\.wholesaleOffer/);
+  assert.match(card, /formatNaira\(product\.wholesaleOffer\.price\)\} each at \$\{product\.wholesaleOffer\.minQty\}\+/);
+  assert.match(card, /Wholesale price applied/);
+  assert.match(card, /bg-emerald-50 dark:bg-emerald-900\/30/);
   assert.match(cartLines, /it\.listPrice != null && it\.price < it\.listPrice/);
   assert.match(cartLines, />Wholesale</);
 });
