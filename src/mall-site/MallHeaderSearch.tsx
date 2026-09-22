@@ -118,7 +118,7 @@ export const MallHeaderSearch: React.FC<{ query: string; setQuery: (q: string) =
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-bold truncate">{product.name}</p>
                 <p className="text-xs text-slate-500 truncate">{[product.brand, product.category].filter(Boolean).join(' · ')}</p>
-                <p className="text-xs font-semibold">{hasMallPrice(product.price) ? formatNaira(product.price) : 'Price unavailable'} · {mallStockLabel(product.stock)}</p>
+                <p className="text-xs font-semibold">{hasMallPrice(product.price) ? formatNaira(product.price) : 'Price unavailable'} · {mallStockLabel(product.stock)}{product.wholesaleOffer ? ` · ${formatNaira(product.wholesaleOffer.price)} each at ${product.wholesaleOffer.minQty}+` : ''}</p>
               </div>
             </div>
           ))}

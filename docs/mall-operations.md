@@ -257,7 +257,12 @@ stored as ISO-8601 UTC millisecond strings and compared against a parameter-free
   reaches the product's minimum wholesale quantity, that line is charged the
   wholesale price. The tier only applies when it is a genuine discount that
   clears the floor price, so it can never raise a price or beat a cheaper
-  active promotion. The product page advertises the tier ("Buy N+ at ... each")
+  active promotion. The product page advertises the tier ("Buy N+ at ... each"),
+  the product card shows an emerald tier chip, the header-search result rows
+  carry the tier, and the Order Summary upsells it: a per-item CTA ("Add N
+  more → pay X each, save Y on this item") plus a whole-cart banner ("Add ₦X
+  more to unlock wholesale on ...") with a one-tap Unlock that jumps the line
+  to the threshold. Both CTAs are suppressed when stock cannot reach the tier,
   and the cart tags discounted lines with a Wholesale badge. Order lines record
   the tier unit price.
 - **Promotional Price** (the flat POS field, not the windowed Mall promo) is

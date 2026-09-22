@@ -481,7 +481,12 @@ async function getOrCreateCartId(exec: MallExecutor, sessionId: string): Promise
 const cartItemColumns = (honorPos: boolean) => `ci.product_id AS product_id, ci.qty AS qty, p.name AS name, p.unit AS unit,
   p.stock_qty AS stock_qty, p.images_json AS images_json, p.is_mall_listed AS is_mall_listed,
   p.status AS status, ${effectivePrice('p', honorPos)} AS list_price_kobo,
-  ${unitPriceSql('p', 'ci.qty', honorPos)} AS price_kobo`;
+  ${unitPriceSql('p', 'ci.qty', honorPos)} AS price_kobo,
+  CASE WHEN p.min_wholesale_qty > 1 AND p.wholesale_price_kobo > 0
+      AND p.wholesale_price_kobo >= p.min_selling_price_kobo
+      AND p.wholesale_price_kobo < ${effectivePrice('p', honorPos)}
+    THEN p.wholesale_price_kobo END AS tier_price_kobo,
+  p.min_wholesale_qty AS tier_min_qty`;
 
 async function readCart(exec: MallExecutor, cartId: string) {
   const rows = await exec.queryAll(
@@ -500,6 +505,11 @@ async function readCart(exec: MallExecutor, cartId: string) {
       price,
       /** Listed price without the wholesale tier; price < listPrice means the tier applies. */
       listPrice: n(r.list_price_kobo),
+      /** Same validity as the charged tier but without the qty check, so the
+       * Order Summary can invite the buyer to reach the threshold. */
+      wholesaleOffer: r.tier_price_kobo == null
+        ? null
+        : { price: n(r.tier_price_kobo), minQty: n(r.tier_min_qty) },
       qty: n(r.qty),
       stock: n(r.stock_qty),
       image: (parseJsonArray(r.images_json)[0] as string) || '',

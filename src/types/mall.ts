@@ -32,6 +32,9 @@ export type MallCartItem = {
   price: number;
   /** Listed price without the wholesale tier; price < listPrice means the tier applies. */
   listPrice?: number;
+  /** Valid wholesale tier for this product; present even below the threshold so
+   * the Order Summary can invite the buyer to reach it. */
+  wholesaleOffer?: { price: number; minQty: number } | null;
   qty: number;
   stock: number;
   image: string;

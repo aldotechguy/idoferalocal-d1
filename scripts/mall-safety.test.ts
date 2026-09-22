@@ -178,15 +178,18 @@ for (const runtime of ['node', 'worker'] as const) {
     assert.equal(c.items[0].price, 10000);
     assert.equal(c.items[0].listPrice, 10000);
     assert.equal(c.subtotalKobo, 40000);
+    assert.deepEqual(c.items[0].wholesaleOffer, { price: 8000, minQty: 5 }, 'cart lines carry the tier for the Order Summary CTA');
     await setQty(5);
     c = await cart();
     assert.equal(c.items[0].price, 8000, 'the tier applies at the minimum wholesale quantity');
     assert.equal(c.items[0].listPrice, 10000, 'the listed price remains visible for the Wholesale badge');
     assert.equal(c.subtotalKobo, 40000);
+    assert.deepEqual(c.items[0].wholesaleOffer, { price: 8000, minQty: 5 }, 'the offer survives past the threshold for the applied state');
     f.db.exec('UPDATE products SET min_selling_price_kobo=9000');
     assert.equal((await detail()).wholesaleOffer, null, 'a tier below the floor is never exposed');
     c = await cart();
     assert.equal(c.items[0].price, 10000, 'a tier below the floor never applies');
+    assert.equal(c.items[0].wholesaleOffer, null, 'an invalid tier is not exposed on cart lines');
     f.db.exec('UPDATE products SET min_selling_price_kobo=0');
     f.db.exec("UPDATE products SET wholesale_price_kobo=10000 WHERE id='p'");
     c = await cart();
