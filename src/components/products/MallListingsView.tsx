@@ -66,6 +66,7 @@ export const MallListingsView: React.FC = () => {
   const [fieldErrors, setFieldErrors] = React.useState<Record<string, string>>({});
   const [blockers, setBlockers] = React.useState<string[]>([]);
   const [busy, setBusy] = React.useState(false);
+  const [posPromosEnabled, setPosPromosEnabled] = React.useState(false);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -73,6 +74,7 @@ export const MallListingsView: React.FC = () => {
       const data = await staffMallListingClient.list({ view, q: query.trim(), limit: 200 });
       setListings(data.listings);
       setCounts(data.counts);
+      setPosPromosEnabled(data.posPromosEnabled === true);
       setError('');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -93,6 +95,7 @@ export const MallListingsView: React.FC = () => {
       setDraft(draftFrom(detail.listing));
       setBlockers(detail.listing.issues);
       setPreview(detail.preview);
+      setPosPromosEnabled(detail.posPromosEnabled === true);
     } catch (err) {
       showToast({ title: 'Listing details failed', message: err instanceof Error ? err.message : String(err), type: 'error' });
     }
@@ -207,6 +210,12 @@ export const MallListingsView: React.FC = () => {
             </label>
           </div>
         </fieldset>
+
+        {selected.posPromoPriceKobo != null && (
+          <p className="rounded-xl border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-900/20 p-3 text-xs font-bold text-amber-700 dark:text-amber-300">
+            POS promotional price {money(selected.posPromoPriceKobo)} {posPromosEnabled ? 'is active on the storefront (MALL_HONOR_POS_PROMOS is enabled).' : 'would apply on the storefront once MALL_HONOR_POS_PROMOS is set to "true" in wrangler.toml and the Worker is redeployed.'}
+          </p>
+        )}
 
         {preview && <div className="rounded-xl bg-slate-50 dark:bg-slate-800 p-3">
           <p className="text-xs font-black flex items-center gap-1.5"><Store className="w-3.5 h-3.5" /> Storefront preview</p>

@@ -7,6 +7,9 @@ export type StaffMallListing = {
   minimumSellingPriceKobo: number; publicPriceKobo: number; promoActive: boolean;
   visibleOnMall: boolean; featured: boolean; displayOrder: number | null;
   promoPriceKobo: number | null; promoStart: string | null; promoEnd: string | null;
+  /** Price the product-level POS promotional price WOULD produce on the storefront
+   * when MALL_HONOR_POS_PROMOS is enabled; null when it would change nothing. */
+  posPromoPriceKobo: number | null;
   issues: string[];
 };
 
@@ -55,13 +58,16 @@ export const staffMallListingClient = {
     return request(`?${query}`) as Promise<{
       listings: StaffMallListing[]; total: number;
       counts: { active: number; hidden: number };
+      posPromosEnabled: boolean;
     }>;
   },
   detail: (productId: string) => request(`/${encodeURIComponent(productId)}`) as Promise<{
     listing: StaffMallListing; preview: MallListingPreview;
+    posPromosEnabled: boolean;
   }>,
   save: (productId: string, body: MallListingSave) =>
     request(`/${encodeURIComponent(productId)}`, { method: 'PUT', body: JSON.stringify(body) }) as Promise<{
       listing: StaffMallListing; preview: MallListingPreview;
+      posPromosEnabled: boolean;
     }>,
 };

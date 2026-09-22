@@ -164,6 +164,73 @@ for (const runtime of ['node', 'worker'] as const) {
     assert.equal((await f.send(new Request('http://test/api/mall/home'))).status, 400);
   });
 
+  test(`${runtime}: wholesale tier prices cart lines and checkout at the quantity threshold`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    f.db.exec("UPDATE products SET wholesale_price_kobo=8000, min_wholesale_qty=5 WHERE id='p'");
+    const cart = async () => (await (await f.send(new Request('http://test/api/mall/cart', { headers: { 'x-mall-session': session } }))).json()) as Promise<any>;
+    const setQty = (qty: number) => f.send(new Request('http://test/api/mall/cart/qty', {
+      method: 'POST', headers: { 'x-mall-session': session }, body: JSON.stringify({ productId: 'p', qty }),
+    }));
+    const detail = async () => ((await (await f.send(new Request('http://test/api/mall/products/p'))).json()) as any).product;
+    assert.deepEqual((await detail()).wholesaleOffer, { price: 8000, minQty: 5 });
+    await setQty(4);
+    let c = await cart();
+    assert.equal(c.items[0].price, 10000);
+    assert.equal(c.items[0].listPrice, 10000);
+    assert.equal(c.subtotalKobo, 40000);
+    await setQty(5);
+    c = await cart();
+    assert.equal(c.items[0].price, 8000, 'the tier applies at the minimum wholesale quantity');
+    assert.equal(c.items[0].listPrice, 10000, 'the listed price remains visible for the Wholesale badge');
+    assert.equal(c.subtotalKobo, 40000);
+    f.db.exec('UPDATE products SET min_selling_price_kobo=9000');
+    assert.equal((await detail()).wholesaleOffer, null, 'a tier below the floor is never exposed');
+    c = await cart();
+    assert.equal(c.items[0].price, 10000, 'a tier below the floor never applies');
+    f.db.exec('UPDATE products SET min_selling_price_kobo=0');
+    f.db.exec("UPDATE products SET wholesale_price_kobo=10000 WHERE id='p'");
+    c = await cart();
+    assert.equal(c.items[0].price, 10000, 'a tier that is not a genuine discount never applies');
+    f.db.exec("UPDATE products SET wholesale_price_kobo=8000 WHERE id='p'");
+    const response = await f.checkout('wholesale-attempt-12345');
+    assert.equal(response.status, 201);
+    const order: any = await response.json();
+    assert.equal(order.items[0].price, 8000);
+    assert.equal(order.subtotalKobo, 40000);
+    assert.equal(f.scalar('SELECT unit_price_kobo FROM mall_order_items'), 8000, 'the order line records the tier unit price');
+    assert.equal(f.scalar('SELECT total_kobo FROM mall_order_items'), 40000);
+  });
+
+  test(`${runtime}: product promotional price applies only behind MALL_HONOR_POS_PROMOS`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    f.db.exec("UPDATE products SET promo_price_kobo=8000 WHERE id='p'");
+    const price = async () => ((await (await f.send(new Request('http://test/api/mall/products/p'))).json()) as any).product.price;
+    const staffDetail = async () => (await (await (runtime === 'worker'
+      ? worker.fetch(new Request('http://test/api/staff/mall-listings/p', { headers: { cookie: `idofera_session=${f.token}` } }), f.env)
+      : handleStaffMallListingApi(new Request('http://test/api/staff/mall-listings/p'), f.exec, actor))).json()) as Promise<any>;
+    assert.equal(await price(), 10000, 'default OFF: the POS promotional price changes nothing');
+    let staff = await staffDetail();
+    assert.equal(staff.posPromosEnabled, false);
+    assert.equal(staff.listing.posPromoPriceKobo, 8000, 'staff can review what enabling would change while it is still OFF');
+    if (runtime === 'worker') f.env.MALL_HONOR_POS_PROMOS = 'true';
+    else f.exec.config = { MALL_HONOR_POS_PROMOS: 'true' };
+    assert.equal(await price(), 8000, 'honored when enabled');
+    staff = await staffDetail();
+    assert.equal(staff.posPromosEnabled, true);
+    assert.equal(staff.listing.posPromoPriceKobo, 8000, 'the review field still reports the POS-promo price while ON');
+    invalidateMallFacetCache();
+    const home: any = await (await f.send(new Request('http://test/api/mall/home', { headers: { 'x-mall-session': session } }))).json();
+    assert.ok(home.flashSales.some((p: any) => p.id === 'p'), 'an enabled POS promo feeds the flash-sales rail');
+    f.db.exec('UPDATE products SET min_selling_price_kobo=9000');
+    assert.equal(await price(), 10000, 'a POS promo below the floor is never honored');
+    f.db.exec('UPDATE products SET min_selling_price_kobo=0, promo_price_kobo=12000');
+    assert.equal(await price(), 10000, 'a POS promo above the current price never raises it');
+    f.db.exec("UPDATE products SET promo_price_kobo=9000, mall_price_kobo=8500");
+    assert.equal(await price(), 8500, 'an explicit Mall price beats the POS promo');
+    f.db.exec('UPDATE products SET mall_price_kobo=NULL, mall_promo_price_kobo=7000, mall_promo_start=NULL, mall_promo_end=NULL');
+    assert.equal(await price(), 7000, 'an active windowed Mall promo beats the POS promo');
+  });
+
   test(`${runtime}: stock-first catalog ordering spans pages and preserves secondary sorts`, async t => {
     const f = await fixture(runtime); t.after(() => f.db.close());
     f.db.exec("UPDATE products SET status='Archived' WHERE id='p'");

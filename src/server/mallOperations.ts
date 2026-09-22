@@ -41,6 +41,8 @@ export type MallConfig = {
   MALL_PICKUP_ADDRESS?: string; MALL_PICKUP_HOURS?: string;
   MALL_WEBHOOK_URL?: string; MALL_WEBHOOK_SECRET?: string;
   MALL_CHECKOUT_ENABLED?: string; MALL_UNPAID_EXPIRY_HOURS?: string;
+  /** "true" opts the Mall into the product-level POS promotional price. Default OFF. */
+  MALL_HONOR_POS_PROMOS?: string;
 };
 
 const phone = normalizedPhoneSql('customer_phone');

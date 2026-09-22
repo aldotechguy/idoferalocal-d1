@@ -6,6 +6,10 @@ compatibility_flags = ["nodejs_compat"]
 # Display-only: the health endpoint reports which bound D1 database answered.
 [vars]
 D1_DATABASE_ID = "3e95a550-a091-490b-819d-f0acb7ea8dd8"
+# Kill-switch for honoring the product-level POS promotional price on the Mall.
+# Default OFF: review what would change via posPromoPriceKobo in Mall Listings,
+# then set to "true" and redeploy.
+MALL_HONOR_POS_PROMOS = "false"
 
 [triggers]
 crons = ["*/5 * * * *"]
@@ -53,6 +57,10 @@ bucket_name = "idomall"
 [env.mall.vars]
 # Display-only: the health endpoint reports which bound D1 database answered.
 D1_DATABASE_ID = "3a3eb157-5aa5-419a-a8ce-2eade2afc436"
+# Kill-switch for honoring the product-level POS promotional price on the Mall.
+# Default OFF: review what would change via posPromoPriceKobo in Mall Listings
+# (staff dashboard), then set to "true" and redeploy to enable catalog-wide.
+MALL_HONOR_POS_PROMOS = "false"
 # Non-sensitive Mall config. Update MALL_PICKUP_ADDRESS and MALL_PICKUP_HOURS
 # to your real pickup location and hours before accepting orders.
 MALL_CHECKOUT_ENABLED = "true"

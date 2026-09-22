@@ -20,6 +20,9 @@ export type MallProduct = {
   /** Merchandising flags supplied by the server. */
   featured?: boolean;
   promoActive?: boolean;
+  /** Wholesale tier applied to a cart line once it reaches minQty; present only
+   * when it is a genuine, floor-respecting discount below the current price. */
+  wholesaleOffer?: { price: number; minQty: number } | null;
 };
 
 export type MallCartItem = {
@@ -27,6 +30,8 @@ export type MallCartItem = {
   name: string;
   unit: string;
   price: number;
+  /** Listed price without the wholesale tier; price < listPrice means the tier applies. */
+  listPrice?: number;
   qty: number;
   stock: number;
   image: string;

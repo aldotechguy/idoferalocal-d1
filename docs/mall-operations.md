@@ -249,6 +249,29 @@ window wins, then `mall_price_kobo`, then `retail_price_kobo`. The promo window 
 stored as ISO-8601 UTC millisecond strings and compared against a parameter-free
 `strftime('now')` expression so results do not depend on request-supplied clocks.
 
+### Utilizing staff pricing on the storefront
+
+- **Retail Selling Price** is the default storefront price whenever no
+  merchandising override exists.
+- **Wholesale Price** becomes a per-line tier automatically: once a cart line
+  reaches the product's minimum wholesale quantity, that line is charged the
+  wholesale price. The tier only applies when it is a genuine discount that
+  clears the floor price, so it can never raise a price or beat a cheaper
+  active promotion. The product page advertises the tier ("Buy N+ at ... each")
+  and the cart tags discounted lines with a Wholesale badge. Order lines record
+  the tier unit price.
+- **Promotional Price** (the flat POS field, not the windowed Mall promo) is
+  honored only when the env var `MALL_HONOR_POS_PROMOS="true"` (default OFF).
+  It slots between `mall_price_kobo` and retail, and only when it is a genuine
+  discount that clears the floor — never a markup. Staff review exactly what
+  enabling would change via the `posPromoPriceKobo` field in Mall Listings
+  before the setting is flipped in wrangler.toml and the Worker redeployed.
+  Enabled POS promos feed the flash-sales rail automatically.
+- **Minimum Floor Price** guards every price source: the Mall Listings editor
+  hard-rejects Mall/promo prices below it, and the automatic POS promo and the
+  wholesale tier never take the storefront price below it.
+- **Dealer / B2B Price** is not used on the storefront.
+
 ## Staff Mall merchandising (Mall Listings)
 
 Policy (decided): **Active product status is the single visibility rule.** Every
@@ -256,7 +279,8 @@ Active product appears on the Mall automatically; there is no separate publish
 approval. Hiding a product means setting its status to Inactive/Archived in
 product management. Legacy `is_mall_listed` values are ignored by the storefront.
 Purchasing additionally requires stock and a valid price (active promo -> Mall
-price -> retail price, always above the product floor).
+price -> [POS promotional price when `MALL_HONOR_POS_PROMOS` is enabled] ->
+retail price, always above the product floor).
 
 API (staff session required):
 

@@ -11,7 +11,7 @@
  * lexically.
  */
 import type { MallExecutor, MallStmt } from './mallApi.js';
-import { effectivePrice, promoActive, invalidateMallFacetCache } from './mallApi.js';
+import { effectivePrice, promoActive, invalidateMallFacetCache, honorPosPromos } from './mallApi.js';
 import { n, s } from './relationalMapper.js';
 import { assertSql } from './mallSafety.js';
 import { MAX_MALL_SEARCH_CHARS } from '../shared/mallSearch.js';
@@ -34,11 +34,13 @@ const MAX_DESCRIPTION = 2000;
 const MAX_IMAGES = 6;
 const MAX_ORDER = 100_000;
 
-const LISTING_COLUMNS = `id, sku, name, description, mall_description, category_name, brand, unit, images_json,
+const listingColumns = (honorPos: boolean) => `id, sku, name, description, mall_description, category_name, brand, unit, images_json,
   stock_qty, retail_price_kobo, mall_price_kobo, is_mall_listed, status, min_selling_price_kobo,
   mall_featured, mall_display_order, mall_promo_price_kobo, mall_promo_start, mall_promo_end,
   CASE WHEN ${promoActive('products')} THEN 1 ELSE 0 END AS promo_active,
-  ${effectivePrice('products')} AS public_price_kobo`;
+  ${effectivePrice('products', honorPos)} AS public_price_kobo,
+  CASE WHEN ${effectivePrice('products', true)} != ${effectivePrice('products', false)}
+    THEN ${effectivePrice('products', true)} END AS pos_promo_price_kobo`;
 
 function parseImages(raw: unknown): string[] {
   if (Array.isArray(raw)) return raw.filter((v): v is string => typeof v === 'string');
@@ -80,6 +82,10 @@ function listingView(row: any) {
     mallPriceKobo: row.mall_price_kobo == null ? null : n(row.mall_price_kobo),
     minimumSellingPriceKobo: n(row.min_selling_price_kobo),
     publicPriceKobo: n(row.public_price_kobo), promoActive: n(row.promo_active) === 1,
+    /** Price the product-level POS promotional price WOULD produce when
+     * MALL_HONOR_POS_PROMOS is enabled; null when it would change nothing.
+     * Lets staff review the switch's impact while it is still OFF. */
+    posPromoPriceKobo: row.pos_promo_price_kobo == null ? null : n(row.pos_promo_price_kobo),
     visibleOnMall: row.status === 'Active', featured: n(row.mall_featured) === 1,
     displayOrder: row.mall_display_order == null ? null : n(row.mall_display_order),
     promoPriceKobo: row.mall_promo_price_kobo == null ? null : n(row.mall_promo_price_kobo),
@@ -181,8 +187,8 @@ function validateListing(row: any, input: ListingInput) {
   };
 }
 
-async function readRow(exec: MallExecutor, productId: string) {
-  const rows = await exec.queryAll(`SELECT ${LISTING_COLUMNS} FROM products WHERE id = ? LIMIT 1`, [productId]);
+async function readRow(exec: MallExecutor, productId: string, honorPos = false) {
+  const rows = await exec.queryAll(`SELECT ${listingColumns(honorPos)} FROM products WHERE id = ? LIMIT 1`, [productId]);
   if (!rows.length) fail(404, 'Product not found.');
   return rows[0];
 }
@@ -199,6 +205,7 @@ function validateCurrent(row: any) {
 }
 
 async function listListings(exec: MallExecutor, url: URL) {
+  const honorPos = honorPosPromos(exec);
   const q = s(url.searchParams.get('q')).trim().slice(0, MAX_MALL_SEARCH_CHARS);
   const view = s(url.searchParams.get('view'), 'all');
   const limit = Math.min(Math.max(n(url.searchParams.get('limit'), 50), 1), 200);
@@ -220,7 +227,7 @@ async function listListings(exec: MallExecutor, url: URL) {
   // COUNT(*) OVER() gives the full filtered count without a separate
   // COUNT query, exactly like getCatalog() already does.
   const rows = await exec.queryAll(
-    `SELECT ${LISTING_COLUMNS}, COUNT(*) OVER() AS page_total FROM products ${where}
+    `SELECT ${listingColumns(honorPos)}, COUNT(*) OVER() AS page_total FROM products ${where}
      ORDER BY mall_featured DESC, name ASC LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );
@@ -236,15 +243,18 @@ async function listListings(exec: MallExecutor, url: URL) {
   return json({
     listings, total, limit, offset, view,
     counts: { active: n(counts?.active), hidden: n(counts?.hidden) },
+    posPromosEnabled: honorPos,
   });
 }
 
 async function getListing(exec: MallExecutor, productId: string) {
-  const row = await readRow(exec, productId);
+  const honorPos = honorPosPromos(exec);
+  const row = await readRow(exec, productId, honorPos);
   const validation = validateCurrent(row);
   return json({
     listing: { ...listingView(row), issues: validation.issues },
     preview: publicPreview(row),
+    posPromosEnabled: honorPos,
   });
 }
 
@@ -289,10 +299,11 @@ async function saveListing(exec: MallExecutor, productId: string, actor: StaffAc
   // A saved promo/price reshapes the storefront's flash-sales rail; drop the
   // cached rails so the next homepage view recomputes them.
   invalidateMallFacetCache();
-  const updated = await readRow(exec, productId);
+  const updated = await readRow(exec, productId, honorPosPromos(exec));
   return json({
     listing: { ...listingView(updated), issues: decision.issues },
     preview: publicPreview(updated),
+    posPromosEnabled: honorPosPromos(exec),
   });
 }
 

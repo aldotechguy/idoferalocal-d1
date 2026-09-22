@@ -7,8 +7,12 @@
  *   - server.ts       -> node:sqlite (`BEGIN IMMEDIATE` / `COMMIT`)
  *
  * Rules that keep the storefront safe:
- *  - Prices are ALWAYS resolved from `products` (COALESCE(mall_price_kobo,
- *    retail_price_kobo)); client-sent prices are never trusted.
+ *  - Prices are ALWAYS resolved from `products` server-side: the storefront
+ *    price is the active promo window -> Mall price -> [product-level
+ *    promotional price, only when MALL_HONOR_POS_PROMOS is enabled] ->
+ *    retail price; a cart line reaching the minimum wholesale quantity pays
+ *    the wholesale price instead (only when it is a genuine discount that
+ *    clears the floor). Client-sent prices are never trusted.
  *  - Every Active product is visible; purchasing also requires stock and a valid price.
  *  - Oversell is physically impossible: trg_products_no_oversell ABORTs any
  *    UPDATE that would push stock_qty below zero, which atomically rolls back
@@ -56,16 +60,47 @@ export const NOW_SQL = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
 export const promoActive = (alias: string) => `${alias}.mall_promo_price_kobo IS NOT NULL
     AND (${alias}.mall_promo_start IS NULL OR ${alias}.mall_promo_start <= ${NOW_SQL})
     AND (${alias}.mall_promo_end IS NULL OR ${alias}.mall_promo_end >= ${NOW_SQL})`;
-/** THE definition of the public mall price: active promo -> mall price -> retail price. */
-export const effectivePrice = (alias: string) =>
-  `COALESCE(CASE WHEN ${promoActive(alias)} THEN ${alias}.mall_promo_price_kobo END, ${alias}.mall_price_kobo, ${alias}.retail_price_kobo)`;
+/** THE definition of the public mall price: active promo -> mall price -> retail price.
+ * With `honorPos`, the product-level Promotional Price (the staff POS field) also
+ * participates: it slots between the Mall price and retail, and only when it is a
+ * genuine discount that never goes below the product's floor price. Explicit
+ * merchandising (windowed Mall promo, Mall price) always beats the automatic POS promo. */
+export const effectivePrice = (alias: string, honorPos = false) =>
+  `COALESCE(CASE WHEN ${promoActive(alias)} THEN ${alias}.mall_promo_price_kobo END, ${alias}.mall_price_kobo${
+    honorPos ? `,
+    CASE WHEN ${alias}.promo_price_kobo > 0
+      AND ${alias}.promo_price_kobo >= ${alias}.min_selling_price_kobo
+      AND ${alias}.promo_price_kobo < COALESCE(${alias}.mall_price_kobo, ${alias}.retail_price_kobo)
+      THEN ${alias}.promo_price_kobo END` : ''
+  }, ${alias}.retail_price_kobo)`;
 
-const CATALOG_COLUMNS = `id, sku, name, COALESCE(NULLIF(mall_description, ''), description) AS description, category_name, brand, unit, images_json, stock_qty,
+/**
+ * Per-line charged price: the effective storefront price, or the Wholesale Price
+ * once the line reaches the minimum wholesale quantity. Lower-of rule: the tier
+ * applies only when it is a genuine discount that clears the floor price, so it
+ * can never raise a price or beat a cheaper active promotion. `qtyExpr` is the
+ * quantity of the exact line being priced (e.g. `ci.qty` in the cart join).
+ */
+export const unitPriceSql = (alias: string, qtyExpr: string, honorPos = false) =>
+  `CASE WHEN ${qtyExpr} >= ${alias}.min_wholesale_qty AND ${alias}.min_wholesale_qty > 1
+      AND ${alias}.wholesale_price_kobo > 0
+      AND ${alias}.wholesale_price_kobo >= ${alias}.min_selling_price_kobo
+      AND ${alias}.wholesale_price_kobo < ${effectivePrice(alias, honorPos)}
+    THEN ${alias}.wholesale_price_kobo ELSE ${effectivePrice(alias, honorPos)} END`;
+
+/** MALL_HONOR_POS_PROMOS="true" opts the whole catalog into the product-level
+ * Promotional Price. Default OFF: staff review what would change (the
+ * posPromoPriceKobo field in Mall Listings), then the setting is flipped in
+ * wrangler.toml and redeployed — a deliberate, reviewable switch. */
+export const honorPosPromos = (exec: { config?: MallConfig }) => exec.config?.MALL_HONOR_POS_PROMOS === 'true';
+
+const catalogColumns = (honorPos: boolean) => `id, sku, name, COALESCE(NULLIF(mall_description, ''), description) AS description, category_name, brand, unit, images_json, stock_qty,
   created_at,
   retail_price_kobo, mall_price_kobo, mall_featured, mall_display_order,
   mall_promo_price_kobo, mall_promo_start, mall_promo_end,
+  wholesale_price_kobo, min_wholesale_qty, min_selling_price_kobo,
   CASE WHEN ${promoActive('products')} THEN 1 ELSE 0 END AS promo_active,
-  ${effectivePrice('products')} AS price_kobo`;
+  ${effectivePrice('products', honorPos)} AS price_kobo`;
 
 /**
  * Popularity join, split out of CATALOG_COLUMNS on purpose: only the two
@@ -78,7 +113,7 @@ const CATALOG_COLUMNS = `id, sku, name, COALESCE(NULLIF(mall_description, ''), d
  * seek per product instead of a whole-table read per product, which is what
  * previously produced multi-million rows-read counts on the home rail.
  */
-const CATALOG_SOLD_COLUMNS = `${CATALOG_COLUMNS},
+const catalogSoldColumns = (honorPos: boolean) => `${catalogColumns(honorPos)},
   COALESCE((
     SELECT SUM(si.qty)
     FROM sale_items si
@@ -127,6 +162,10 @@ function sessionFrom(request: Request): string {
 function publicProduct(r: any) {
   const images = parseJsonArray(r.images_json).slice(0, 6);
   const stock = n(r.stock_qty);
+  const price = n(r.price_kobo);
+  // Wholesale tier exposure: only a genuine, floor-respecting discount is public.
+  const wholesale = n(r.wholesale_price_kobo);
+  const wholesaleMinQty = n(r.min_wholesale_qty);
   return {
     id: s(r.id),
     name: s(r.name),
@@ -134,16 +173,20 @@ function publicProduct(r: any) {
     category: s(r.category_name),
     brand: s(r.brand),
     unit: s(r.unit, 'pcs'),
-    price: n(r.price_kobo),
+    price,
     retailPriceKobo: n(r.retail_price_kobo),
     sold: n(r.sold_qty),
     stock,
     image: images[0] || '',
     images,
-    available: stock > 0 && hasMallPrice(n(r.price_kobo)),
+    available: stock > 0 && hasMallPrice(price),
     createdAt: s(r.created_at),
     featured: n(r.mall_featured) === 1,
     promoActive: n(r.promo_active) === 1,
+    wholesaleOffer: wholesale > 0 && wholesaleMinQty > 1
+      && wholesale >= n(r.min_selling_price_kobo)
+      && hasMallPrice(price) && wholesale < price
+      ? { price: wholesale, minQty: wholesaleMinQty } : null,
   };
 }
 /**
@@ -246,7 +289,7 @@ const selectRail = (exec: MallExecutor, selection: string, order: string, limit:
  * byte-identical to selectRail's, in the same order.
  */
 const selectRankedByKey = (
-  exec: MallExecutor, selection: string, order: string, limit: number, params: any[] = [],
+  exec: MallExecutor, selection: string, order: string, limit: number, params: any[] = [], honorPos = false,
 ) => exec.queryAll(`
     WITH candidates AS (${selection}), ranked AS (
       SELECT id, CASE WHEN stock_qty > 0 THEN 0 ELSE 1 END AS stock_group,
@@ -255,7 +298,7 @@ const selectRankedByKey = (
     ), winners AS (
       SELECT id FROM ranked WHERE stock_group = 0 OR stock_rank = 1
     )
-    SELECT ${CATALOG_SOLD_COLUMNS}, updated_at FROM products
+    SELECT ${catalogSoldColumns(honorPos)}, updated_at FROM products
       WHERE id IN (SELECT id FROM winners) ORDER BY ${order} LIMIT ${limit}`, params);
 
 /**
@@ -268,19 +311,21 @@ const selectRankedByKey = (
 async function cachedHomeRails(exec: MallExecutor) {
   const fresh = facetFresh(cachedHomeRailEntry);
   if (fresh) return fresh;
+  const honorPos = honorPosPromos(exec);
   const [flash, top, newest] = await Promise.all([
-    exec.queryAll(`SELECT ${CATALOG_COLUMNS} FROM products WHERE ${VISIBLE}
-      AND ${effectivePrice('products')} > 0 AND ${effectivePrice('products')} < retail_price_kobo
+    exec.queryAll(`SELECT ${catalogColumns(honorPos)} FROM products WHERE ${VISIBLE}
+      AND ${effectivePrice('products', honorPos)} > 0 AND ${effectivePrice('products', honorPos)} < retail_price_kobo
       ORDER BY ${CATALOG_SORTS.relevance} LIMIT 10`),
-    selectRankedByKey(exec, `SELECT ${CATALOG_SOLD_COLUMNS}, updated_at FROM products WHERE ${VISIBLE}`, CATALOG_SORTS.popular, 12),
+    selectRankedByKey(exec, `SELECT ${catalogSoldColumns(honorPos)}, updated_at FROM products WHERE ${VISIBLE}`, CATALOG_SORTS.popular, 12, [], honorPos),
     selectRail(exec, `WITH p AS (SELECT *, (${lastRestockSql}) AS last_restock FROM products)
-      SELECT ${CATALOG_COLUMNS}, last_restock FROM p AS products WHERE ${VISIBLE} AND last_restock IS NOT NULL`, 'last_restock DESC, id ASC', 12),
+      SELECT ${catalogColumns(honorPos)}, last_restock FROM p AS products WHERE ${VISIBLE} AND last_restock IS NOT NULL`, 'last_restock DESC, id ASC', 12),
   ]);
   cachedHomeRailEntry = { expiresAt: Date.now() + FACET_TTL_MS, flash, top, newest };
   return cachedHomeRailEntry;
 }
 
 async function getCatalog(exec: MallExecutor, url: URL) {
+  const honorPos = honorPosPromos(exec);
   const q = s(url.searchParams.get('q')).trim().slice(0, 80);
   const category = s(url.searchParams.get('category')).trim().slice(0, 80);
   const brandFilter = s(url.searchParams.get('brand')).trim().slice(0, 80);
@@ -331,7 +376,7 @@ async function getCatalog(exec: MallExecutor, url: URL) {
     const order = sortKey === 'relevance'
       ? `(SELECT CAST(key AS INTEGER) FROM json_each(?) WHERE value = products.id)` : effectiveSort;
     const rows = ids.length ? await exec.queryAll(
-      `SELECT ${CATALOG_COLUMNS} FROM products WHERE ${VISIBLE} AND id IN (SELECT value FROM json_each(?))
+      `SELECT ${catalogColumns(honorPos)} FROM products WHERE ${VISIBLE} AND id IN (SELECT value FROM json_each(?))
        ORDER BY ${stockOrder}${order} LIMIT ? OFFSET ?`,
       [encodedIds, ...(sortKey === 'relevance' ? [encodedIds] : []), limit, offset],
     ) : [];
@@ -359,7 +404,7 @@ async function getCatalog(exec: MallExecutor, url: URL) {
   // back to the plain count — that only costs an extra query on the rare
   // out-of-range page, not on any normal page view.
   const rows = await exec.queryAll(
-    `SELECT ${CATALOG_COLUMNS}, COUNT(*) OVER() AS page_total FROM products WHERE ${where} ORDER BY ${stockOrder}${effectiveSort} LIMIT ? OFFSET ?`,
+    `SELECT ${catalogColumns(honorPos)}, COUNT(*) OVER() AS page_total FROM products WHERE ${where} ORDER BY ${stockOrder}${effectiveSort} LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );
   const total = n((rows[0] as any)?.page_total
@@ -398,7 +443,7 @@ async function getHomeSections(exec: MallExecutor, session: string) {
     GROUP BY oi.product_id`;
   const [rails, again] = await Promise.all([
     cachedHomeRails(exec),
-    selectRail(exec, `SELECT ${CATALOG_COLUMNS}, history.last_purchase FROM (${history}) history
+    selectRail(exec, `SELECT ${catalogColumns(honorPosPromos(exec))}, history.last_purchase FROM (${history}) history
       CROSS JOIN products ON products.id = history.product_id
       WHERE ${VISIBLE}`, 'last_purchase DESC, id ASC', 10, [session]),
   ]);
@@ -408,7 +453,7 @@ async function getHomeSections(exec: MallExecutor, session: string) {
 
 async function getProduct(exec: MallExecutor, id: string) {
   const rows = await exec.queryAll(
-    `SELECT ${CATALOG_SOLD_COLUMNS} FROM products WHERE id = ? AND ${VISIBLE} LIMIT 1`,
+    `SELECT ${catalogSoldColumns(honorPosPromos(exec))} FROM products WHERE id = ? AND ${VISIBLE} LIMIT 1`,
     [id],
   );
   if (!rows.length) return json({ error: 'Product not available' }, 404);
@@ -433,24 +478,28 @@ async function getOrCreateCartId(exec: MallExecutor, sessionId: string): Promise
   return cartId;
 }
 
-const CART_ITEM_COLUMNS = `ci.product_id AS product_id, ci.qty AS qty, p.name AS name, p.unit AS unit,
+const cartItemColumns = (honorPos: boolean) => `ci.product_id AS product_id, ci.qty AS qty, p.name AS name, p.unit AS unit,
   p.stock_qty AS stock_qty, p.images_json AS images_json, p.is_mall_listed AS is_mall_listed,
-  p.status AS status, ${effectivePrice('p')} AS price_kobo`;
+  p.status AS status, ${effectivePrice('p', honorPos)} AS list_price_kobo,
+  ${unitPriceSql('p', 'ci.qty', honorPos)} AS price_kobo`;
 
 async function readCart(exec: MallExecutor, cartId: string) {
   const rows = await exec.queryAll(
-    `SELECT ${CART_ITEM_COLUMNS}
+    `SELECT ${cartItemColumns(honorPosPromos(exec))}
      FROM mall_cart_items ci JOIN products p ON p.id = ci.product_id
      WHERE ci.cart_id = ? ORDER BY ci.rowid ASC`,
     [cartId],
   );
   const items = rows.map((r) => {
-    const sellable = s(r.status) === 'Active' && n(r.stock_qty) > 0 && hasMallPrice(n(r.price_kobo));
+    const price = n(r.price_kobo);
+    const sellable = s(r.status) === 'Active' && n(r.stock_qty) > 0 && hasMallPrice(price);
     return {
       productId: s(r.product_id),
       name: s(r.name),
       unit: s(r.unit, 'pcs'),
-      price: n(r.price_kobo),
+      price,
+      /** Listed price without the wholesale tier; price < listPrice means the tier applies. */
+      listPrice: n(r.list_price_kobo),
       qty: n(r.qty),
       stock: n(r.stock_qty),
       image: (parseJsonArray(r.images_json)[0] as string) || '',
@@ -474,7 +523,7 @@ async function addToCart(exec: MallExecutor, sessionId: string, body: any) {
   if (!Number.isSafeInteger(qty) || qty < 1 || qty > 1000) fail(400, 'qty must be a whole number between 1 and 1000.');
 
   const rows = await exec.queryAll(
-    `SELECT ${CATALOG_COLUMNS} FROM products WHERE id = ? AND ${VISIBLE} LIMIT 1`,
+    `SELECT ${catalogColumns(honorPosPromos(exec))} FROM products WHERE id = ? AND ${VISIBLE} LIMIT 1`,
     [productId],
   );
   if (!rows.length) fail(404, 'Product is not available on the mall.');
@@ -502,7 +551,7 @@ async function setCartQty(exec: MallExecutor, sessionId: string, body: any) {
   const stmts: MallStmt[] = [{ sql: 'DELETE FROM mall_cart_items WHERE cart_id = ? AND product_id = ?', params: [cartId, productId] }];
   if (qty > 0) {
     const rows = await exec.queryAll(
-      `SELECT ${CATALOG_COLUMNS} FROM products WHERE id = ? AND ${VISIBLE} LIMIT 1`,
+      `SELECT ${catalogColumns(honorPosPromos(exec))} FROM products WHERE id = ? AND ${VISIBLE} LIMIT 1`,
       [productId],
     );
     if (!rows.length) fail(404, 'Product is not available on the mall.');
@@ -591,10 +640,11 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
     const configuration = publicMallConfig(exec.config);
     if (!configuration.checkoutEnabled || !configuration.pickup || (paymentMethod === 'bank_transfer' && !configuration.bank)) fail(503, 'Checkout is not configured. Please contact the store.');
   }
+  const honorPos = honorPosPromos(exec);
   const rows = await exec.queryAll(
     `SELECT ci.id AS cart_line_id, ci.product_id AS product_id, ci.qty AS qty, p.name AS name, p.stock_qty AS stock_qty,
             p.is_mall_listed AS is_mall_listed, p.status AS status,
-            ${effectivePrice('p')} AS price_kobo
+            ${unitPriceSql('p', 'ci.qty', honorPos)} AS price_kobo
      FROM mall_cart_items ci JOIN products p ON p.id = ci.product_id
      WHERE ci.cart_id = ? ORDER BY ci.rowid ASC`,
     [cartId],
@@ -630,7 +680,7 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
     ...rows.flatMap((r) => assertSql(`EXISTS (SELECT 1 FROM mall_cart_items ci JOIN products p ON p.id = ci.product_id
       WHERE ci.id = ? AND ci.cart_id = ? AND ci.product_id = ? AND ci.qty = ?
       AND p.status = 'Active' AND p.stock_qty >= ?
-      AND ${effectivePrice('p')} = ?)`,
+      AND ${unitPriceSql('p', 'ci.qty', honorPos)} = ?)`,
     [r.cart_line_id, cartId, r.product_id, r.qty, r.qty, r.price_kobo])),
     {
     sql: `INSERT INTO mall_orders (id, order_no, customer_id, customer_name, customer_phone, customer_email, status,

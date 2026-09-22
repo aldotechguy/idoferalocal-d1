@@ -80,6 +80,11 @@ export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
                 <span className="text-sm text-slate-400 line-through">{formatNaira(product.retailPriceKobo)}</span>
               )}
             </div>
+            {product.wholesaleOffer && hasMallPrice(product.price) && (
+              <p className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-900/30 px-2.5 py-1.5 text-xs font-bold text-emerald-700 dark:text-emerald-300">
+                <Package className="w-3.5 h-3.5 shrink-0" /> Buy {product.wholesaleOffer.minQty}+ at {formatNaira(product.wholesaleOffer.price)} each — save {Math.round((1 - product.wholesaleOffer.price / product.price) * 100)}%
+              </p>
+            )}
             <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
               <div className="rounded-xl bg-white/60 p-2"><dt className="text-xs text-slate-500">Unit</dt><dd className="font-bold">{product.unit}</dd></div>
               <div className="rounded-xl bg-white/60 p-2"><dt className="text-xs text-slate-500">Availability</dt><dd className="font-bold">{product.stock > 0 ? `${product.stock.toLocaleString('en-NG')} in stock` : 'Out of stock'}</dd></div>
@@ -94,6 +99,9 @@ export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
                 <ShoppingCart className="w-4 h-4" /> {!purchasable ? mallUnavailableLabel(product) : adding ? 'Adding…' : inCart ? 'Add More' : 'Add to Cart'}
               </button>
             </div>
+            {product.wholesaleOffer && qty >= product.wholesaleOffer.minQty && (
+              <p className="mt-2 text-xs font-bold text-emerald-600 dark:text-emerald-400">Wholesale price {formatNaira(product.wholesaleOffer.price)} each applies at this quantity.</p>
+            )}
             <div className="mt-3 flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
               <Truck className="w-4 h-4 text-emerald-500" /> Pickup in Uyo • Pay on pickup
             </div>

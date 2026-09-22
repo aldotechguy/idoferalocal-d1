@@ -205,6 +205,8 @@ test('Mall merchandising explains Active visibility without publishing controls'
   assert.doesNotMatch(client, /publish: boolean|blockPublish|canPublish/);
   assert.match(editor, /Mall price/);
   assert.match(editor, /Optional promotion/);
+  assert.match(editor, /POS promotional price/);
+  assert.match(editor, /MALL_HONOR_POS_PROMOS/);
 });
 
 test('forgiving search handles spacing, word order and conservative typos', () => {
@@ -472,6 +474,12 @@ test('Mall exposes the paginated catalog and disables sold-out purchase controls
   assert.match(detail, /MallQuantityControl[^\n]*disabled=\{adding \|\| !purchasable\}/);
   for (const source of [card, detail]) assert.match(source, /hasMallPrice\(product.price\) \? formatNaira\(product.price\) : 'Price unavailable'/);
   assert.match(detail, /Product description has not been provided yet/);
+  assert.match(detail, /product\.wholesaleOffer/);
+  assert.match(detail, /Buy \{product\.wholesaleOffer\.minQty\}\+ at \{formatNaira\(product\.wholesaleOffer\.price\)\} each/);
+  assert.match(detail, /Wholesale price \{formatNaira\(product\.wholesaleOffer\.price\)\} each applies at this quantity/);
+  const cartLines = fs.readFileSync('src/mall-site/MallCartLines.tsx', 'utf8');
+  assert.match(cartLines, /it\.listPrice != null && it\.price < it\.listPrice/);
+  assert.match(cartLines, />Wholesale</);
 });
 
 test('checkout customer card does not scroll over the payment method fieldset', () => {
