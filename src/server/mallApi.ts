@@ -274,7 +274,7 @@ async function cachedHomeRails(exec: MallExecutor) {
       ORDER BY ${CATALOG_SORTS.relevance} LIMIT 10`),
     selectRankedByKey(exec, `SELECT ${CATALOG_SOLD_COLUMNS}, updated_at FROM products WHERE ${VISIBLE}`, CATALOG_SORTS.popular, 12),
     selectRail(exec, `WITH p AS (SELECT *, (${lastRestockSql}) AS last_restock FROM products)
-      SELECT *, last_restock FROM p WHERE ${VISIBLE} AND last_restock IS NOT NULL`, 'last_restock DESC, id ASC', 12),
+      SELECT ${CATALOG_COLUMNS}, last_restock FROM p AS products WHERE ${VISIBLE} AND last_restock IS NOT NULL`, 'last_restock DESC, id ASC', 12),
   ]);
   cachedHomeRailEntry = { expiresAt: Date.now() + FACET_TTL_MS, flash, top, newest };
   return cachedHomeRailEntry;

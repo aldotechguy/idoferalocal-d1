@@ -121,14 +121,24 @@ for (const runtime of ['node', 'worker'] as const) {
     const restocked = (await home()).newArrivals;
     assert.deepEqual(restocked.map((p: any) => p.id), ['home-0']);
     assert.equal(new Set(restocked.map((p: any) => p.id)).size, 1);
+    // Regression guard (live incident): the restock rail once returned only raw
+    // columns, so publicProduct mapped price_kobo -> 0 -> "Price unavailable"
+    // on every New Arrivals card even with valid mall prices in the database.
+    assert.equal(restocked[0].price, 9000, 'New Arrivals rows must carry the effective mall price');
+    assert.equal(restocked[0].retailPriceKobo, 10000);
     assert.ok(restocked.every((p: any) => !p.available), 'Restocked products remain visible after selling out');
     assert.ok(initial.flashSales.every((p: any) => p.stock === 0 && !p.available));
     // In-stock candidates beyond the original LIMIT must backfill the rails.
-    f.db.exec("UPDATE products SET stock_qty=5 WHERE id IN ('home-0','home-1','home-2','home-3','home-4','home-5','home-6','home-7','home-8','home-9','home-10','home-11','home-12','home-13','home-70','home-71')");
+    f.db.exec("UPDATE products SET stock_qty=5 WHERE id IN ('home-0','home-1','home-2','home-3','home-4','home-5','home-6','home-7','home-8','home-9','home-10','home-11','home-12','home-13','home-70','home-71'); UPDATE products SET mall_price_kobo=NULL WHERE id='home-0'");
     const mixed = await home();
     assert.equal(mixed.flashSales.length, 10);
     assert.equal(mixed.topSellers.length, 12);
     assert.equal(mixed.newArrivals.length, 12);
+    // A NULL mall price must fall back to the retail price (the live catalog state).
+    assert.ok(mixed.newArrivals.every((p: any) => p.price > 0 && p.available),
+      'Every in-stock New Arrivals row is priced and purchasable');
+    assert.equal(mixed.newArrivals.find((p: any) => p.id === 'home-0')?.price, 10000,
+      'A NULL mall price falls back to the retail price');
     for (const rail of [mixed.topSellers, mixed.newArrivals]) {
       assert.ok(rail.filter((p: any) => p.stock <= 0).length <= 1);
       assert.equal(new Set(rail.map((p: any) => p.id)).size, rail.length);
