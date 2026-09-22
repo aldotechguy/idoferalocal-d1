@@ -299,13 +299,17 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
   const customers = normalizedPhone ? await exec.queryAll(`SELECT * FROM customers WHERE ${normalizedPhoneSql('phone')} = ? ORDER BY created_at,id LIMIT 1`, [normalizedPhone]) : [];
   const customer = customers[0];
   const customerId = customer?.id || `cust-${id}`;
+  // Buyer contact captured at checkout — normalized once so the new-customer
+  // insert and the returning-buyer enrichment below share identical values.
+  const orderEmail = typeof row.customer_email === 'string' ? row.customer_email.trim().toLowerCase().slice(0, 254) : '';
+  const orderAddress = s(delivery.address).trim().slice(0, 400) || null;
   const paymentBreakdown = body?.paymentBreakdown && typeof body.paymentBreakdown === 'object' ? body.paymentBreakdown : null;
   const reference = s(body?.reference, row.payment_reference || `MALL-${row.order_no}`).slice(0, 120);
   const stmts: MallStmt[] = [];
   if (!customer) {
     stmts.push({
-      sql: `INSERT INTO customers (id, name, phone, email, address, purchase_history_count, outstanding_balance_kobo, loyalty_points, lifetime_value_kobo, created_at) VALUES (?, ?, ?, '', ?, 1, 0, ?, ?, ?)`,
-      params: [customerId, row.customer_name, row.customer_phone, s(deliveryData(row).address) || null, Math.floor(n(row.total_kobo) / 10_000), row.total_kobo, at],
+      sql: `INSERT INTO customers (id, name, phone, email, address, purchase_history_count, outstanding_balance_kobo, loyalty_points, lifetime_value_kobo, created_at) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?)`,
+      params: [customerId, row.customer_name, row.customer_phone, orderEmail, orderAddress, Math.floor(n(row.total_kobo) / 10_000), row.total_kobo, at],
     });
   }
   stmts.push({
@@ -320,7 +324,18 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
   stmts.push({ sql: `UPDATE payments SET sale_id = ?, provider = ?, reference = ?, amount_kobo = ?, status = 'paid', raw_json = ? WHERE order_id = ?`, params: [saleId, method, reference, row.total_kobo, JSON.stringify({ orderNo: row.order_no, verifiedBy: actor.displayName, verifiedAt: at, paymentBreakdown }), id] });
   stmts.push({ sql: `UPDATE mall_orders SET linked_sale_id = ?, customer_id = ?, status = 'processing', payment_ref = ? WHERE id = ? AND linked_sale_id IS NULL`, params: [saleId, customerId, reference, id] });
   stmts.push({ sql: `INSERT INTO money_movements (id, date, type, subtype, source_account, dest_account, amount_kobo, notes, ref_no, ref_id, performed_by, created_at) VALUES (?, ?, 'Sale Inflow', ?, NULL, ?, ?, ?, ?, ?, ?, ?)`, params: [`mm-${saleId}`, at, method, paymentDestination(method), row.total_kobo, `Mall order payment for ${row.order_no}`, invoiceNo, saleId, actor.displayName, at] });
-  if (customer) stmts.push({ sql: `UPDATE customers SET purchase_history_count = purchase_history_count + 1, lifetime_value_kobo = lifetime_value_kobo + ?, loyalty_points = loyalty_points + ? WHERE id = ?`, params: [row.total_kobo, Math.floor(n(row.total_kobo) / 10_000), customer.id] });
+  if (customer) {
+    // Returning buyer: bump the counters and fill profile fields that are blank
+    // in the customer record — never overwrite details staff already maintain.
+    const fills: [string, string][] = [];
+    if (!s(customer.name).trim() && s(row.customer_name).trim()) fills.push(['name = ?', row.customer_name]);
+    if (!s(customer.address).trim() && orderAddress) fills.push(['address = ?', orderAddress]);
+    if (!s(customer.email).trim() && orderEmail) fills.push(['email = ?', orderEmail]);
+    stmts.push({
+      sql: `UPDATE customers SET purchase_history_count = purchase_history_count + 1, lifetime_value_kobo = lifetime_value_kobo + ?, loyalty_points = loyalty_points + ?${fills.map(([set]) => `, ${set}`).join('')} WHERE id = ?`,
+      params: [row.total_kobo, Math.floor(n(row.total_kobo) / 10_000), ...fills.map(([, value]) => value), customer.id],
+    });
+  }
   stmts.push({ sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'CONVERT_MALL_ORDER_SALE', 'MallOrder', ?, ?, ?)`, params: [`audit-${uuid()}`, actor.id, id, `${actor.displayName} converted ${row.order_no} to ${invoiceNo} via ${method}.`, at] });
   // The mirrored Sale, payment, money movement, customer metrics and audit
   // trail are all client-visible: bump the sync revision in the same atomic

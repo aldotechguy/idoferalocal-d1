@@ -114,7 +114,7 @@ add('p2', 3);
 const checkout = await handleMallApi(new Request('http://demo/api/mall/checkout', {
   method: 'POST',
   headers: { 'x-mall-session': session, 'idempotency-key': attempt },
-  body: JSON.stringify({ customerName: 'Grace Ekaette', customerPhone: '08095550134', paymentMethod: 'pay_on_pickup' }),
+  body: JSON.stringify({ customerName: 'Grace Ekaette', customerPhone: '08095550134', customerEmail: 'grace.ekaette@example.com', paymentMethod: 'pay_on_pickup' }),
 }), exec);
 const order = db.prepare('SELECT * FROM mall_orders LIMIT 1').get() as Record<string, unknown>;
 console.log(`\n  checkout -> HTTP ${checkout.status}, order ${String(order.order_no)} (${naira(order.total_kobo)})`);
@@ -148,7 +148,7 @@ expect('deterministic sale id (sale-{orderId})', settled.linked_sale_id, `sale-$
 expect('order moved to processing', settled.status, 'processing');
 expect('settlement mirror-wrote the sale for delta readers', scalar(`SELECT COUNT(*) FROM app_documents WHERE collection = 'sales' AND document_id = 'sale-${orderId}'`), 1);
 
-printRows('customers (created / loyalty updated)', `SELECT id, name, phone, address, purchase_history_count AS purchases, loyalty_points AS loyalty, lifetime_value_kobo AS lifetime, outstanding_balance_kobo AS outstanding FROM customers`);
+printRows('customers (created / loyalty updated)', `SELECT id, name, phone, email, address, purchase_history_count AS purchases, loyalty_points AS loyalty, lifetime_value_kobo AS lifetime, outstanding_balance_kobo AS outstanding FROM customers`);
 printRows('sales (mirrored POS Sale)', `SELECT id, receipt_no, customer_name, type, subtotal_kobo AS subtotal, delivery_fee_kobo AS delivery, total_kobo AS total, paid_kobo AS paid, payment_method, status, notes, created_by FROM sales`);
 printRows('sale_items', `SELECT id, product_name, sku, qty, unit_price_kobo AS unit, cost_price_kobo AS cost, total_kobo AS total FROM sale_items`);
 printRows('payments (paid, linked to the Sale)', `SELECT id, order_id, sale_id, provider, reference, amount_kobo, status FROM payments`);

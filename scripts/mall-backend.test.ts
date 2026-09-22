@@ -136,6 +136,64 @@ test('every mall write batch bumps the sync revision', async () => {
   assert.ok(revision() > afterConfirm, 'settlement bumps the revision so guarded snapshot clients re-read the mirrored sale');
 });
 
+test('settlement persists the buyer email and address on the new customer record', async () => {
+  const { db, exec, session } = fixture();
+  await checkout(exec, session, { customerEmail: 'ada@example.com', deliveryAddress: '1 Test Road, Uyo' });
+  const id = (db.prepare('SELECT id FROM mall_orders LIMIT 1').get() as any).id;
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/confirm`, { method: 'POST', body: '{}' }), exec, actor);
+  const paid = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/collect-payment`, {
+    method: 'POST', body: JSON.stringify({ paymentMethod: 'Cash', amountKobo: 20000 }),
+  }), exec, actor);
+  assert.equal(paid.status, 200);
+  const cust = db.prepare('SELECT * FROM customers').get() as any;
+  assert.equal(cust.id, `cust-${id}`);
+  assert.equal(cust.email, 'ada@example.com', 'the checkout email cascades into the customer record');
+  assert.equal(cust.address, '1 Test Road, Uyo', 'the order address cascades into the customer record');
+  assert.equal(cust.purchase_history_count, 1);
+  assert.equal(cust.lifetime_value_kobo, 20000);
+  assert.equal(cust.loyalty_points, 2);
+});
+
+test('settlement matches returning buyers by phone, bumps counters and fills blank profile fields', async () => {
+  const { db, exec, session } = fixture();
+  db.prepare(`INSERT INTO customers (id, name, phone, email, address, purchase_history_count, outstanding_balance_kobo, loyalty_points, lifetime_value_kobo, created_at)
+    VALUES ('cust-1', 'Ada Existing', '+234 803 123 4567', '', '', 2, 0, 7, 30000, '2026-01-01T00:00:00.000Z')`).run();
+  await checkout(exec, session, { customerEmail: 'ada@example.com', deliveryAddress: '1 Test Road, Uyo' });
+  const id = (db.prepare('SELECT id FROM mall_orders LIMIT 1').get() as any).id;
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/confirm`, { method: 'POST', body: '{}' }), exec, actor);
+  const paid = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/collect-payment`, {
+    method: 'POST', body: JSON.stringify({ paymentMethod: 'Cash', amountKobo: 20000 }),
+  }), exec, actor);
+  assert.equal(paid.status, 200);
+  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM customers').get() as any).n, 1, 'the phone match reuses the existing customer instead of minting a new one');
+  const cust = db.prepare('SELECT * FROM customers').get() as any;
+  assert.equal(cust.id, 'cust-1');
+  assert.equal(cust.name, 'Ada Existing', 'a staff-maintained name is never overwritten by the order');
+  assert.equal(cust.email, 'ada@example.com', 'the blank email is filled from the order');
+  assert.equal(cust.address, '1 Test Road, Uyo', 'the blank address is filled from the order');
+  assert.equal(cust.purchase_history_count, 3);
+  assert.equal(cust.lifetime_value_kobo, 50000);
+  assert.equal(cust.loyalty_points, 9);
+  assert.equal((db.prepare('SELECT customer_id FROM mall_orders').get() as any).customer_id, 'cust-1', 'the order links back to the existing customer');
+});
+
+test('settlement never overwrites profile details staff already maintain', async () => {
+  const { db, exec, session } = fixture();
+  db.prepare(`INSERT INTO customers (id, name, phone, email, address, purchase_history_count, outstanding_balance_kobo, loyalty_points, lifetime_value_kobo, created_at)
+    VALUES ('cust-1', 'Ada Existing', '+234 803 123 4567', 'vip@shop.ng', '2 Legacy Close, Uyo', 0, 0, 0, 0, '2026-01-01T00:00:00.000Z')`).run();
+  await checkout(exec, session, { customerEmail: 'ada@example.com', deliveryAddress: '1 New Road, Uyo' });
+  const id = (db.prepare('SELECT id FROM mall_orders LIMIT 1').get() as any).id;
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/confirm`, { method: 'POST', body: '{}' }), exec, actor);
+  const paid = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/collect-payment`, {
+    method: 'POST', body: JSON.stringify({ paymentMethod: 'Cash', amountKobo: 20000 }),
+  }), exec, actor);
+  assert.equal(paid.status, 200);
+  const cust = db.prepare('SELECT * FROM customers').get() as any;
+  assert.equal(cust.email, 'vip@shop.ng', 'an existing email is preserved');
+  assert.equal(cust.address, '2 Legacy Close, Uyo', 'an existing address is preserved');
+  assert.equal(cust.purchase_history_count, 1, 'counters still cascade');
+});
+
 test('staff cancellation restores committed stock exactly once', async () => {
   const { db, exec, session } = fixture();
   await checkout(exec, session);
