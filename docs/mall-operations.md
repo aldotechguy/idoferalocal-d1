@@ -182,7 +182,7 @@ Malformed legacy numbers are not matched; correct them through authorized mainte
 Public tracking requires exact order number plus normalized phone; phone-only lookup
 is rejected. This is a minimal privacy control, not customer authentication.
 
-Rate limits are shared database-backed minute windows keyed by a hash of the trusted
+Rate limits are database-backed minute windows keyed by a hash of the trusted
 runtime IP: checkout 10, tracking 5, cart 60, catalog 120 per minute. The public order
 lookup (`GET /api/mall/orders`, phone + order number) is throttled more strictly than
 checkout because it is a phone-enumeration vector; exact order number plus normalized
@@ -191,6 +191,47 @@ Cloudflare IP; Node uses its connection IP (no untrusted forwarded headers). If 
 is behind a proxy, configure/verify trusted-proxy behavior carefully to avoid all
 customers sharing one limit. Add perimeter Cloudflare abuse controls before high-volume
 launch; database rate limiting itself consumes database operations.
+
+Enforcement is sampled to keep that cost bounded: each isolate keeps a group-keyed
+counter in memory and only writes the durable `mall_rate_limits` row every Nth hit
+(checkout/tracking 1, cart 5, catalog 10; the UPSERT uses
+`count = MAX(count + 1, excluded.count)` so an isolate restart cannot double-count).
+The in-process counter is deliberately keyed **group + window, not per-IP** — the
+limits above are group-global (a whole isolate shares one checkout/tracking budget),
+and the durable per-caller row is the cross-isolate backstop. Expect the sampled
+durable row to lag the true hit count; readiness/abuse analysis should treat the
+durable rows as a floor, not a total.
+
+## D1 row-cost notes (schema marker v9)
+
+D1 bills rows **scanned**, not returned: a `LIMIT` without a matching index still
+reads the whole table and sorts it in a temp B-tree before applying the limit, and
+every index entry a write touches is a row written. The v9 schema marker
+(`mall_schema_versions`, applied by the Worker/Node bootstrap on version bump) rolls
+up the row-cost pass:
+
+* **Staff order list** — was a full `mall_orders` scan joined against every item and
+  payment row plus two temp B-trees per poll; `idx_mall_orders_created` plus a
+  windowed total (`COUNT(*) OVER()`) makes each 60-second poll read only its page.
+* **Snapshot ORDER BY coverage** — 11 indexes
+  (`notifications`/`stock_movements`/`pricing_history`/`delivery_orders`/
+  `held_orders`/`whatsapp_preorders`/`purchases`/`customers` `created_at`,
+  `products.updated_at`, plus the buy-again and stock-movement covering indexes) turn
+  every `ORDER BY … DESC LIMIT cap` into a backwards index walk that stops at the cap.
+* **Snapshot row caps** — `SNAPSHOT_ROW_CAPS` now includes `sales` and `purchases`
+  (5,000 each); they were passed to the capped reader but missing from the map, so
+  their "cap" was a silent no-op.
+* **Dead-weight indexes dropped** — `idx_products_mall` and `idx_products_status`
+  served no query (the composite `(status, …)` catalog indexes cover the visibility
+  predicate) and only added a row written per product write and per status change.
+* **Search clamp** — `q` is clamped to 48 bytes: D1 rejects LIKE/GLOB patterns over
+  50 bytes, and the previous 80-byte slice was a live error, not a bound.
+* **Sampled rate limiting** — see above; durable writes drop from one per request to
+  one per N for the high-volume groups.
+* **Mirror-less PATCH** — see `docs/04-relational-backend.md`: a staff edit no longer
+  rewrites its `app_documents` mirror row or pre-reads probe pages; snapshot PUTs are
+  the only mirror writer.
+
 
 ## Catalog filtering, sorting and pagination
 

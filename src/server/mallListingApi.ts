@@ -14,6 +14,7 @@ import type { MallExecutor, MallStmt } from './mallApi.js';
 import { effectivePrice, promoActive, invalidateMallFacetCache } from './mallApi.js';
 import { n, s } from './relationalMapper.js';
 import { assertSql } from './mallSafety.js';
+import { MAX_MALL_SEARCH_CHARS } from '../shared/mallSearch.js';
 import type { StaffActor } from './mallOrderAdminApi.js';
 
 type DomainError = Error & { status?: number; payload?: unknown };
@@ -198,7 +199,7 @@ function validateCurrent(row: any) {
 }
 
 async function listListings(exec: MallExecutor, url: URL) {
-  const q = s(url.searchParams.get('q')).trim().slice(0, 80);
+  const q = s(url.searchParams.get('q')).trim().slice(0, MAX_MALL_SEARCH_CHARS);
   const view = s(url.searchParams.get('view'), 'all');
   const limit = Math.min(Math.max(n(url.searchParams.get('limit'), 50), 1), 200);
   const offset = Math.max(n(url.searchParams.get('offset'), 0), 0);

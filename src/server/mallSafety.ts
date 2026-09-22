@@ -23,6 +23,43 @@ export const MALL_SAFETY_DDL = [
   // join sale_items -> sales and filter on status. A plain status index
   // lets the planner filter sales by status before touching the table.
   `CREATE INDEX IF NOT EXISTS idx_sales_status ON sales (status)`,
+  // --- Snapshot ORDER BY coverage -------------------------------------------
+  // Every one of these serves the full-snapshot builder, which reads each
+  // collection with `ORDER BY <column> DESC LIMIT <cap>`. Without an index on
+  // the ORDER BY column SQLite scans the WHOLE table and sorts it in a temp
+  // B-tree before applying the LIMIT, so the row caps bound the payload but not
+  // a single row read. With these, the scan becomes a backwards index walk that
+  // stops at the cap. (audit_logs/money_movements/expenses/sales already had
+  // usable indexes; these are the ones that did not.)
+  `CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications (created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_stock_movements_created ON stock_movements (created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_pricing_history_created ON pricing_history (created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_delivery_orders_created ON delivery_orders (created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_held_orders_created ON held_orders (created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_whatsapp_preorders_created ON whatsapp_preorders (created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_purchases_created ON purchases (created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_customers_created ON customers (created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_products_updated ON products (updated_at DESC)`,
+  // Staff order list: `ORDER BY o.created_at DESC LIMIT ? OFFSET ?` could not
+  // stop early without this, so every page read and sorted the whole table.
+  `CREATE INDEX IF NOT EXISTS idx_mall_orders_created ON mall_orders (created_at DESC)`,
+  // Maintenance sweeps: expired rate-limit rows and the bounded metric history.
+  `CREATE INDEX IF NOT EXISTS idx_mall_rate_limits_expires ON mall_rate_limits (expires_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_mall_metrics_day ON mall_metrics (day DESC, metric)`,
+  // --- Dead-weight indexes ---------------------------------------------------
+  // `products` carried two indexes no query filters on, and D1 charges a row
+  // written for every index entry a write touches — so both simply added a row
+  // written to each stock change (i.e. to every checkout line) and to every
+  // product edit:
+  //   * idx_products_mall (is_mall_listed, stock_qty): the storefront keys
+  //     visibility off `status` only, and mall-operations records that legacy
+  //     `is_mall_listed` values are ignored (the staff listing PATCH compares the
+  //     column by primary key, which never uses this index).
+  //   * idx_products_status (status): a strict prefix of the (status, …) indexes
+  //     below, which SQLite uses instead.
+  // Dropped rather than never created, so already-provisioned databases converge.
+  `DROP INDEX IF EXISTS idx_products_mall`,
+  `DROP INDEX IF EXISTS idx_products_status`,
 ];
 
 /**
@@ -39,8 +76,12 @@ export const MALL_CATALOG_INDEX_COLUMNS: ReadonlyArray<{name: string; ddl: strin
 ];
 
 export const MALL_CATALOG_INDEXES: string[] = [
-  // The visibility predicate itself, plus the default merchandising order.
-  `CREATE INDEX IF NOT EXISTS idx_products_status ON products (status)`,
+  // Visibility + merchandising order + the two facet columns the category/brand
+  // lists group by. Each of these leads with `status`, so the standalone
+  // `idx_products_status (status)` this list used to carry was a pure prefix of
+  // them: SQLite plans `WHERE status = 'Active'` against these instead (verified
+  // with EXPLAIN QUERY PLAN), and all it ever did was add one more index entry to
+  // write on every product status change. Dropped in MALL_SAFETY_DDL.
   `CREATE INDEX IF NOT EXISTS idx_products_status_created ON products (status, created_at DESC, id DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_products_status_category ON products (status, category_name)`,
   `CREATE INDEX IF NOT EXISTS idx_products_status_brand ON products (status, brand)`,

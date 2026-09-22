@@ -12,7 +12,7 @@ import { decodeBase64Image, imageKeyFromUrl, imageUrl, newProductImageKey } from
 import { makeNodeImageStore } from '../src/server/nodeImageStore.ts';
 import { bootstrapAdmin } from '../src/server/adminBootstrap.ts';
 import { handleMallWebhook } from '../src/server/mallWebhook.ts';
-import { drainMallOutbox, signMallWebhook, mallReadiness, runMallMaintenance, mallRateLimitFor, mallRateLimitGroup, MALL_RATE_LIMITS, MALL_OPERATIONS_DDL, MALL_SCHEMA_VERSION } from '../src/server/mallOperations.ts';
+import { drainMallOutbox, signMallWebhook, mallReadiness, runMallMaintenance, mallRateLimitFor, mallRateLimitGroup, MALL_RATE_LIMITS, MALL_OPERATIONS_DDL, MALL_SCHEMA_VERSION, clearMallRateLimitWindows } from '../src/server/mallOperations.ts';
 import { normalizeMallPhone, normalizedPhoneSql } from '../src/shared/mallPhone.ts';
 import { SNAPSHOT_PUSH_DOC_LIMIT } from '../src/server/relationalSnapshot.ts';
 
@@ -50,6 +50,10 @@ async function fixture(runtime: 'node' | 'worker') {
   // The mall facet cache is module-global and shared across fixtures in this
   // process; reset it so every test reads counts from its own database.
   invalidateMallFacetCache();
+  // Same for the sampled rate limiter's in-process counters: they are keyed
+  // group+window (group-global by design), so without this reset a checkout
+  // in one test would eat the allowance of every later test in the minute.
+  clearMallRateLimitWindows();
   const exec = makeNodeMallExecutor(db);
   const env: any = { MALL_CHECKOUT_ENABLED: 'true', MALL_PICKUP_ADDRESS: 'Test pickup', MALL_PICKUP_HOURS: 'Test hours', DB: new SqliteD1(db), ASSETS: { fetch: async (req: Request) => new Response(`asset:${new URL(req.url).pathname}`) } };
   const send = (request: Request) => runtime === 'worker' ? worker.fetch(request, env) : handleMallApi(request, exec);
@@ -729,7 +733,13 @@ test('checkout revalidates price and eligibility inside the write batch', async 
     const f = await fixture('node'); t.after(() => f.db.close());
     const executor: MallExecutor = {
       ...f.exec, runBatch: async (statements) => {
-        f.db.exec(mutation);
+        // Cart creation is now a single unconditional UPSERT that runs BEFORE
+        // checkout reads the cart lines, so firing the mutation on the first
+        // runBatch would mutate before the read (a fresh read is a consistent
+        // write, not a race). The race this test guards lives between that
+        // read and the main batch: fire only on the batch that inserts the
+        // order, which is where the in-batch guards revalidate.
+        if (statements.some((s) => String(s.sql).includes('INSERT INTO mall_orders'))) f.db.exec(mutation);
         return f.exec.runBatch(statements);
       }
     };
@@ -874,8 +884,11 @@ test('catalog visibility indexes exist once and the marker skips the bootstrap a
   const catalogIndexes = (db.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_products_status%'",
   ).all() as any[]).map((row) => row.name).sort();
+  // v9 dropped the standalone idx_products_status: it was a strict prefix of
+  // the three composite (status, …) covering indexes the catalog reads plan
+  // against, so it only added a row written per product status change.
   assert.deepEqual(catalogIndexes, [
-    'idx_products_status', 'idx_products_status_brand', 'idx_products_status_category', 'idx_products_status_created',
+    'idx_products_status_brand', 'idx_products_status_category', 'idx_products_status_created',
   ]);
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('products') WHERE name = 'status'").get() as any).n, 1);
   assert.equal((db.prepare('SELECT COUNT(*) AS n FROM mall_schema_versions WHERE version = ?').get(MALL_SCHEMA_VERSION) as any).n, 1);
@@ -959,20 +972,29 @@ test('delta keyset never skips rows sharing one millisecond', async (t) => {
   assert.deepEqual((firstPayload.stores.products || []).map((record: any) => record.id), ['b-row']);
   assert.deepEqual(JSON.parse(firstPayload.cursor), { ms: sharedAt, collection: 'products', documentId: 'b-row' });
 
-  // An unchanged re-push writes zero rows and keeps the revision: no client
-  // is forced into a full re-read for a batch that changed nothing.
+  // Option B (mirror-less PATCH): a re-push writes the relational row again
+  // (idempotent) and bumps the revision, but never touches the document
+  // store — the b-row watermark stays intact for PUT-driven delta readers.
   const unchanged = await worker.fetch(new Request('http://test/api/storage/records', {
     method: 'PATCH',
     headers: { ...cookie, 'content-type': 'application/json' },
-    body: JSON.stringify({ upserts: [{ collection: 'products', document: { id: 'b-row' } }], deletes: [] }),
+    body: JSON.stringify({
+      upserts: [{
+        collection: 'products', document: {
+          id: 'b-row', sku: 'B-ROW', name: 'B row', category: 'Pouch', brand: 'B Brand',
+          unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 1,
+        }
+      }], deletes: []
+    }),
   }), env);
   assert.equal(unchanged.status, 200);
   const unchangedBody = await unchanged.json() as any;
-  assert.equal(unchangedBody.skippedUnchanged, 1);
-  assert.equal(unchangedBody.upserted, 0);
-  assert.equal(unchangedBody.revision, 42);
-  assert.equal(unchangedBody.cursor, null);
-  assert.equal(db.prepare('SELECT updated_at AS u FROM app_documents WHERE document_id = ?').get('b-row')?.u, sharedAt);
+  assert.equal(unchangedBody.skippedUnchanged, 0);
+  assert.equal(unchangedBody.upserted, 1);
+  assert.ok(unchangedBody.revision > 42, 'a written batch bumps the revision even without a mirror write');
+  assert.ok(unchangedBody.cursor, 'a written batch returns a keyset cursor');
+  assert.equal(db.prepare('SELECT updated_at AS u FROM app_documents WHERE document_id = ?').get('b-row')?.u, sharedAt,
+    'PATCHes must never write the document mirror; only snapshot PUTs do');
 });
 
 test('incremental mirror keeps orphans out without rewriting unchanged lines', async (t) => {
@@ -1010,12 +1032,18 @@ test('incremental mirror keeps orphans out without rewriting unchanged lines', a
     (db.prepare('SELECT id FROM sale_items WHERE sale_id = ? ORDER BY id').all('sale-lines') as any[]).map((row) => row.id),
     ['sale-lines-item-0'],
   );
-  // Re-pushing the identical document is a no-op: same revision, null cursor.
+  // Re-pushing the identical document is idempotent under the mirror-less
+  // PATCH: the relational upserts run again (no mirror probe to skip them),
+  // key the same rows, and neither orphan nor rewrite any sale_items line.
   const repeat = await patch(sale([{ productId: 'p-one', quantity: 1 }]));
   assert.equal(repeat.status, 200);
   const repeatBody = await repeat.json() as any;
-  assert.equal(repeatBody.skippedUnchanged, 1);
-  assert.equal(repeatBody.upserted, 0);
+  assert.equal(repeatBody.skippedUnchanged, 0);
+  assert.equal(repeatBody.upserted, 1);
+  assert.deepEqual(
+    (db.prepare('SELECT id FROM sale_items WHERE sale_id = ? ORDER BY id').all('sale-lines') as any[]).map((row) => row.id),
+    ['sale-lines-item-0'],
+  );
 });
 
 test('catalog facet cache is dropped by a staff product write', async (t) => {

@@ -33,22 +33,40 @@ logic, so local dev and the edge worker cannot drift apart.
 
 | Route | Before | After |
 | --- | --- | --- |
-| `GET /api/storage/snapshot` | `app_documents` scan | relational `SELECT`s -> same `stores` shape (`backend: "relational"`) |
-| `PATCH /api/storage/records` | document upsert/delete | relational upsert/delete **+** document mirror |
-| `PUT /api/storage/snapshot` | full document replace | full relational replace (child-first) **+** document mirror |
+| `GET /api/storage/snapshot` | `app_documents` scan | relational `SELECT`s -> same `stores` shape (`backend: "relational"`), append-only history tables capped (`SNAPSHOT_ROW_CAPS`) |
+| `PATCH /api/storage/records` | document upsert/delete | relational upsert/delete only — **mirror-less** (option B, schema v9) |
+| `PUT /api/storage/snapshot` | full document replace | full relational replace (child-first) **+** document mirror (the only mirror writer) |
 | `GET /api/storage/d1/health` | doc counts | doc counts **+** relational counts per table |
 
-### Dual-write, on purpose
+### Mirror writes: snapshot PUTs only (option B)
 
-Writes still update `app_documents` as a mirror and reads still fall back to it when
-the relational tables are empty. That gives:
+D1 bills a row written for every index entry a write touches, and the old PATCH paid
+twice for every staff edit: a mirror upsert into `app_documents` (row + its indexes)
+on top of the relational rows, plus 50-row probe pages that pre-read every candidate
+from the mirror for the unchanged re-push guard. After the D1 row-cost pass:
 
-* **Rollback** — flipping `VITE_USE_RELATIONAL=false` restores the old path with no
-  data loss, because the mirror is always current.
-* **Auto-heal** — a fresh local DB (or a pre-ETL DB) is backfilled once from
+* **`PUT /api/storage/snapshot`** still writes the mirror — a full replace is the
+  repair/restore path, so it keeps `app_documents` current.
+* **`PATCH /api/storage/records`** is mirror-less in relational mode (the default in
+  both runtimes): it writes only the relational rows it changes. The mirror probe
+  and the no-op guard went with it — the probe compared against mirror payloads
+  that PATCHes no longer refresh, so it could never make a correct skip decision
+  again. `skippedUnchanged` stays in the response (always 0) so older clients keep
+  parsing it. Node keeps the dual-write only while `VITE_USE_RELATIONAL=false`,
+  because the documents backend still owns its store there.
+* **Delta reads** (`GET /api/storage/snapshot?since=…`) read the mirror, so they
+  see PUT-driven rows only. Clients still converge on PATCH changes through the
+  revision bump and the full relational snapshot read, which are unchanged.
+* **Rollback** — `VITE_USE_RELATIONAL=false` still restores the document path, but
+  the mirror is now only as current as the last snapshot PUT: run a full snapshot
+  restore first if the relational store has moved on. There is no separate
+  `D1_MIRROR_MODE` flag; the toggle is `VITE_USE_RELATIONAL` (Node), and the
+  deployed Worker is always relational-first with a document fallback.
+* **Auto-heal** — a fresh local DB (or a pre-ETL DB) is still backfilled once from
   `app_documents` instead of starting empty.
 
-Reads prefer relational; the mirror is a safety net, not the primary path.
+Reads prefer relational; the mirror is a repair input and rollback snapshot, not the
+primary path.
 
 ## The legacy bridge
 

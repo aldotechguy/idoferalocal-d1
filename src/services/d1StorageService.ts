@@ -418,9 +418,10 @@ export async function syncLocalRecordsToD1(snapshot: D1Snapshot, requestedDeleti
   if (result.relationalSynced === false) {
     throw new Error('Records reached storage, but the live catalog update failed. Pending changes have been retained. Retry Sync Now; if it fails again, contact support.');
   }
-  // An all-unchanged batch writes nothing server-side; keep the revision, the
-  // snapshot guard, and the delta cursor exactly as they were so no client is
-  // forced into a full re-read for a push that changed zero rows.
+  // Legacy-compat no-op path: the mirror-less PATCH always reports
+  // skippedUnchanged 0, but an older server build may still report an
+  // all-unchanged batch — keep the revision, the snapshot guard, and the delta
+  // cursor exactly as they were so no client is forced into a full re-read.
   if (Number(result.skippedUnchanged || 0) > 0 && Number(result.upserted || 0) === 0 && (result.deleted || 0) === 0) {
     localStorage.setItem(DIRTY_KEY, 'false');
     return result;

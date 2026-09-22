@@ -11,7 +11,13 @@ import type { QueryAll, Snapshot } from './relationalMapper.js';
  * The client merge is an upsert by id, so rows a cap omits are never deleted
  * from an existing device; a fresh device simply starts with the newest slice.
  * Child tables (sale_items, purchase_items, receiving_history) stay uncapped:
- * capping them independently of their parents could orphan or drop line items.
+ * they are scoped to the parents actually fetched, so capping them independently
+ * could only orphan line items.
+ *
+ * A cap is only worth anything WITH a matching index on the ORDER BY column:
+ * `ORDER BY created_at DESC LIMIT n` on an unindexed column scans and sorts the
+ * whole table, so it reads every row and then throws most of them away. The
+ * indexes are declared in mallSafety.MALL_SAFETY_DDL.
  */
 export const SNAPSHOT_ROW_CAPS: Record<string, number> = {
   audit_logs: 1500,
@@ -23,6 +29,12 @@ export const SNAPSHOT_ROW_CAPS: Record<string, number> = {
   delivery_orders: 5000,
   whatsapp_preorders: 2000,
   held_orders: 1000,
+  // Sales and purchases were passed to qCapped() but had no entry here, so the
+  // cap silently did nothing and every sale line ever recorded was read and
+  // sorted on each full snapshot. Their children are scoped to the fetched
+  // parents, so bounding the parents is what keeps that scoping correct.
+  sales: 5000,
+  purchases: 5000,
 };
 
 /**
@@ -64,15 +76,20 @@ export async function buildSnapshot(q: QueryAll): Promise<BoundedSnapshot> {
   const saleIdJson = saleIds.length ? JSON.stringify(saleIds) : '[]';
   const purchaseIdJson = purchaseIds.length ? JSON.stringify(purchaseIds) : '[]';
   const [saleItemRows, purchaseItemRows, recvRows, expenseRows, stockRows, pricingRows, moneyRows, deliveryRows, heldRows, wapoRows, notifRows, auditRows, settingsRows] = await Promise.all([
-    // Only load sale_items belonging to the (capped) fetched sales.
+    // Only load sale_items belonging to the (capped) fetched sales. With no
+    // parents there is nothing to attach them to, so the old unconditional
+    // `SELECT * FROM sale_items` full-table read answered nothing either.
     saleIds.length
       ? q(`SELECT * FROM sale_items WHERE sale_id IN (SELECT value FROM json_each(?))`, [saleIdJson])
-      : q('SELECT * FROM sale_items'),
-    // Only load purchase_items belonging to the (capped) fetched purchases.
+      : Promise.resolve([]),
+    // Same for purchase_items and receiving_history — receiving_history used to
+    // be read end to end on EVERY snapshot regardless of the parents fetched.
     purchaseIds.length
       ? q(`SELECT * FROM purchase_items WHERE purchase_id IN (SELECT value FROM json_each(?))`, [purchaseIdJson])
-      : q('SELECT * FROM purchase_items'),
-    q('SELECT * FROM receiving_history'),
+      : Promise.resolve([]),
+    purchaseIds.length
+      ? q(`SELECT * FROM receiving_history WHERE purchase_id IN (SELECT value FROM json_each(?))`, [purchaseIdJson])
+      : Promise.resolve([]),
     qCapped('SELECT * FROM expenses ORDER BY date DESC', 'expenses'),
     qCapped('SELECT * FROM stock_movements ORDER BY created_at DESC', 'stock_movements'),
     qCapped('SELECT * FROM pricing_history ORDER BY created_at DESC', 'pricing_history'),
@@ -102,6 +119,31 @@ export async function buildSnapshot(q: QueryAll): Promise<BoundedSnapshot> {
     if (!recvByPo.has(k)) recvByPo.set(k, []);
     recvByPo.get(k)!.push(g);
   }
+  const stores = toStores({
+    productRows, customerRows, supplierRows, saleRows, purchaseRows,
+    itemsBySale, itemsByPo, recvByPo,
+    expenseRows, stockRows, pricingRows, moneyRows, deliveryRows, heldRows, wapoRows, notifRows, auditRows, settingsRows,
+  });
+  return { stores, capped: [...capped] };
+}
+
+/**
+ * Raw table rows -> the frontend `stores` contract. Shared by the full snapshot
+ * and the delta read so the two can never disagree about a document's shape:
+ * deltas used to be served from the stored document payload, and now that they
+ * are rebuilt from relational rows they must produce the identical document.
+ */
+function toStores(raw: {
+  productRows: any[]; customerRows: any[]; supplierRows: any[]; saleRows: any[]; purchaseRows: any[];
+  itemsBySale: Map<string, any[]>; itemsByPo: Map<string, any[]>; recvByPo: Map<string, any[]>;
+  expenseRows: any[]; stockRows: any[]; pricingRows: any[]; moneyRows: any[]; deliveryRows: any[];
+  heldRows: any[]; wapoRows: any[]; notifRows: any[]; auditRows: any[]; settingsRows: any[];
+}): Snapshot {
+  const {
+    productRows, customerRows, supplierRows, saleRows, purchaseRows,
+    itemsBySale, itemsByPo, recvByPo,
+    expenseRows, stockRows, pricingRows, moneyRows, deliveryRows, heldRows, wapoRows, notifRows, auditRows, settingsRows,
+  } = raw;
   const stores: Snapshot = {
     products: productRows.map(productRow),
     customers: customerRows.map(customerRow),
@@ -129,5 +171,5 @@ export async function buildSnapshot(q: QueryAll): Promise<BoundedSnapshot> {
     }),
     whatsAppPreOrders: wapoRows.map((r: any) => ({ id: r.id, preOrderNo: r.preorder_no, customerId: r.customer_id || undefined, customerName: r.customer_name || '', customerPhone: r.customer_phone || '', items: parseJsonArray(r.items_json), subtotal: KoboToNaira(r.subtotal_kobo), totalAmount: KoboToNaira(r.total_kobo), status: r.status || 'Pending Review', convertedSaleId: r.converted_sale_id || undefined, createdBy: r.created_by || '', createdAt: r.created_at, updatedAt: r.updated_at || undefined })),
   };
-  return { stores, capped: [...capped] };
+  return stores;
 }

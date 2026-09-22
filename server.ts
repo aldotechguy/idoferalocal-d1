@@ -1315,8 +1315,13 @@ app.patch("/api/storage/records", async (req, res) => {
     const now = Date.now();
     const nowIso = new Date().toISOString();
     const tx = makeNodeAdapter(db);
-    // Phase 4: relational projections are collected here and pushed alongside the
-    // legacy document mirror, so D1 `idofera` (relational) stays in lockstep.
+    // Mirror-less PATCH (option B): when the relational backend owns the store
+    // (the default), a staff edit no longer rewrites its app_documents mirror
+    // row — snapshot PUTs keep the mirror current, so a PATCH pays only the
+    // relational rows it changes instead of a mirror rewrite per index entry.
+    // The legacy documents backend still owns its mirror, so the dual-write
+    // (local store + non-blocking D1 replication) stays enabled there.
+    const mirror = !USE_RELATIONAL;
     const relStatements: { sql: string; params: any[] }[] = [];
 
     const insertStmt = db.prepare(`
@@ -1337,14 +1342,16 @@ app.patch("/api/storage/records", async (req, res) => {
       if (!ALLOWED_STORES.has(collection) || !document || typeof document !== "object") continue;
       const documentId = String(document.id || "singleton");
       const payloadStr = JSON.stringify(document);
-      insertStmt.run(ownerId, collection, documentId, payloadStr, now);
-      remoteStatements.push({
-        sql: `INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-              VALUES (?, ?, ?, ?, ?)
-              ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-              payload = excluded.payload, updated_at = excluded.updated_at`,
-        params: [ownerId, collection, documentId, payloadStr, now],
-      });
+      if (mirror) {
+        insertStmt.run(ownerId, collection, documentId, payloadStr, now);
+        remoteStatements.push({
+          sql: `INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
+                payload = excluded.payload, updated_at = excluded.updated_at`,
+          params: [ownerId, collection, documentId, payloadStr, now],
+        });
+      }
       if (USE_RELATIONAL) {
         for (const st of upsertToStatements(collection, document, nowIso)) {
           tx.run(st.sql, st.params);
@@ -1357,11 +1364,13 @@ app.patch("/api/storage/records", async (req, res) => {
       const collection = String(item?.collection || "");
       const documentId = String(item?.documentId || "");
       if (!ALLOWED_STORES.has(collection) || !documentId) continue;
-      deleteStmt.run(ownerId, collection, documentId);
-      remoteStatements.push({
-        sql: "DELETE FROM app_documents WHERE owner_id = ? AND collection = ? AND document_id = ?",
-        params: [ownerId, collection, documentId],
-      });
+      if (mirror) {
+        deleteStmt.run(ownerId, collection, documentId);
+        remoteStatements.push({
+          sql: "DELETE FROM app_documents WHERE owner_id = ? AND collection = ? AND document_id = ?",
+          params: [ownerId, collection, documentId],
+        });
+      }
       if (USE_RELATIONAL) {
         for (const st of deleteToStatements(collection, documentId)) {
           tx.run(st.sql, st.params);

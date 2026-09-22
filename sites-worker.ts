@@ -239,7 +239,6 @@ async function ensureSchema(env: Env) {
     // Phase 4: the 30 relational tables + 23 indexes, same DDL as drizzle/0000.
     ...RELATIONAL_DDL.map((ddl) => env.DB.prepare(ddl.endsWith(';') ? ddl.slice(0, -1) : ddl)),
     ...RELATIONAL_INDEXES.map((sql) => env.DB.prepare(sql.endsWith(';') ? sql.slice(0, -1) : sql)),
-    ...MALL_SAFETY_DDL.map((sql) => env.DB.prepare(sql)),
     // Phase 5: oversell is impossible store-wide once this trigger exists.
     env.DB.prepare(MALL_OVERSELL_TRIGGER_SQL.endsWith(';') ? MALL_OVERSELL_TRIGGER_SQL.slice(0, -1) : MALL_OVERSELL_TRIGGER_SQL),
   ];
@@ -247,6 +246,10 @@ async function ensureSchema(env: Env) {
     await env.DB.batch(statements.slice(offset, offset + 50));
   }
   await env.DB.batch(MALL_OPERATIONS_DDL.map(sql => env.DB.prepare(sql)));
+  // Safety DDL second: its maintenance indexes (mall_rate_limits, mall_metrics)
+  // and staff-page indexes assume the operations tables the batch above just
+  // created, and its catalog covering indexes assume RELATIONAL_DDL tables.
+  await env.DB.batch(MALL_SAFETY_DDL.map(sql => env.DB.prepare(sql)));
   // #10 merchandising columns + the status column the catalog indexes cover:
   // additive guarded ALTERs; a duplicate column is the expected no-op on every
   // start after the first.
@@ -720,39 +723,6 @@ async function readSnapshot(request: Request, env: Env) {
   }, revision, 'documents');
 }
 
-/** Volatile client markers excluded from the PATCH no-op comparison. */
-const VOLATILE_DOCUMENT_KEYS = new Set(['_lastSyncedAt', 'updatedAt']);
-
-/**
- * Canonical payload for the PATCH no-op guard: sorted keys, volatile markers
- * (`_lastSyncedAt`, `updatedAt`) removed. The client restamps both on every
- * push, so comparing raw payloads would never detect an unchanged record.
- */
-function canonicalDocumentPayload(raw: string | undefined): string {
-  if (!raw) return '';
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return raw;
-  }
-  const canonicalize = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(canonicalize);
-    if (value && typeof value === 'object') {
-      const entries = Object.entries(value as Record<string, unknown>)
-        .filter(([key]) => !VOLATILE_DOCUMENT_KEYS.has(key))
-        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
-      return Object.fromEntries(entries.map(([key, entry]) => [key, canonicalize(entry)]));
-    }
-    return value;
-  };
-  try {
-    return JSON.stringify(canonicalize(parsed));
-  } catch {
-    return raw;
-  }
-}
-
 async function patchRecords(request: Request, env: Env) {
   await ensureSchema(env);
   const ownerId = BUSINESS_OWNER_ID;
@@ -763,90 +733,37 @@ async function patchRecords(request: Request, env: Env) {
 
   const now = Date.now();
   const nowIso = new Date(now).toISOString();
-  const statements: D1PreparedStatement[] = [];
+  // Mirror-less PATCH (option B): a staff edit writes ONLY the relational rows
+  // it changes. The app_documents mirror no longer receives per-edit upserts or
+  // deletes — snapshot PUTs keep it current — so a PATCH stops paying the mirror
+  // rewrite on every index entry it touches plus the 50-row probe pages that
+  // pre-read every candidate from the mirror. The unchanged re-push guard went
+  // with the probe: it compared against mirror payloads that PATCHes no longer
+  // refresh, so it could never make a correct skip decision again. A repeated
+  // push now costs only its idempotent relational upserts.
   const relationalStmts: { sql: string; params: any[] }[] = [];
-  // Phase 3 no-op guard: an unchanged re-push must touch zero rows. The lookup
-  // below compares the incoming payload against what is already stored, so a
-  // repeated automatic-save batch costs reads, not writes. Relational mirrors
-  // are only built for documents whose payload actually differs.
-  const candidates: { collection: string; documentId: string; payload: string }[] = [];
+  const writtenKeys: { collection: string; documentId: string }[] = [];
   for (const item of upserts) {
     const collection = String(item?.collection || '');
     const document = item?.document;
     if (!ALLOWED_STORES.has(collection) || !document || typeof document !== 'object') continue;
     const documentId = String(document.id || 'singleton');
-    candidates.push({ collection, documentId, payload: JSON.stringify(document) });
-  }
-  const storedPayloads = new Map<string, string>();
-  for (let offset = 0; offset < candidates.length; offset += 50) {
-    const page = candidates.slice(offset, offset + 50);
-    if (!page.length) break;
-    const placeholders = page.map(() => '(?, ?)').join(', ');
-    const rows = await env.DB.prepare(
-      `SELECT collection, document_id, payload FROM app_documents WHERE owner_id = ? AND (collection, document_id) IN (${placeholders})`,
-    ).bind(ownerId, ...page.flatMap((candidate) => [candidate.collection, candidate.documentId]))
-      .all<{ collection: string; document_id: string; payload: string }>();
-    for (const row of rows.results || []) {
-      storedPayloads.set(`${row.collection}:${row.document_id}`, row.payload);
-    }
-  }
-  let skippedUnchanged = 0;
-  const writtenKeys: { collection: string; documentId: string }[] = [];
-  for (const candidate of candidates) {
-    // Compare the wire payload only: `_lastSyncedAt` is a local marker the
-    // client rewrites, and `updatedAt` is restamped on every push, so both are
-    // volatile and excluded from the equality check.
-    if (storedPayloads.get(`${candidate.collection}:${candidate.documentId}`) !== undefined
-      && canonicalDocumentPayload(storedPayloads.get(`${candidate.collection}:${candidate.documentId}`))
-      === canonicalDocumentPayload(candidate.payload)) {
-      skippedUnchanged += 1;
-      continue;
-    }
-    writtenKeys.push({ collection: candidate.collection, documentId: candidate.documentId });
-    statements.push(env.DB.prepare(
-      'INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at',
-    ).bind(ownerId, candidate.collection, candidate.documentId, candidate.payload, now));
-    // Phase 4: relational projection of the same document.
-    relationalStmts.push(...upsertToStatements(candidate.collection, JSON.parse(candidate.payload), nowIso));
+    writtenKeys.push({ collection, documentId });
+    relationalStmts.push(...upsertToStatements(collection, document, nowIso));
   }
   for (const item of deletes) {
     const collection = String(item?.collection || '');
     const documentId = String(item?.documentId || '');
     if (!ALLOWED_STORES.has(collection) || !documentId) continue;
-    statements.push(env.DB.prepare(
-      'DELETE FROM app_documents WHERE owner_id = ? AND collection = ? AND document_id = ?',
-    ).bind(ownerId, collection, documentId));
     relationalStmts.push(...deleteToStatements(collection, documentId));
-  }
-
-  // An unchanged batch writes nothing: bumping the revision or the cursor would
-  // invalidate every client's snapshot guard and force a full re-read for a
-  // push that changed zero rows.
-  if (skippedUnchanged === candidates.length && deletes.length === 0 && candidates.length > 0) {
-    const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
-      .bind(ownerId).all<{ revision: number }>();
-    const revision = Number(revisions.results?.[0]?.revision || 0);
-    return json({
-      ok: true,
-      revision,
-      upserted: 0,
-      deleted: 0,
-      skippedUnchanged,
-      backend: 'relational',
-      relationalStatements: 0,
-      relationalSynced: true,
-      cursor: null,
-    });
   }
 
   const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
     .bind(ownerId).all<{ revision: number }>();
   const revision = Math.max(now, Number(revisions.results?.[0]?.revision || 0) + 1);
-  statements.push(env.DB.prepare(
+  await runStatements(env, [env.DB.prepare(
     'INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?) ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at',
-  ).bind(ownerId, revision, now));
-
-  await runStatements(env, statements);
+  ).bind(ownerId, revision, now)]);
   // Product writes change the catalog facet lists; drop the in-memory cache so
   // the next catalog request rebuilds the counts including this write.
   invalidateMallFacetCache();
@@ -857,12 +774,14 @@ async function patchRecords(request: Request, env: Env) {
   } catch (error) {
     relationalSynced = false;
     relationalError = error instanceof Error ? error.message : String(error);
-    console.warn('Relational record mirror failed:', relationalError);
+    console.warn('Relational record write failed:', relationalError);
   }
   // Keyset cursor for the next delta: the max key this batch wrote, so rows
   // sharing the same millisecond with rows from another batch are never
-  // excluded by a bare `updated_at > ?` bound. Every written row shares this
-  // batch's `now`, so the max key is the lexicographically last written key.
+  // excluded by a bare `updated_at > ?` bound. The cursor advances even though
+  // PATCHes are mirror-less: delta reads see PUT-driven mirror rows only, and
+  // every client still converges on PATCH changes through the revision bump
+  // above plus the full relational snapshot read.
   const lastWritten = [...writtenKeys]
     .sort((left, right) => (left.collection < right.collection ? -1 : left.collection > right.collection ? 1 : left.documentId < right.documentId ? -1 : left.documentId > right.documentId ? 1 : 0))
     .pop();
@@ -872,9 +791,11 @@ async function patchRecords(request: Request, env: Env) {
   return json({
     ok: true,
     revision,
-    upserted: candidates.length - skippedUnchanged,
+    upserted: writtenKeys.length,
     deleted: deletes.length,
-    skippedUnchanged,
+    // The mirror probe is gone, so nothing is ever skipped; the field stays in
+    // the response so older clients keep parsing it without a fallback.
+    skippedUnchanged: 0,
     backend: 'relational',
     relationalStatements: relationalStmts.length,
     relationalSynced,

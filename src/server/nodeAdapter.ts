@@ -29,12 +29,14 @@ export function makeNodeAdapter(db: DatabaseSync): Tx {
 /** Create the relational tables in a local node:sqlite database (idempotent). */
 export function ensureRelationalSchemaNode(db: DatabaseSync): number {
   for (const ddl of RELATIONAL_DDL) db.exec(ddl.endsWith(';') ? ddl : `${ddl};`);
-  for (const ddl of MALL_SAFETY_DDL) db.exec(ddl);
   db.exec('BEGIN IMMEDIATE');
   try {
     for (const ddl of MALL_OPERATIONS_DDL) db.exec(ddl);
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
+  // Safety DDL second: its DROP INDEX / covering-index statements assume the
+  // tables above already exist (mall_rate_limits, mall_metrics, mall_orders).
+  for (const ddl of MALL_SAFETY_DDL) db.exec(ddl);
   // #10 merchandising columns: additive, and a duplicate-column error on restart
   // is the expected no-op rather than a failure.
   for (const column of MALL_MERCH_COLUMNS) {
@@ -104,7 +106,7 @@ export function makeNodeMallExecutor(db: DatabaseSync, config?: MallConfig, clie
 
 /** Same bootstrap for Cloudflare D1 (statement-per-call, tolerant). */
 export function relationalSchemaStatements(): string[] {
-  return [...RELATIONAL_DDL, ...RELATIONAL_INDEXES, ...MALL_SAFETY_DDL, ...MALL_OPERATIONS_DDL,
+  return [...RELATIONAL_DDL, ...RELATIONAL_INDEXES, ...MALL_OPERATIONS_DDL, ...MALL_SAFETY_DDL,
     ...MALL_MERCH_COLUMNS.map((column) => column.ddl),
     ...MALL_ORDER_COLUMNS.map((column) => column.ddl),
     ...MALL_CATALOG_INDEX_COLUMNS.map((column) => column.ddl),

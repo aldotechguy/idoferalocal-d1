@@ -166,6 +166,22 @@ const cachedBrandScopes = new Map<string, { expiresAt: number; rows: FacetRows }
 let cachedHomeRailEntry: { expiresAt: number; flash: any[]; top: any[]; newest: any[] } | null = null;
 
 /**
+ * Derived-read caches owned by other modules (the staff order counts/operations
+ * payloads in mallOrderAdminApi) register here, so every existing caller of
+ * invalidateMallFacetCache() — the PATCH route, snapshot restore, checkout,
+ * merchandising saves — drops them too. One entry point, no new wiring.
+ */
+const cacheInvalidators: (() => void)[] = [];
+
+export function registerMallCacheInvalidator(invalidate: () => void): () => void {
+  cacheInvalidators.push(invalidate);
+  return () => {
+    const index = cacheInvalidators.indexOf(invalidate);
+    if (index >= 0) cacheInvalidators.splice(index, 1);
+  };
+}
+
+/**
  * Staff writes must call this so derived read caches never outlive the write:
  * PATCH /api/storage/records and snapshot restores drop everything; checkout
  * and merchandising saves only reshape the home rails but go through the same
@@ -175,6 +191,7 @@ export function invalidateMallFacetCache(): void {
   cachedCategories = null;
   cachedBrandScopes.clear();
   cachedHomeRailEntry = null;
+  for (const invalidate of cacheInvalidators) invalidate();
 }
 
 const facetFresh = <T extends { expiresAt: number }>(entry: T | null | undefined) =>
@@ -399,23 +416,19 @@ async function getProduct(exec: MallExecutor, id: string) {
 // ===SEAM-B===
 
 async function getOrCreateCartId(exec: MallExecutor, sessionId: string): Promise<string> {
-  // Deterministic cart id per session: INSERT OR IGNORE semantics via fixed id
-  // make cart creation race-free — one row per session, ever.
+  // Deterministic cart id per session: one row per session, ever. Creation and
+  // reactivation are the SAME statement, so a cart request no longer pays a
+  // SELECT probe before its write (that probe ran on every cart / cart-qty /
+  // checkout call). The conflict branch's WHERE keeps an already-active cart
+  // untouched, so `updated_at` still only moves when a cart is reactivated and
+  // the abandoned-cart sweep can still expire it.
   const cartId = `mc-${sessionId}`;
-  const existing = await exec.queryAll('SELECT id, status FROM mall_carts WHERE id = ? LIMIT 1', [cartId]);
-  if (!existing.length) {
-    await exec.runBatch([{
-      sql: 'INSERT OR IGNORE INTO mall_carts (id, customer_id, session_id, status, updated_at) VALUES (?, NULL, ?, ?, ?)',
-      params: [cartId, sessionId, 'active', Date.now()],
-    }]);
-    return cartId;
-  }
-  if (s((existing[0] as any).status) !== 'active') {
-    await exec.runBatch([{
-      sql: "UPDATE mall_carts SET status = 'active', updated_at = ? WHERE id = ?",
-      params: [Date.now(), cartId],
-    }]);
-  }
+  await exec.runBatch([{
+    sql: `INSERT INTO mall_carts (id, customer_id, session_id, status, updated_at) VALUES (?, NULL, ?, 'active', ?)
+      ON CONFLICT(id) DO UPDATE SET status = 'active', updated_at = excluded.updated_at
+      WHERE mall_carts.status <> 'active'`,
+    params: [cartId, sessionId, Date.now()],
+  }]);
   return cartId;
 }
 
@@ -639,12 +652,16 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
       params: [it.qty, createdAt, it.productId],
     });
     stmts.push({
+      // One products seek instead of two correlated subqueries: the row the
+      // UPDATE above just decremented supplies BOTH prev_stock and new_stock
+      // (prev = post-decrement stock + qty, new = post-decrement stock), so a
+      // multi-line order reads half as many rows as before.
       sql: `INSERT INTO stock_movements (id, product_id, product_name, type, qty, prev_stock, new_stock, ref_id, notes, performed_by, created_at)
-            VALUES (?, ?, ?, 'Mall Order', ?, (SELECT stock_qty + ? FROM products WHERE id = ?), (SELECT stock_qty FROM products WHERE id = ?), ?, ?, ?, ?)`,
+            SELECT ?, p.id, ?, 'Mall Order', ?, p.stock_qty + ?, p.stock_qty, ?, ?, ?, ?
+            FROM products p WHERE p.id = ?`,
       params: [
-        `mv-${uuid()}`, it.productId, it.name, -it.qty,
-        it.qty, it.productId, it.productId,
-        `checkout:${orderId}`, `Mall order ${orderNo}`, 'Mall Storefront', createdAt,
+        `mv-${uuid()}`, it.name, -it.qty, it.qty,
+        `checkout:${orderId}`, `Mall order ${orderNo}`, 'Mall Storefront', createdAt, it.productId,
       ],
     });
   });

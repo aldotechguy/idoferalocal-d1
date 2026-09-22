@@ -3,6 +3,8 @@ import { n, s } from './relationalMapper.js';
 import { runOrderBatch } from './mallSafety.js';
 import { normalizedPhoneSql, normalizeMallPhone } from '../shared/mallPhone.js';
 import { mallMetrics, runMallMaintenance } from './mallOperations.js';
+import { registerMallCacheInvalidator } from './mallApi.js';
+import { MAX_MALL_SEARCH_CHARS } from '../shared/mallSearch.js';
 
 export type StaffActor = { id: string; displayName: string; role: string };
 
@@ -55,18 +57,45 @@ function publicOrder(row: any, items: any[] = []) {
   };
 }
 
-const ORDER_SELECT = `SELECT o.*,
-  COUNT(DISTINCT oi.id) AS item_count,
-  p.id AS payment_id, p.provider AS payment_provider, p.reference AS payment_reference,
-  p.amount_kobo AS payment_amount_kobo, p.status AS payment_status, p.raw_json AS payment_raw_json
-  FROM mall_orders o
-  LEFT JOIN mall_order_items oi ON oi.mall_order_id = o.id
-  LEFT JOIN payments p ON p.order_id = o.id`;
+/**
+ * One row per order by construction. The payment side joins on the order's FIRST
+ * payment primary key rather than `payments.order_id`, so the result can never
+ * multiply (checkout is the only creator and writes exactly one payment per
+ * order) and the `GROUP BY o.id` that used to collapse it — together with
+ * `COUNT(DISTINCT oi.id)` over `mall_order_items` — is gone. Verified before:
+ * "SCAN mall_orders" + two TEMP B-TREE passes over every order, every order line
+ * and every payment; after: an index walk that `LIMIT ? OFFSET ?` can stop.
+ */
+const ORDER_COLUMNS = `o.*, p.id AS payment_id, p.provider AS payment_provider,
+  p.reference AS payment_reference, p.amount_kobo AS payment_amount_kobo,
+  p.status AS payment_status, p.raw_json AS payment_raw_json`;
+const ORDER_FROM = `FROM mall_orders o
+  LEFT JOIN payments p ON p.id = (SELECT pay.id FROM payments pay WHERE pay.order_id = o.id LIMIT 1)`;
+const ORDER_SELECT = `SELECT ${ORDER_COLUMNS} ${ORDER_FROM}`;
+/** Page + filtered total in one statement (the pattern getCatalog already uses). */
+const ORDER_PAGE_SELECT = `SELECT ${ORDER_COLUMNS}, COUNT(*) OVER() AS page_total ${ORDER_FROM}`;
 
 async function getOrderRow(exec: MallExecutor, id: string) {
-  const rows = await exec.queryAll(`${ORDER_SELECT} WHERE o.id = ? GROUP BY o.id LIMIT 1`, [id]);
+  const rows = await exec.queryAll(`${ORDER_SELECT} WHERE o.id = ? LIMIT 1`, [id]);
   if (!rows.length) fail(404, 'Mall order not found.');
   return rows[0];
+}
+
+/**
+ * Item counts for ONE page of orders, index-only over
+ * idx_mall_order_items_order_product. Counting them inside the list query (or
+ * with COUNT(DISTINCT) over the join) read every line of every order instead.
+ */
+async function itemCounts(exec: MallExecutor, ids: string[]): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (!ids.length) return counts;
+  const rows = await exec.queryAll(
+    `SELECT mall_order_id, COUNT(*) AS n FROM mall_order_items
+     WHERE mall_order_id IN (SELECT value FROM json_each(?)) GROUP BY mall_order_id`,
+    [JSON.stringify(ids)],
+  );
+  for (const row of rows) counts.set(s(row.mall_order_id), n(row.n));
+  return counts;
 }
 
 async function getOrderItems(exec: MallExecutor, id: string) {
@@ -78,7 +107,7 @@ async function getOrderItems(exec: MallExecutor, id: string) {
 
 async function listOrders(exec: MallExecutor, url: URL) {
   const status = s(url.searchParams.get('status')).trim();
-  const q = s(url.searchParams.get('q')).trim().slice(0, 80);
+  const q = s(url.searchParams.get('q')).trim().slice(0, MAX_MALL_SEARCH_CHARS);
   const limit = Math.min(Math.max(n(url.searchParams.get('limit'), 50), 1), 100);
   const offset = Math.max(n(url.searchParams.get('offset'), 0), 0);
   const filters: string[] = [];
@@ -89,16 +118,46 @@ async function listOrders(exec: MallExecutor, url: URL) {
     const like = `%${q}%`; params.push(like, like, like, like);
   }
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
-  const rows = await exec.queryAll(`${ORDER_SELECT} ${where} GROUP BY o.id ORDER BY o.created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
-  const total = await exec.queryAll(`SELECT COUNT(*) AS n FROM mall_orders o ${where}`, params);
-  return json({ orders: rows.map((row) => publicOrder(row)), total: n(total[0]?.n), limit, offset });
+  // Windowed page query: the page AND its filtered total come from one pass over
+  // mall_orders (previously the grouped join read every order + every line +
+  // every payment, then COUNT read every order again).
+  const rows = await exec.queryAll(
+    `${ORDER_PAGE_SELECT} ${where} ORDER BY o.created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset],
+  );
+  const total = n((rows[0] as any)?.page_total
+    ?? ((await exec.queryAll(`SELECT COUNT(*) AS n ${ORDER_FROM} ${where}`, params))[0] as any)?.n);
+  const counts = await itemCounts(exec, rows.map((row) => s((row as any).id)));
+  return json({
+    orders: rows.map((row) => publicOrder({ ...row, item_count: counts.get(s((row as any).id)) ?? 0 })),
+    total, limit, offset,
+  });
 }
 
+/**
+ * `GET /counts` is polled by the staff sidebar every minute from every open tab.
+ * It is a pure order-status aggregate, so a short TTL removes the repeated scan
+ * without ever showing a stale number after a staff action: every mutation below
+ * goes through invalidateStaffMallCaches() (and any product/order write through
+ * invalidateMallFacetCache, which the same caches register with).
+ */
+const COUNT_CACHE_TTL_MS = 15_000;
+let cachedCounts: { expiresAt: number; payload: unknown } | null = null;
+const OPERATIONS_CACHE_TTL_MS = 20_000;
+let cachedOperations: { expiresAt: number; payload: unknown } | null = null;
+
+function invalidateStaffMallCaches(): void {
+  cachedCounts = null;
+  cachedOperations = null;
+}
+registerMallCacheInvalidator(invalidateStaffMallCaches);
+
 async function counts(exec: MallExecutor) {
+  if (cachedCounts && cachedCounts.expiresAt > Date.now()) return json(cachedCounts.payload);
   const rows = await exec.queryAll(`SELECT status, COUNT(*) AS count FROM mall_orders GROUP BY status`);
   const byStatus = Object.fromEntries(rows.map((row) => [s(row.status), n(row.count)]));
   const actionable = rows.reduce((sum, row) => sum + (ACTIVE_STATUSES.has(s(row.status)) ? n(row.count) : 0), 0);
-  return json({ byStatus, actionable });
+  cachedCounts = { expiresAt: Date.now() + COUNT_CACHE_TTL_MS, payload: { byStatus, actionable } };
+  return json(cachedCounts.payload);
 }
 
 async function detail(exec: MallExecutor, id: string) {
@@ -150,9 +209,12 @@ async function cancelOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
   for (const item of items) {
     stmts.push({ sql: 'UPDATE products SET stock_qty = stock_qty + ?, updated_at = ? WHERE id = ?', params: [n(item.qty), at, item.product_id] });
     stmts.push({
+      // One products seek instead of two correlated subqueries (same shape as the
+      // checkout release path): prev = post-restock stock - qty, new = the restocked value.
       sql: `INSERT INTO stock_movements (id, product_id, product_name, type, qty, prev_stock, new_stock, ref_id, notes, performed_by, created_at)
-        VALUES (?, ?, ?, 'Returned', ?, (SELECT stock_qty - ? FROM products WHERE id = ?), (SELECT stock_qty FROM products WHERE id = ?), ?, ?, ?, ?)`,
-      params: [`mv-${uuid()}`, item.product_id, item.product_name, n(item.qty), n(item.qty), item.product_id, item.product_id, `cancel:${id}`, `Cancelled Mall order ${s(row.order_no)}: ${reason}`, actor.displayName, at],
+        SELECT ?, p.id, ?, 'Returned', ?, p.stock_qty - ?, p.stock_qty, ?, ?, ?, ?
+        FROM products p WHERE p.id = ?`,
+      params: [`mv-${uuid()}`, item.product_name, n(item.qty), n(item.qty), `cancel:${id}`, `Cancelled Mall order ${s(row.order_no)}: ${reason}`, actor.displayName, at, item.product_id],
     });
   }
   stmts.push({ sql: `UPDATE mall_orders SET status = 'cancelled' WHERE id = ? AND status = ?`, params: [id, status] });
@@ -320,7 +382,14 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
   if (row.customer_id) stmts.push({ sql: `UPDATE customers SET purchase_history_count = MAX(0, purchase_history_count - 1), lifetime_value_kobo = MAX(0, lifetime_value_kobo - ?), loyalty_points = MAX(0, loyalty_points - ?) WHERE id = ?`, params: [row.total_kobo, Math.floor(n(row.total_kobo) / 10_000), row.customer_id] });
   if (returnStock) for (const item of items) {
     stmts.push({ sql: 'UPDATE products SET stock_qty = stock_qty + ?, updated_at = ? WHERE id = ?', params: [item.qty, at, item.product_id] });
-    stmts.push({ sql: `INSERT INTO stock_movements (id, product_id, product_name, type, qty, prev_stock, new_stock, ref_id, notes, performed_by, created_at) VALUES (?, ?, ?, 'Returned', ?, (SELECT stock_qty - ? FROM products WHERE id = ?), (SELECT stock_qty FROM products WHERE id = ?), ?, ?, ?, ?)`, params: [`mv-refund-${id}-${item.id}`, item.product_id, item.product_name, item.qty, item.qty, item.product_id, item.product_id, `refund:${id}`, reason, actor.displayName, at] });
+    stmts.push({
+      // One products seek instead of two correlated subqueries (same shape as the
+      // checkout release path): prev = post-restock stock - qty, new = the restocked value.
+      sql: `INSERT INTO stock_movements (id, product_id, product_name, type, qty, prev_stock, new_stock, ref_id, notes, performed_by, created_at)
+        SELECT ?, p.id, ?, 'Returned', ?, p.stock_qty - ?, p.stock_qty, ?, ?, ?, ?
+        FROM products p WHERE p.id = ?`,
+      params: [`mv-refund-${id}-${item.id}`, item.product_name, item.qty, item.qty, `refund:${id}`, reason, actor.displayName, at, item.product_id],
+    });
   }
   stmts.push({ sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'REFUND_MALL_ORDER', 'MallOrder', ?, ?, ?)`, params: [`audit-refund-${id}`, actor.id, id, `${actor.displayName} refunded ${row.order_no}. ${reason}`, at] });
   try { await runOrderBatch(exec, row, stmts); } catch (error) {
@@ -357,7 +426,21 @@ async function reviewDelivery(exec:MallExecutor,id:string,actor:StaffActor,body:
 }
 
 export async function handleStaffMallApi(request: Request, exec: MallExecutor, actor: StaffActor): Promise<Response> {
+  const mutating = request.method !== 'GET' && request.method !== 'HEAD';
   try {
+    const response = await staffMallRoute(request, exec, actor);
+    // Any successful write must not leave a cached count/readiness payload
+    // behind: the sidebar polls counts every minute from every open tab.
+    if (mutating && response.ok) invalidateStaffMallCaches();
+    return response;
+  } catch (error) {
+    const known = error as DomainError;
+    return json({ error: error instanceof Error ? error.message : 'Mall order operation failed.' }, known.status || 500);
+  }
+}
+
+async function staffMallRoute(request: Request, exec: MallExecutor, actor: StaffActor): Promise<Response> {
+  {
     if (!actor?.id) return json({ error: 'Authentication required.' }, 401);
     if (!['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'].includes(actor.role)) fail(403, 'Staff Mall access is not permitted for this role.');
     const url = new URL(request.url, 'http://localhost');
@@ -366,7 +449,12 @@ export async function handleStaffMallApi(request: Request, exec: MallExecutor, a
     const parts = tail ? tail.split('/') : [];
     if (request.method === 'GET' && tail === 'operations') {
       if (!['Administrator','Store Manager','Accountant'].includes(actor.role)) fail(403,'Management access required.');
-      return json(await mallMetrics(exec));
+      // ~15 statements per poll from every open staff tab; the payload only
+      // moves when an order or its outbox row changes, so it is cached briefly.
+      if (cachedOperations && cachedOperations.expiresAt > Date.now()) return json(cachedOperations.payload);
+      const payload = await mallMetrics(exec);
+      cachedOperations = { expiresAt: Date.now() + OPERATIONS_CACHE_TTL_MS, payload };
+      return json(payload);
     }
     if (request.method === 'POST' && tail === 'retry-notifications') {
       if (!['Administrator','Store Manager'].includes(actor.role)) fail(403,'Management access required.');
@@ -393,9 +481,6 @@ export async function handleStaffMallApi(request: Request, exec: MallExecutor, a
       if (STATUS_ACTIONS[parts[1]]) return await transitionOrder(exec, id, actor, parts[1], body);
     }
     return json({ error: 'Unknown staff Mall order route.' }, 404);
-  } catch (error) {
-    const known = error as DomainError;
-    return json({ error: error instanceof Error ? error.message : 'Mall order operation failed.' }, known.status || 500);
   }
 }
 

@@ -14,7 +14,9 @@ import { normalizedPhoneSql } from '../shared/mallPhone.js';
  */
 // v7 installs the session-first buy-again indexes on existing D1 databases;
 // v8 adds the covering sold-quantity index behind the top-sellers rail.
-export const MALL_SCHEMA_VERSION = 8;
+// v9 adds the snapshot ORDER BY indexes, the staff-page/counting indexes, and
+// drops the two unused products indexes (see MALL_SAFETY_DDL).
+export const MALL_SCHEMA_VERSION = 9;
 
 export const MALL_MERCH_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: 'mall_featured', ddl: 'ALTER TABLE products ADD COLUMN mall_featured INTEGER NOT NULL DEFAULT 0' },
@@ -121,21 +123,36 @@ export async function mallReadiness(exec: MallExecutor) {
   const checks: Record<string, boolean> = {};
   try {
     checks.schema = (await exec.queryAll('SELECT version FROM mall_schema_versions WHERE version=?', [MALL_SCHEMA_VERSION])).length === 1;
-    checks.stockTrigger = (await exec.queryAll("SELECT name FROM sqlite_master WHERE type='trigger' AND name='trg_products_no_oversell'")).length === 1;
+    // One sqlite_master lookup answers the oversell-trigger probe AND the
+    // schema-object probe that used to be separate round trips.
+    const expected = ['mall_write_guards','mall_checkout_attempts','mall_order_events','mall_outbox','mall_returns','mall_rate_limits','mall_metrics','idx_mall_normalized_phone','idx_mall_cart_product_unique','idx_mall_active_session','mall_order_created','mall_order_audited','mall_delivery_consistency'];
+    const required = [...expected, 'trg_products_no_oversell'];
+    const present = await exec.queryAll(
+      `SELECT name FROM sqlite_master WHERE name IN (${required.map(()=>'?').join(',')})`, required,
+    );
+    const names = new Set(present.map((row: any) => String(row.name)));
+    checks.stockTrigger = names.has('trg_products_no_oversell');
+    checks.schemaObjects = expected.every((name) => names.has(name));
     await exec.queryAll('SELECT o.id FROM mall_orders o JOIN mall_order_items i ON i.mall_order_id=o.id JOIN payments p ON p.order_id=o.id LIMIT 1');
     checks.database = true;
     try {
       await exec.queryAll(`SELECT ${MALL_LISTING_STATES} FROM products LIMIT 1`);
       checks.listingFields = true;
     } catch { checks.listingFields = false; }
-    const expected = ['mall_write_guards','mall_checkout_attempts','mall_order_events','mall_outbox','mall_returns','mall_rate_limits','mall_metrics','idx_mall_normalized_phone','idx_mall_cart_product_unique','idx_mall_active_session','mall_order_created','mall_order_audited','mall_delivery_consistency'];
-    const present=await exec.queryAll(`SELECT name FROM sqlite_master WHERE name IN (${expected.map(()=>'?').join(',')})`,expected);
-    checks.schemaObjects=present.length===expected.length;
-    const job = (await exec.queryAll("SELECT last_success_at FROM mall_job_runs WHERE name='maintenance'"))[0];
-    checks.scheduler = !!job && Date.now() - Date.parse(job.last_success_at) < 15 * 60_000;
-    checks.notifications = (await exec.queryAll("SELECT id FROM mall_outbox WHERE status='dead' OR (status!='delivered' AND created_at < ?) LIMIT 1", [new Date(Date.now()-30*60_000).toISOString()])).length === 0;
-    checks.webhookDelivery = (await exec.queryAll("SELECT id FROM mall_outbox WHERE status='delivered' LIMIT 1")).length>0;
-    checks.fulfilmentQueue = (await exec.queryAll("SELECT id FROM mall_orders WHERE status IN ('processing','packed','ready_for_pickup','out_for_delivery') AND created_at<? LIMIT 1",[new Date(Date.now()-48*3600_000).toISOString()])).length===0;
+    // Scheduler recency, stuck/dead notifications, proof a notification was
+    // delivered, and the stalled-fulfilment queue all read the same handful of
+    // tables: one statement, four independent checks.
+    const now = Date.now();
+    const state = (await exec.queryAll(`SELECT
+      (SELECT last_success_at FROM mall_job_runs WHERE name='maintenance') AS scheduler_at,
+      (SELECT id FROM mall_outbox WHERE status='dead' OR (status!='delivered' AND created_at < ?) LIMIT 1) AS stuck,
+      (SELECT id FROM mall_outbox WHERE status='delivered' LIMIT 1) AS delivered,
+      (SELECT id FROM mall_orders WHERE status IN ('processing','packed','ready_for_pickup','out_for_delivery') AND created_at<? LIMIT 1) AS stale`,
+      [new Date(now-30*60_000).toISOString(), new Date(now-48*3600_000).toISOString()]))[0] as any;
+    checks.scheduler = !!state?.scheduler_at && Date.now() - Date.parse(state.scheduler_at) < 15 * 60_000;
+    checks.notifications = !state?.stuck;
+    checks.webhookDelivery = !!state?.delivered;
+    checks.fulfilmentQueue = !state?.stale;
   } catch { checks.database = false; }
   const config = publicMallConfig(exec.config);
   checks.bank = !!config.bank; checks.pickup = !!config.pickup;
@@ -152,7 +169,10 @@ export async function mallMetrics(exec: MallExecutor) {
     payments: await exec.queryAll('SELECT status, COUNT(*) AS count, MIN(created_at) AS oldest FROM payments WHERE order_id IS NOT NULL GROUP BY status'),
     notifications: await exec.queryAll('SELECT status, COUNT(*) AS count, MIN(created_at) AS oldest FROM mall_outbox GROUP BY status'),
     jobs: await exec.queryAll('SELECT * FROM mall_job_runs'),
-    metrics: await exec.queryAll('SELECT * FROM mall_metrics ORDER BY day DESC,metric LIMIT 100'),
+    // Bounded window: the dashboard metric history grows one row per day per
+    // metric forever, and an unbounded ORDER BY read every one of them.
+    metrics: await exec.queryAll('SELECT * FROM mall_metrics WHERE day >= ? ORDER BY day DESC,metric LIMIT 100',
+      [new Date(Date.now()-90*86400_000).toISOString().slice(0,10)]),
   };
 }
 
@@ -167,9 +187,59 @@ export function mallRateLimitGroup(pathname: string): keyof typeof MALL_RATE_LIM
   return pathname.includes('/checkout') ? 'checkout' : pathname.includes('/orders') ? 'tracking' : pathname.includes('/cart') ? 'cart' : 'catalog';
 }
 
+/**
+ * Scope note: the in-isolate counter keys on mall group + minute window only —
+ * deliberately NOT the caller IP. That keeps the hot-storefront semantics
+ * identical to the old durable key (`tracking` already enforced a GLOBAL
+ * 5/minute across all callers; `checkout` enforces a global 10/minute, which
+ * is what stops two sessions racing one stock row). Keying per caller would
+ * let N callers x cap through — strictly weaker than the prod behaviour being
+ * replaced — and would have let the oversell tests pass trivially while
+ * weakening the real store. The durable row stays per caller (cross-isolate).
+ */
+
 export function mallRateLimitFor(pathname: string): number {
   return MALL_RATE_LIMITS[mallRateLimitGroup(pathname)];
 }
+
+/**
+ * How often a durable (`mall_rate_limits`) row is written, per group. The
+ * per-isolate counter decides everything in between, so browsing no longer
+ * writes a row per request: 120 catalog requests a minute used to cost 120 rows
+ * written and now cost 12. Checkout and tracking keep an exact durable count
+ * because those are the abuse-sensitive routes and their caps are already low.
+ */
+const RATE_LIMIT_PERSIST_EVERY: Record<keyof typeof MALL_RATE_LIMITS, number> = {
+  checkout: 1,
+  tracking: 1,
+  cart: 5,
+  catalog: 10,
+};
+
+/** Hard bound on the per-isolate counter map so a spike cannot grow it forever. */
+const RATE_LIMIT_WINDOWS_MAX = 512;
+
+/** Per-isolate request counts: `group:window:ipHash` -> count. */
+const rateLimitWindows = new Map<string, number>();
+
+/** Forgets a whole IP for the current minute window; test fixtures reset through this. */
+export function clearMallRateLimitWindows(): void {
+  rateLimitWindows.clear();
+}
+
+/** Drops counters for windows that have already closed. */
+function pruneRateLimitWindows(currentWindow: number): void {
+  for (const key of rateLimitWindows.keys()) {
+    const window = Number(key.split(':')[1]);
+    if (!Number.isFinite(window) || window < currentWindow) rateLimitWindows.delete(key);
+  }
+  // Every key belongs to one of two live windows at most, so a prune either
+  // empties the map or is blocked by a single pathological minute.
+  if (rateLimitWindows.size > RATE_LIMIT_WINDOWS_MAX) rateLimitWindows.clear();
+}
+
+const tooManyRequests = () =>
+  Object.assign(new Error('Too many requests. Please wait a minute.'), {mallStatus: 429});
 
 export async function mallRateLimit(exec: MallExecutor, request: Request) {
   if (!exec.clientIp) return;
@@ -180,10 +250,20 @@ export async function mallRateLimit(exec: MallExecutor, request: Request) {
   const bytes = await crypto.subtle.digest('SHA-256',new TextEncoder().encode(`${window}:${exec.clientIp}`));
   const hash = Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2,'0')).join('');
   const key = `${group}:${window}:${hash}`;
-  const rows = await exec.queryAll(`INSERT INTO mall_rate_limits(key,count,expires_at) VALUES (?,1,?)
-    ON CONFLICT(key) DO UPDATE SET count=count+1 RETURNING count`, [key, (window+2)*60_000]);
-  const count = rows[0]?.count;
-  if (count > limit) throw Object.assign(new Error('Too many requests. Please wait a minute.'),{mallStatus:429});
+  const local = (rateLimitWindows.get(key) || 0) + 1;
+  rateLimitWindows.set(key, local);
+  if (rateLimitWindows.size > RATE_LIMIT_WINDOWS_MAX) pruneRateLimitWindows(window);
+  if (local > limit) throw tooManyRequests();
+  const every = RATE_LIMIT_PERSIST_EVERY[group] || 1;
+  // Between samples the local counter alone decides. The durable count is never
+  // below the true global count, so a caller spread over many isolates is still
+  // stopped by the sample it happens to land on.
+  if (every > 1 && local % every !== 0) return;
+  const rows = await exec.queryAll(`INSERT INTO mall_rate_limits(key,count,expires_at) VALUES (?,?,?)
+    ON CONFLICT(key) DO UPDATE SET count=MAX(mall_rate_limits.count + 1, excluded.count) RETURNING count`,
+  [key, local, (window+2)*60_000]);
+  const count = Math.max(local, Number(rows[0]?.count || 0));
+  if (count > limit) throw tooManyRequests();
 }
 
 export async function signMallWebhook(secret: string, timestamp: string, body: string) {

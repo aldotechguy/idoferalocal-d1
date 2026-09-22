@@ -7,6 +7,17 @@ export function normalizeMallSearch(value: string): string {
     .trim().replace(/\s+/g, ' ');
 }
 
+/**
+ * Longest search text a `LIKE '%…%'` staff query may carry.
+ *
+ * Cloudflare D1 caps a LIKE or GLOB PATTERN at 50 bytes, and the pattern adds
+ * two `%` characters, so anything longer than 48 bytes is rejected by the
+ * platform instead of simply returning no matches. Both staff list endpoints
+ * clamp with this instead of 80, which they used to do — an 80-character search
+ * term was a guaranteed D1 error on the deployed Worker.
+ */
+export const MAX_MALL_SEARCH_CHARS = 48;
+
 /** One insertion, deletion, substitution, or adjacent transposition. */
 export function mallOneTypo(a: string, b: string): boolean {
   if (a === b) return true;
