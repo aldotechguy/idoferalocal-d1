@@ -19,6 +19,8 @@ interface Env extends MallConfig {
   RESEND_API_KEY?: string;
   MALL_NOTIFY_EMAIL?: string;
   MALL_EMAIL_FROM?: string;
+  /** Bound D1 database ID, set per environment in wrangler.toml (display-only). */
+  D1_DATABASE_ID?: string;
 }
 
 interface D1PreparedStatement {
@@ -996,7 +998,7 @@ export default {
           status: 'healthy',
           connected: true,
           backend: 'relational',
-          databaseId: '3e95a550-a091-490b-819d-f0acb7ea8dd8',
+          databaseId: env.D1_DATABASE_ID || 'unconfigured',
           revision: Number(revisions.results?.[0]?.revision || 0),
           totalDocuments,
           relational,

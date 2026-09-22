@@ -46,7 +46,7 @@ import {
   INITIAL_MONEY_MOVEMENTS,
 } from '../data/initialData';
 import { saveDocument, removeDocument } from '../firebase/services';
-import { subscribeTabSync, markIdDeleted } from '../firebase/syncManager';
+import { subscribeTabSync } from '../firebase/syncManager';
 import { useToast } from './ToastContext';
 import { getAllItems, putManyItems, replaceStoreItems, putItem, clearStore, deleteItem, writeD1SnapshotToIndexedDB } from '../db/indexedDB';
 import { initializeD1Storage, queueD1Snapshot, pullLatestFromD1, registerDeltaApplier, type D1Snapshot } from '../services/d1StorageService';
@@ -1043,7 +1043,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setProducts((prev) => prev.filter((p) => p.id !== id));
     removeDocument('products', id);
     deleteItem('products', id).catch((e) => console.warn('IndexedDB product delete error:', e));
-    markIdDeleted('products', id);
 
     // Clean up low stock notifications for this product
     if (target) {
@@ -1817,7 +1816,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (found) {
       removeDocument('heldOrders', id);
       deleteItem('heldOrders', id).catch(() => {});
-      markIdDeleted('heldOrders', id);
       showToast({ title: 'Held Order Restored', message: `Restored order "${found.name}" to active checkout cart.`, type: 'info' });
     }
   };
@@ -1827,7 +1825,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setHeldOrders((prev) => prev.filter((h) => h.id !== id));
     removeDocument('heldOrders', id);
     deleteItem('heldOrders', id).catch(() => {});
-    markIdDeleted('heldOrders', id);
     showToast({ title: 'Held Order Deleted', message: found ? `Removed held order "${found.name}".` : 'Order deleted.', type: 'error' });
   };
 
@@ -1856,7 +1853,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     heldOrders.forEach((h) => {
       removeDocument('heldOrders', h.id).catch(() => {});
       deleteItem('heldOrders', h.id).catch(() => {});
-      markIdDeleted('heldOrders', h.id);
     });
     setHeldOrders([]);
     localStorage.removeItem('idofera_heldOrders');
@@ -2089,7 +2085,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       matchingDeliveries.forEach((d) => {
         removeDocument('deliveryOrders', d.id);
         deleteItem('deliveryOrders', d.id).catch((e) => console.warn('IndexedDB del delete error:', e));
-        markIdDeleted('deliveryOrders', d.id);
       });
     }
 
@@ -2129,7 +2124,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       linkedExpenseIds.forEach((expId) => {
         removeDocument('expenses', expId);
         deleteItem('expenses', expId).catch((e) => console.warn('IndexedDB exp delete error:', e));
-        markIdDeleted('expenses', expId);
       });
     }
 
@@ -2201,7 +2195,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSales((prev) => prev.filter((s) => s.id !== saleId));
     removeDocument('sales', saleId);
     deleteItem('sales', saleId).catch((e) => console.warn('IndexedDB sales delete error:', e));
-    markIdDeleted('sales', saleId);
 
     // 8. Cascade to Money Movements
     setMoneyMovements((prev) => {
@@ -2209,7 +2202,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       removed.forEach((m) => {
         removeDocument('moneyMovements', m.id);
         deleteItem('moneyMovements', m.id).catch(() => {});
-        markIdDeleted('moneyMovements', m.id);
       });
       return prev.filter((m) => m.referenceId !== saleId);
     });
@@ -2430,7 +2422,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setExpenses((prev) => prev.filter((e) => e.id !== expIdToRemove));
         removeDocument('expenses', expIdToRemove);
         deleteItem('expenses', expIdToRemove).catch((e) => console.warn('IndexedDB expense delete error:', e));
-        markIdDeleted('expenses', expIdToRemove);
         updatedSale.expenseId = undefined;
       }
     } else if (isHistorical && newFee > 0) {
@@ -2848,7 +2839,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         toRemove.forEach((m) => {
           removeDocument('moneyMovements', m.id);
           deleteItem('moneyMovements', m.id).catch(() => {});
-          markIdDeleted('moneyMovements', m.id);
         });
         console.log(`[Treasury] Purged ${toRemove.length} historical money movement records to preserve live Bank and Till balances.`);
       }
@@ -3060,7 +3050,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCustomers((prev) => prev.filter((c) => c.id !== id));
     removeDocument('customers', id);
     deleteItem('customers', id).catch((e) => console.warn('IndexedDB customer delete error:', e));
-    markIdDeleted('customers', id);
 
     // Clean up customer balance notifications
     if (target) {
@@ -3151,7 +3140,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSuppliers((prev) => prev.filter((s) => s.id !== id));
     removeDocument('suppliers', id);
     deleteItem('suppliers', id).catch((e) => console.warn('IndexedDB supplier delete error:', e));
-    markIdDeleted('suppliers', id);
 
     // Unlink supplier from products
     setProducts((prev) =>
@@ -3640,7 +3628,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       expIds.forEach((id) => {
         removeDocument('expenses', id);
         deleteItem('expenses', id).catch(() => {});
-        markIdDeleted('expenses', id);
       });
     }
 
@@ -3676,7 +3663,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPurchases((prev) => prev.filter((p) => p.id !== poId));
     removeDocument('purchases', poId);
     deleteItem('purchases', poId).catch((e) => console.warn('IndexedDB purchases delete error:', e));
-    markIdDeleted('purchases', poId);
 
     // 6. Cascade to Money Movements: remove supplier payment movements for this PO
     setMoneyMovements((prev) => {
@@ -3684,7 +3670,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       removed.forEach((m) => {
         removeDocument('moneyMovements', m.id);
         deleteItem('moneyMovements', m.id).catch(() => {});
-        markIdDeleted('moneyMovements', m.id);
       });
       return prev.filter((m) => m.referenceId !== poId);
     });
@@ -3744,7 +3729,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setExpenses((prev) => prev.filter((e) => e.id !== id));
     removeDocument('expenses', id);
     deleteItem('expenses', id).catch((e) => console.warn('IndexedDB expense delete error:', e));
-    markIdDeleted('expenses', id);
 
     // Cascade to Delivery Orders: clear expenseId if linked
     setDeliveryOrders((prev) =>
@@ -3765,7 +3749,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       removed.forEach((m) => {
         removeDocument('moneyMovements', m.id);
         deleteItem('moneyMovements', m.id).catch(() => {});
-        markIdDeleted('moneyMovements', m.id);
       });
       return prev.filter((m) => m.referenceId !== id);
     });
@@ -3794,7 +3777,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setMoneyMovements((prev) => prev.filter((m) => m.id !== id));
     removeDocument('moneyMovements', id);
     deleteItem('moneyMovements', id).catch((e) => console.warn('IndexedDB moneyMovement delete error:', e));
-    markIdDeleted('moneyMovements', id);
 
     logAudit(
       'DELETE_MONEY_MOVEMENT',
@@ -4423,7 +4405,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setWhatsAppPreOrders((prev) => prev.filter((w) => w.id !== id));
     removeDocument('whatsAppPreOrders', id);
     deleteItem('whatsAppPreOrders', id).catch((e) => console.warn('IndexedDB whatsAppPreOrder delete error:', e));
-    markIdDeleted('whatsAppPreOrders', id);
     logAudit('DELETE_WHATSAPP_PREORDER', 'WhatsAppPreOrder', id, 'Staff', target ? `Deleted pre-order "${target.preOrderNo}".` : `Deleted pre-order ${id}.`);
     showToast({ title: 'Pre-Order Deleted', message: target ? `WhatsApp Pre-Order "${target.preOrderNo}" deleted.` : 'Pre-order deleted.', type: 'error' });
   };
@@ -4603,7 +4584,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setExpenses((prev) => prev.filter((e) => e.id !== idToRemove));
       removeDocument('expenses', idToRemove);
       deleteItem('expenses', idToRemove).catch((e) => console.warn('IndexedDB expense delete error:', e));
-      markIdDeleted('expenses', idToRemove);
       linkedExpenseId = undefined;
     }
 
@@ -4714,7 +4694,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setDeliveryOrders((prev) => prev.filter((d) => d.id !== id));
     removeDocument('deliveryOrders', id);
     deleteItem('deliveryOrders', id).catch((e) => console.warn('IndexedDB deliveryOrder delete error:', e));
-    markIdDeleted('deliveryOrders', id);
 
     if (target) {
       // If there was an auto-created expense linked to this delivery order, clean it up as well
@@ -4731,7 +4710,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setExpenses((prev) => prev.filter((e) => e.id !== linkedExpId));
         removeDocument('expenses', linkedExpId);
         deleteItem('expenses', linkedExpId).catch((e) => console.warn('IndexedDB expense delete error:', e));
-        markIdDeleted('expenses', linkedExpId);
       }
 
       logAudit(
@@ -4776,14 +4754,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setNotifications((prev) => prev.filter((n) => n.id !== id));
     removeDocument('notifications', id);
     deleteItem('notifications', id).catch(() => {});
-    markIdDeleted('notifications', id);
   };
 
   const clearNotifications = () => {
     notifications.forEach((n) => {
       removeDocument('notifications', n.id).catch(() => {});
       deleteItem('notifications', n.id).catch(() => {});
-      markIdDeleted('notifications', n.id);
     });
     setNotifications([]);
     localStorage.removeItem('idofera_notifications');

@@ -92,7 +92,6 @@ const UNSYNCED_ITEM_KEYS_STORAGE_KEY = 'idofera_unsynced_item_keys';
 const DISMISSED_UNSYNCED_KEYS_STORAGE_KEY = 'idofera_dismissed_unsynced_keys';
 const UNSYNCED_ITEM_VERSIONS_STORAGE_KEY = 'idofera_unsynced_item_versions';
 const D1_DIRTY_STORAGE_KEY = 'idofera_d1_dirty';
-export const REQUIRED_HEADER_SYNC_RECORDS = 1;
 
 // Inspect Changes categories use short labels while IndexedDB/D1 use store
 // names (deliveries <-> deliveryOrders, whatsapp <-> whatsAppPreOrders).
@@ -387,10 +386,6 @@ export function getUnsyncedLocalChangesCount(): number {
     safeSetLocalStorage(UNSYNCED_COUNT_KEY, String(count));
   }
   return count;
-}
-
-export function isHeaderSyncActivated(): boolean {
-  return true;
 }
 
 export function hasUnsyncedLocalChanges(): boolean {

@@ -88,21 +88,11 @@ export const SettingsView: React.FC = () => {
   const { isInstallable, isInstalled, isOnline, swRegistered, triggerInstall } = usePWAInstall();
   const {
     isSyncing: isCloudSyncing,
-    syncProgress: cloudSyncProgress,
-    stats: cloudSyncStats,
-    conflicts,
-    setIsConflictModalOpen,
-    isSyncButtonActive: isCloudSyncButtonActive,
-    isLiveSyncActive,
-    isQuotaExceeded,
-    syncMode,
-    toggleSyncMode,
     d1Health,
     pingD1Health,
     triggerSync: triggerCloudSync,
     triggerSyncAll,
     triggerD1Pull,
-    pullCentralRecords,
     triggerDriveSync,
     restoreDriveBackup,
     prepareDriveRestore,
@@ -285,9 +275,17 @@ export const SettingsView: React.FC = () => {
       if (isManualClick) {
         const total = Object.values(counts).reduce((acc: number, curr: number) => acc + curr, 0);
         const health = await pingD1Health({detail: true}).catch(() => null);
+        // Report the live relational tables the app actually reads. The
+        // document mirror count (totalDocuments) no longer tracks PATCHes and
+        // would drift until the next snapshot PUT, so it is not shown.
+        const relational = health?.relational ?? d1Health?.relational;
+        const d1Records = relational && relational.error === undefined
+          ? (['products', 'sales', 'customers', 'suppliers', 'saleItems'] as const)
+              .reduce((sum, key) => sum + Number(relational[key] || 0), 0)
+          : undefined;
         showToast({
           title: 'Database Record Counts Refreshed',
-          message: `IndexedDB: ${total} local records. Cloudflare D1: ${health?.totalDocuments ?? d1Health?.totalDocuments ?? 'Connected'} remote records.`,
+          message: `IndexedDB: ${total} local records. Cloudflare D1: ${d1Records ?? 'Connected'} live relational records.`,
           type: 'success',
         });
       }

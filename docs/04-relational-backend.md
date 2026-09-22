@@ -64,6 +64,10 @@ from the mirror for the unchanged re-push guard. After the D1 row-cost pass:
   deployed Worker is always relational-first with a document fallback.
 * **Auto-heal** — a fresh local DB (or a pre-ETL DB) is still backfilled once from
   `app_documents` instead of starting empty.
+* **The REST mirror-push script is gone** — `npm run d1:push`
+  (`scripts/push-to-d1.ts`) UPSERTed only `app_documents`, so after option B its
+  data would be invisible to every relational read. Refresh live data through a
+  snapshot PUT restore or the ETL import instead.
 
 Reads prefer relational; the mirror is a repair input and rollback snapshot, not the
 primary path.

@@ -8,8 +8,6 @@ import {
   getLastBackupFileName,
   getLastBackupTime,
   getUnsyncedLocalChangesCount,
-  isHeaderSyncActivated,
-  REQUIRED_HEADER_SYNC_RECORDS,
   clearUnsyncedLocalChanges,
   getUnsyncedItemKeys,
   captureUnsyncedItemVersions,
@@ -80,7 +78,6 @@ export function useCloudSync() {
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [hasDriveUnsynced, setHasDriveUnsynced] = useState<boolean>(hasUnsyncedLocalChanges());
   const [unsyncedRecordsCount, setUnsyncedRecordsCount] = useState<number>(getUnsyncedLocalChangesCount());
-  const [isHeaderSyncActive, setIsHeaderSyncActive] = useState<boolean>(isHeaderSyncActivated());
   const [lastDriveBackupFile, setLastDriveBackupFile] = useState<string | null>(getLastBackupFileName());
   const [lastDriveBackupTime, setLastDriveBackupTime] = useState<string | null>(getLastBackupTime());
   const [driveRestorePreview, setDriveRestorePreview] = useState<DriveRestorePreview | null>(null);
@@ -128,7 +125,6 @@ export function useCloudSync() {
     const unsub = subscribeGoogleDriveSync(() => {
       setHasDriveUnsynced(hasUnsyncedLocalChanges());
       setUnsyncedRecordsCount(getUnsyncedLocalChangesCount());
-      setIsHeaderSyncActive(isHeaderSyncActivated());
       setLastDriveBackupFile(getLastBackupFileName());
       setLastDriveBackupTime(getLastBackupTime());
       setDriveAuthStatus(getGoogleDriveAuthStatus());
@@ -389,27 +385,8 @@ export function useCloudSync() {
     d1Health,
     isCheckingHealth,
     pingD1Health,
-    syncMode: 'manual',
     isSyncing,
-    syncProgress: null,
-    stats: {
-      totalLocalRecords: 0,
-      unsyncedRecordsCount: unsyncedRecordsCount,
-      lastSyncTime: lastDriveBackupTime,
-      hasUnsynced: hasDriveUnsynced,
-    },
-    conflicts: [],
-    isConflictModalOpen: false,
-    setIsConflictModalOpen: (_open?: boolean) => {},
-    resolveConflict: () => {},
-    resolveAllConflicts: () => {},
-    createSimulatedConflict: () => {},
-    isSyncButtonActive: isHeaderSyncActive,
-    isHeaderSyncActive,
     unsyncedRecordsCount,
-    requiredRecordsForHeaderSync: REQUIRED_HEADER_SYNC_RECORDS,
-    isLiveSyncActive: false,
-    isQuotaExceeded: false,
     hasDriveUnsynced,
     lastDriveBackupFile,
     lastDriveBackupTime,
@@ -425,8 +402,5 @@ export function useCloudSync() {
     restoreDriveBackup,
     prepareDriveRestore,
     driveRestorePreview,
-    pullCentralRecords: triggerD1Pull,
-    toggleSyncMode: () => {},
-    refreshStats: async () => {},
   };
 }

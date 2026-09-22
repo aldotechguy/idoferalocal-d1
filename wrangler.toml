@@ -3,6 +3,10 @@ main = "sites-worker.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
+# Display-only: the health endpoint reports which bound D1 database answered.
+[vars]
+D1_DATABASE_ID = "3e95a550-a091-490b-819d-f0acb7ea8dd8"
+
 [triggers]
 crons = ["*/5 * * * *"]
 
@@ -47,6 +51,8 @@ binding = "MALL_IMAGES"
 bucket_name = "idomall"
 
 [env.mall.vars]
+# Display-only: the health endpoint reports which bound D1 database answered.
+D1_DATABASE_ID = "3a3eb157-5aa5-419a-a8ce-2eade2afc436"
 # Non-sensitive Mall config. Update MALL_PICKUP_ADDRESS and MALL_PICKUP_HOURS
 # to your real pickup location and hours before accepting orders.
 MALL_CHECKOUT_ENABLED = "true"

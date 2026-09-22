@@ -29,7 +29,6 @@ import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { useApp } from '../../context/AppContext';
 import { useCloudSync } from '../../hooks/useCloudSync';
-import { ConflictResolutionModal } from '../modals/ConflictResolutionModal';
 import { UserRole, Sale, UserProfile } from '../../types';
 import { NairaSign } from './NairaSign';
 import { UserModal } from '../modals/UserModal';
@@ -57,21 +56,9 @@ export const Header: React.FC<HeaderProps> = ({
     d1Health,
     isCheckingHealth,
     pingD1Health,
-    stats,
-    conflicts,
-    isConflictModalOpen,
-    setIsConflictModalOpen,
-    resolveConflict,
-    resolveAllConflicts,
-    isLiveSyncActive,
-    isQuotaExceeded,
-    syncMode,
     triggerSync,
     hasDriveUnsynced,
-    isHeaderSyncActive,
     unsyncedRecordsCount,
-    requiredRecordsForHeaderSync,
-    toggleSyncMode,
   } = useCloudSync();
   const [showNotifPopover, setShowNotifPopover] = useState(false);
   const [showUserDropdown, setShowUserDropdown] = useState(false);
@@ -492,19 +479,6 @@ export const Header: React.FC<HeaderProps> = ({
             isSyncing={isSyncing}
             onSync={triggerSync}
           />
-
-          {/* Sync Conflicts Badge Button (if conflicts exist) */}
-          {conflicts.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setIsConflictModalOpen(true)}
-              className="px-3 py-1.5 text-xs font-extrabold rounded-xl bg-amber-500/20 text-amber-600 dark:text-amber-300 border border-amber-500/50 hover:bg-amber-500/30 transition-all flex items-center gap-1.5 animate-pulse shadow-md shadow-amber-500/20 cursor-pointer"
-              title={`${conflicts.length} Sync Conflict(s) Pending — Click to resolve manually`}
-            >
-              <ShieldAlert className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400" />
-              <span>{conflicts.length} Conflict{conflicts.length > 1 ? 's' : ''}</span>
-            </button>
-          )}
 
           {/* Theme Toggle Button */}
           <button
@@ -928,15 +902,6 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
       )}
-
-      {/* Sync Conflict Resolution Dialog */}
-      <ConflictResolutionModal
-        isOpen={isConflictModalOpen}
-        onClose={() => setIsConflictModalOpen(false)}
-        conflicts={conflicts}
-        onResolve={resolveConflict}
-        onResolveAll={resolveAllConflicts}
-      />
     </header>
   );
 };

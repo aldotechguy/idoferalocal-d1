@@ -418,14 +418,6 @@ export async function syncLocalRecordsToD1(snapshot: D1Snapshot, requestedDeleti
   if (result.relationalSynced === false) {
     throw new Error('Records reached storage, but the live catalog update failed. Pending changes have been retained. Retry Sync Now; if it fails again, contact support.');
   }
-  // Legacy-compat no-op path: the mirror-less PATCH always reports
-  // skippedUnchanged 0, but an older server build may still report an
-  // all-unchanged batch — keep the revision, the snapshot guard, and the delta
-  // cursor exactly as they were so no client is forced into a full re-read.
-  if (Number(result.skippedUnchanged || 0) > 0 && Number(result.upserted || 0) === 0 && (result.deleted || 0) === 0) {
-    localStorage.setItem(DIRTY_KEY, 'false');
-    return result;
-  }
   localStorage.setItem(REVISION_KEY, String(result.revision));
   rememberSnapshotGuard(result.revision, 'relational');
   // The server clock seeds the delta watermark: a client clock must not bound a read.
@@ -644,6 +636,16 @@ export interface D1HealthStatus {
   revision: number;
   /** Absent unless the probe requested `detail`; counting costs a full scan. */
   totalDocuments?: number;
+  /**
+   * Live per-table relational counts, `detail` probes only. This is the store
+   * the app reads; `totalDocuments` counts the document mirror, which PATCHes
+   * no longer refresh (option B) and therefore drifts until the next snapshot
+   * PUT, so UIs should prefer these counts.
+   */
+  relational?: {
+    products?: number; sales?: number; customers?: number; suppliers?: number; saleItems?: number;
+    tables?: number; error?: string;
+  };
   endpoint: string;
   error?: string;
   status: 'healthy' | 'degraded' | 'offline' | 'error';
@@ -698,6 +700,7 @@ export async function checkD1Health(detail = false): Promise<D1HealthStatus> {
         databaseId: data.databaseId || fallbackDbId,
         revision: Number(data.revision || 0),
         totalDocuments: data.totalDocuments === undefined ? undefined : Number(data.totalDocuments),
+        relational: data.relational,
         endpoint: data.endpoint || 'Cloudflare D1 Primary Edge',
         status: latencyMs > 3000 ? 'degraded' : 'healthy',
         remoteSync: data.remoteSync,
@@ -736,6 +739,7 @@ export async function checkD1Health(detail = false): Promise<D1HealthStatus> {
             databaseId: data.databaseId || fallbackDbId,
             revision: Number(data.revision || 0),
             totalDocuments: Number(data.totalDocuments || 0),
+            relational: data.relational,
             endpoint: data.endpoint || 'Cloudflare D1 Primary Edge',
             status: 'healthy',
           };

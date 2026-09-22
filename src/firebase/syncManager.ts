@@ -1,47 +1,10 @@
 import { broadcastTabChange, subscribeTabSync } from './services';
-import { SyncConflict } from '../types';
 
+/**
+ * The legacy Firebase live-sync manager is gone — the app syncs through the
+ * storage API (PATCH micro-batches + snapshot reads). The only piece that is
+ * still live is the cross-tab change broadcast, kept here so two open tabs of
+ * the same store re-read each other's IndexedDB writes.
+ */
 export { broadcastTabChange, subscribeTabSync };
 
-export interface SyncProgress {
-  totalStores: number;
-  completedStores: number;
-  currentStore: string;
-  statusText: string;
-}
-
-export interface SyncStats {
-  totalLocalRecords: number;
-  unsyncedRecordsCount: number;
-  hasUnsynced: boolean;
-}
-
-export function isQuotaExceeded(): boolean {
-  return false;
-}
-
-export function isQuotaError(err: any): boolean {
-  return false;
-}
-
-export function markQuotaExceeded(): void {}
-
-export function markIdDeleted(storeName: string, id: string): void {}
-
-export async function runStartupSyncProtocol(onProgress?: (progress: SyncProgress) => void): Promise<{ success: boolean; syncedCount: number }> {
-  return { success: true, syncedCount: 0 };
-}
-
-export async function triggerManualSync(onProgress?: (progress: SyncProgress) => void): Promise<{ success: boolean; syncedCount: number }> {
-  return { success: true, syncedCount: 0 };
-}
-
-export function subscribeCloudDataMerged(callback: (data: any) => void): () => void {
-  return () => {};
-}
-
-export function subscribeConflicts(callback: (conflicts: SyncConflict[]) => void): () => void {
-  return () => {};
-}
-
-export function resolveConflict(conflictId: string, choice: 'local' | 'cloud'): void {}
