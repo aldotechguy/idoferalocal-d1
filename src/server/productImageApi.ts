@@ -7,6 +7,7 @@
  */
 import type { MallExecutor } from './mallApi.js';
 import type { StaffActor } from './mallOrderAdminApi.js';
+import { s } from './relationalMapper.js';
 import {
   IMAGE_CACHE_CONTROL, decodeBase64Image, imageKeyFromUrl, imageResponse,
   imageUrl, newProductImageKey, type ImageStore,
@@ -43,12 +44,17 @@ export async function handleStaffProductImageApi(
       const key = imageKeyFromUrl(url.searchParams.get('url'));
       if (!key) fail(400, 'Only images uploaded to this store can be deleted.');
       await store.remove(key);
+      // Storage keys are `products/<month>/<uuid>.<ext>`, so the old
+      // `key.split('/')[1]` recorded the month folder as the audit entity id.
+      // Look up which product still references the URL instead (delete is rare,
+      // so one bounded scan is fine).
+      const referers = await exec.queryAll('SELECT id FROM products WHERE images_json LIKE ? LIMIT 1', [`%${key}%`]);
       await exec.runBatch([{
         sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'DELETE_PRODUCT_IMAGE', 'Product', ?, ?, ?)`,
-        params: [crypto.randomUUID(), actor.id, key.split('/')[1] || null,
+        params: [crypto.randomUUID(), actor.id, s(referers[0]?.id) || null,
           `${actor.displayName} deleted stored image ${key}.`, new Date().toISOString()],
       }]);
-      return json({ ok: true, deleted: imageUrl(key) });
+      return json({ ok: true, deleted: imageUrl(key), productId: s(referers[0]?.id) || undefined });
     }
 
     if (request.method !== 'POST') fail(405, 'Only POST or DELETE is supported.');

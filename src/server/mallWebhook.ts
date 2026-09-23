@@ -308,6 +308,13 @@ export function emailTemplate(params: {
   occurredAt?: string;
   instructions?: Record<string, unknown>;
 }): string {
+  // Buyer-controlled fields (customerName, orderNo, phone) are interpolated into
+  // HTML here, so they are escaped exactly like the customer template. Without
+  // escaping, a name like "Ada <script>" injected arbitrary HTML into the
+  // operator's transactional email — a spoofing/phishing vector into the
+  // account that fulfils orders.
+  const escapes: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  const esc = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, (ch) => escapes[ch] || ch);
   const fmt = (v: string | undefined) => v ? String(v).replace(/_/g, ' ') : '—';
 
   return `<!DOCTYPE html>
@@ -315,17 +322,17 @@ export function emailTemplate(params: {
 <head><meta charset="utf-8"><style>${EMAIL_CSS}</style></head>
 <body>
  <div class="container">
-    <div class="header"><h1>${params.label} — Order ${params.orderNo}</h1></div>
+    <div class="header"><h1>${esc(params.label)} — Order ${esc(params.orderNo)}</h1></div>
     <div class="body">
       <table>
-        <tr><td>Event</td><td>${params.event}</td></tr>
-        <tr><td>Order #</td><td>${params.orderNo}</td></tr>
-        <tr><td>Customer</td><td>${params.customerName}</td></tr>
-        <tr><td>Phone</td><td>${params.customerPhone}</td></tr>
-        <tr><td>Total</td><td>${params.totalNgn}</td></tr>
-        <tr><td>Order Status</td><td>${fmt(params.status)}</td></tr>
-        <tr><td>Payment</td><td>${fmt(params.paymentMethod)} — ${fmt(params.paymentStatus)}</td></tr>
-        <tr><td>Occurred At</td><td>${params.occurredAt || '—'}</td></tr>
+        <tr><td>Event</td><td>${esc(params.event)}</td></tr>
+        <tr><td>Order #</td><td>${esc(params.orderNo)}</td></tr>
+        <tr><td>Customer</td><td>${esc(params.customerName)}</td></tr>
+        <tr><td>Phone</td><td>${esc(params.customerPhone)}</td></tr>
+        <tr><td>Total</td><td>${esc(params.totalNgn)}</td></tr>
+        <tr><td>Order Status</td><td>${esc(fmt(params.status))}</td></tr>
+        <tr><td>Payment</td><td>${esc(fmt(params.paymentMethod))} — ${esc(fmt(params.paymentStatus))}</td></tr>
+        <tr><td>Occurred At</td><td>${esc(params.occurredAt || '—')}</td></tr>
       </table>
     </div>
     <div class="footer">This is an automated notification from the Mall system. Do not reply to this email.</div>

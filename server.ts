@@ -126,26 +126,44 @@ async function ensureRelationalBackfill(): Promise<{ statements: number; documen
   if (!USE_RELATIONAL) return empty;
   const tx = makeNodeAdapter(db);
   if (await relationalHasData(tx.queryAll)) return empty;
-  let rows: any[] = [];
+  // Keyset-paginated so the legacy bridge never pulls every document payload
+  // into memory at once (unbounded on a large restored document store).
+  const CHUNK = 500;
+  const select = "SELECT owner_id, collection, document_id, payload, updated_at FROM app_documents";
+  const order = " ORDER BY owner_id, collection, document_id LIMIT ?";
+  const after = " WHERE (owner_id, collection, document_id) > (?, ?, ?)";
+  let statements = 0;
+  let documents = 0;
+  let skipped = 0;
+  let cursor: string[] | null = null;
   try {
-    rows = db
-      .prepare("SELECT owner_id, collection, payload, updated_at FROM app_documents ORDER BY updated_at")
-      .all() as any[];
+    for (;;) {
+      const list = cursor
+        ? (db.prepare(`${select}${after}${order}`).all(...cursor, CHUNK) as any[])
+        : (db.prepare(`${select}${order}`).all(CHUNK) as any[]);
+      if (!list.length) break;
+      const { stmts, skipped: chunkSkipped } = backfillStatementsFromDocumentRows(list, new Date().toISOString());
+      db.exec("BEGIN TRANSACTION;");
+      try {
+        for (const st of stmts) tx.run(st.sql, st.params);
+        db.exec("COMMIT;");
+      } catch (e) {
+        try { db.exec("ROLLBACK;"); } catch {}
+        throw e;
+      }
+      statements += stmts.length;
+      documents += list.length;
+      skipped += chunkSkipped;
+      const last = list[list.length - 1];
+      cursor = [String(last.owner_id ?? ""), String(last.collection), String(last.document_id)];
+      if (list.length < CHUNK) break;
+    }
   } catch {
     return empty;
   }
-  if (!rows.length) return empty;
-  const { stmts, skipped } = backfillStatementsFromDocumentRows(rows, new Date().toISOString());
-  db.exec("BEGIN TRANSACTION;");
-  try {
-    for (const st of stmts) tx.run(st.sql, st.params);
-    db.exec("COMMIT;");
-  } catch (e) {
-    try { db.exec("ROLLBACK;"); } catch {}
-    throw e;
-  }
-  console.log(`Relational backfill: ${stmts.length} statements from ${rows.length} documents (${skipped} skipped).`);
-  return { statements: stmts.length, documents: rows.length, skipped };
+  if (!documents) return empty;
+  console.log(`Relational backfill: ${statements} statements from ${documents} documents (${skipped} skipped).`);
+  return { statements, documents, skipped };
 }
 
 // Initialize schema with corruption protection
@@ -367,12 +385,16 @@ async function ensureBusinessDataOwner() {
   const legacy = db.prepare("SELECT owner_id FROM app_documents WHERE owner_id != ? GROUP BY owner_id ORDER BY COUNT(*) DESC LIMIT 1").get(BUSINESS_OWNER_ID) as any;
   const legacyOwner = legacy?.owner_id;
   if (!legacyOwner) return;
-  db.exec(`
+  // Parameterized: owner ids come from stored rows, and a single quote inside
+  // one would have broken (or worse, rewritten) the interpolated SQL.
+  db.prepare(`
     INSERT OR IGNORE INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-    SELECT '${BUSINESS_OWNER_ID}', collection, document_id, payload, updated_at FROM app_documents WHERE owner_id = '${legacyOwner}';
+    SELECT ?, collection, document_id, payload, updated_at FROM app_documents WHERE owner_id = ?
+  `).run(BUSINESS_OWNER_ID, legacyOwner);
+  db.prepare(`
     INSERT OR IGNORE INTO sync_revisions (owner_id, revision, updated_at)
-    SELECT '${BUSINESS_OWNER_ID}', revision, updated_at FROM sync_revisions WHERE owner_id = '${legacyOwner}';
-  `);
+    SELECT ?, revision, updated_at FROM sync_revisions WHERE owner_id = ?
+  `).run(BUSINESS_OWNER_ID, legacyOwner);
 }
 ensureBusinessDataOwner().catch(console.error);
 
@@ -459,7 +481,12 @@ app.post("/api/auth/login", async (req, res) => {
       return res.status(400).json({ error: "Email/username and password are required." });
     }
 
-    const stmt = db.prepare("SELECT * FROM app_users WHERE lower(email) = ? OR lower(username) = ? LIMIT 1");
+    // Emails are stored lowercased at every write, so a direct (indexable)
+    // email seek replaces lower(email) = ?, which forced a full table scan per
+    // login attempt. Usernames are NOT normalized on write, so their
+    // case-insensitive match keeps the lower() wrapper (the users table is
+    // small; the email seek is the hot path).
+    const stmt = db.prepare("SELECT * FROM app_users WHERE email = ? OR lower(username) = ? LIMIT 1");
     const user = stmt.get(identifier, identifier) as any;
     if (!user || user.status !== "Active") {
       return res.status(401).json({ error: "Invalid credentials or inactive account." });
@@ -572,6 +599,16 @@ app.put("/api/auth/users", async (req, res) => {
     }
 
     const existing = db.prepare("SELECT * FROM app_users WHERE id = ?").get(id) as any;
+    // Same guard as /api/auth/password: a regular Administrator must never be able
+    // to rewrite the super administrator's profile — this upsert would otherwise
+    // let them reset the super-admin password (and with it take over the account)
+    // or point the protected identity at their own email.
+    if (existing?.is_super_admin && !actor.is_super_admin) {
+      return res.status(403).json({ error: "Only the super administrator can modify this account." });
+    }
+    if (existing?.is_protected && !actor.is_super_admin) {
+      return res.status(403).json({ error: "Only the super administrator can modify this protected account." });
+    }
     const password = String(req.body?.password || input.password || "");
 
     if (!existing && password.length < 8) {
@@ -624,6 +661,13 @@ app.put("/api/auth/users", async (req, res) => {
       input.lastLogin || existing?.last_login || null,
       changedAt
     );
+
+    // A password change on another account must revoke that account's sessions,
+    // exactly like /api/auth/password does — otherwise the old sessions survive
+    // the reset and the takeover is never fully revoked.
+    if (password && existing && id !== actor.id) {
+      db.prepare("DELETE FROM app_sessions WHERE user_id = ?").run(id);
+    }
 
     return res.json({ ok: true });
   } catch (error: any) {

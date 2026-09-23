@@ -42,10 +42,16 @@ export function coreUpsert(collection: string, document: any): SqlStmt[] | null 
         upsert('products', row, 'id', syncCols(row)),
       ];
     }
-    case 'customers':
-      return [upsert('customers', customerToRow(document, new Date().toISOString()), 'id', syncCols(customerToRow(document, new Date().toISOString())))];
-    case 'suppliers':
-      return [upsert('suppliers', supplierToRow(document, new Date().toISOString()), 'id', syncCols(supplierToRow(document, new Date().toISOString())))];
+    case 'customers': {
+      // Compute the row once: the old form built it twice per upsert (once for
+      // the insert, once for the sync-column list).
+      const row = customerToRow(document, new Date().toISOString());
+      return [upsert('customers', row, 'id', syncCols(row))];
+    }
+    case 'suppliers': {
+      const row = supplierToRow(document, new Date().toISOString());
+      return [upsert('suppliers', row, 'id', syncCols(row))];
+    }
     case 'sales': {
       const { header, lines } = saleToRows(document);
       const stmts: SqlStmt[] = [upsert('sales', header, 'id', syncCols(header))];

@@ -280,10 +280,12 @@ async function emptyRelational(env: Env): Promise<boolean> {
 /**
  * Phase 4 bridge (edge) — when the relational tables are empty but legacy
  * app_documents rows exist (fresh database, or the pre-ETL prod D1), project the
- * documents once. Chunked so it stays inside D1 limits. `relationalBackfilled` is a
- * per-isolate cache of "this isolate already checked", never proof that the bound
- * database still holds rows: the read path below still falls back to documents when
- * a relational read comes back empty.
+ * documents once. The read is keyset-paginated (the old single query pulled
+ * every document payload into isolate memory at once, which is unbounded on a
+ * large legacy D1); the writes are chunked to stay inside D1 batch limits.
+ * `relationalBackfilled` is a per-isolate cache of "this isolate already
+ * checked", never proof that the bound database still holds rows: the read path
+ * below still falls back to documents when a relational read comes back empty.
  */
 async function ensureRelationalBackfill(env: Env): Promise<{ documents: number; statements: number; skipped: number }> {
   const none = { documents: 0, statements: 0, skipped: 0 };
@@ -292,15 +294,33 @@ async function ensureRelationalBackfill(env: Env): Promise<{ documents: number; 
     relationalBackfilled = true;
     return none;
   }
-  const rows = await env.DB.prepare(
-    'SELECT owner_id, collection, payload, updated_at FROM app_documents ORDER BY owner_id, collection, document_id',
-  ).bind().all<{ collection: string; payload: string; owner_id?: string; updated_at?: number }>();
-  const list = rows.results || [];
-  if (!list.length) return none;
-  const { stmts, skipped } = backfillStatementsFromDocumentRows(list, new Date().toISOString());
-  await runStatements(env, toD1Statements(env, stmts));
+  const CHUNK = 500;
+  const select = 'SELECT owner_id, collection, document_id, payload, updated_at FROM app_documents';
+  const order = ' ORDER BY owner_id, collection, document_id LIMIT ?';
+  const after = ' WHERE (owner_id, collection, document_id) > (?, ?, ?)';
+  let documents = 0;
+  let statements = 0;
+  let skipped = 0;
+  let cursor: string[] | null = null;
+  for (;;) {
+    const rows = cursor
+      ? await env.DB.prepare(`${select}${after}${order}`).bind(...cursor, CHUNK)
+        .all<{ collection: string; document_id: string; payload: string; owner_id?: string; updated_at?: number }>()
+      : await env.DB.prepare(`${select}${order}`).bind(CHUNK)
+        .all<{ collection: string; document_id: string; payload: string; owner_id?: string; updated_at?: number }>();
+    const list = rows.results || [];
+    if (!list.length) break;
+    const { stmts, skipped: chunkSkipped } = backfillStatementsFromDocumentRows(list, new Date().toISOString());
+    await runStatements(env, toD1Statements(env, stmts));
+    documents += list.length;
+    statements += stmts.length;
+    skipped += chunkSkipped;
+    const last = list[list.length - 1];
+    cursor = [String(last.owner_id ?? ''), String(last.collection), String(last.document_id)];
+    if (list.length < CHUNK) break;
+  }
   relationalBackfilled = true;
-  return { documents: list.length, statements: stmts.length, skipped };
+  return { documents, statements, skipped };
 }
 
 async function seedUser(env: Env, user: { id: string; email: string; username: string; displayName: string; password: string; superAdmin: boolean }) {
@@ -360,7 +380,11 @@ async function authLogin(request: Request, env: Env) {
   const identifier = String(body?.identifier || '').trim().toLowerCase();
   const password = String(body?.password || '');
   if (!identifier || !password) return json({ error: 'Email/username and password are required.' }, 400);
-  const rows = await env.DB.prepare('SELECT * FROM app_users WHERE lower(email) = ? OR lower(username) = ? LIMIT 1')
+  // Emails are stored lowercased at every write, so a direct (indexable) email
+  // seek replaces lower(email) = ?, which forced a full table scan per login
+  // attempt. Usernames are NOT normalized on write, so their case-insensitive
+  // match keeps the lower() wrapper.
+  const rows = await env.DB.prepare('SELECT * FROM app_users WHERE email = ? OR lower(username) = ? LIMIT 1')
     .bind(identifier, identifier).all<AppUserRow>();
   const user = rows.results?.[0];
   if (!user || user.status !== 'Active') return json({ error: 'Invalid credentials or inactive account.' }, 401);
@@ -435,6 +459,12 @@ async function upsertAuthUser(request: Request, env: Env) {
   if (!id || !input.email || !input.displayName) return json({ error: 'User id, email, and display name are required.' }, 400);
   const existingRows = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(id).all<AppUserRow>();
   const existing = existingRows.results?.[0];
+  // Same guard as changeAuthPassword: a regular Administrator must never be able
+  // to rewrite the super administrator's profile — the upsert would otherwise
+  // let them reset the super-admin password (and with it take over the account)
+  // or point the protected identity at their own email.
+  if (existing?.is_super_admin && !actor.is_super_admin) return json({ error: 'Only the super administrator can modify this account.' }, 403);
+  if (existing?.is_protected && !actor.is_super_admin) return json({ error: 'Only the super administrator can modify this protected account.' }, 403);
   const password = String(body?.password || input.password || '');
   if (!existing && password.length < 8) return json({ error: 'A password of at least 8 characters is required.' }, 400);
   let salt = existing?.password_salt || randomHex(16);
@@ -447,6 +477,12 @@ async function upsertAuthUser(request: Request, env: Env) {
   await env.DB.prepare(
     'INSERT INTO app_users (id, email, username, display_name, role, status, avatar_url, password_hash, password_salt, password_iterations, is_super_admin, is_protected, created_at, last_login, password_last_changed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, username=excluded.username, display_name=excluded.display_name, role=excluded.role, status=excluded.status, avatar_url=excluded.avatar_url, password_hash=excluded.password_hash, password_salt=excluded.password_salt, password_iterations=excluded.password_iterations, last_login=excluded.last_login, password_last_changed=excluded.password_last_changed',
   ).bind(id, String(input.email).toLowerCase(), input.username || null, input.displayName, input.role || 'Sales Staff', input.status || 'Active', input.avatarUrl || null, hash, salt, PASSWORD_ITERATIONS, existing?.is_super_admin || 0, existing?.is_protected || 0, input.createdAt || existing?.created_at || new Date().toISOString(), input.lastLogin || existing?.last_login || null, changedAt).run();
+  // A password change on another account must revoke that account's sessions,
+  // exactly like changeAuthPassword does — otherwise the old sessions survive
+  // the reset and the takeover is never fully revoked.
+  if (password && existing && id !== actor.id) {
+    await env.DB.prepare('DELETE FROM app_sessions WHERE user_id = ?').bind(id).run();
+  }
   return json({ ok: true });
 }
 
@@ -703,21 +739,29 @@ async function patchRecords(request: Request, env: Env) {
   const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
     .bind(ownerId).all<{ revision: number }>();
   const revision = Math.max(now, Number(revisions.results?.[0]?.revision || 0) + 1);
+  // Write the relational rows FIRST and only bump the revision when they are
+  // actually in place. Bumping first (the old order) meant a failed relational
+  // batch still answered ok:true with a moved revision: the client acked its
+  // keys and never retried, while the revision-guarded full read 304'd the
+  // pre-write world — the record was lost on every device. A failure now leaves
+  // the revision untouched and answers 5xx, so the client keeps its dirty keys
+  // and retries.
+  try {
+    await runStatements(env, toD1Statements(env, relationalStmts));
+  } catch (error) {
+    const relationalError = error instanceof Error ? error.message : String(error);
+    console.warn('Relational record write failed:', relationalError);
+    return json({
+      error: 'The live catalog update failed; no records were written and the revision is unchanged. Retry the sync.',
+      relationalError,
+    }, 500);
+  }
   await runStatements(env, [env.DB.prepare(
     'INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?) ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at',
   ).bind(ownerId, revision, now)]);
   // Product writes change the catalog facet lists; drop the in-memory cache so
   // the next catalog request rebuilds the counts including this write.
   invalidateMallFacetCache();
-  let relationalSynced = true;
-  let relationalError: string | undefined;
-  try {
-    await runStatements(env, toD1Statements(env, relationalStmts));
-  } catch (error) {
-    relationalSynced = false;
-    relationalError = error instanceof Error ? error.message : String(error);
-    console.warn('Relational record write failed:', relationalError);
-  }
   return json({
     ok: true,
     revision,
@@ -728,8 +772,7 @@ async function patchRecords(request: Request, env: Env) {
     skippedUnchanged: 0,
     backend: 'relational',
     relationalStatements: relationalStmts.length,
-    relationalSynced,
-    relationalError,
+    relationalSynced: true,
   });
 }
 

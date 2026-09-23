@@ -3,6 +3,16 @@ export const ENTRANCE_SECONDS = 300;
 type Query = (sql: string, params: any[]) => Promise<any[]>;
 const schema = 'CREATE TABLE IF NOT EXISTS staff_entrances (token_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL)';
 
+/**
+ * The schema statement is idempotent, but it still costs a D1 statement (and a
+ * distributed-systems write gate) on EVERY gated request — hasEntrance ran it
+ * behind every staff page load and private API call. It now runs only on the
+ * rare operations (issue/revoke); the hot read treats a missing table as "no
+ * entrance", which is exactly what it means on a database where no entrance
+ * has been issued yet.
+ */
+const noSuchTable = (error: unknown) => /no such table/i.test(String((error as Error)?.message ?? error));
+
 export function isStaffPage(path: string) {
   return /^\/(labs|app)(\/|$)/.test(path);
 }
@@ -36,9 +46,16 @@ export async function issueEntrance(query: Query) {
 export async function hasEntrance(cookie: string, query: Query) {
   const token = tokenFromCookie(cookie);
   if (!/^[a-f0-9-]{72}$/.test(token)) return false;
-  await query(schema, []);
-  const rows = await query('SELECT expires_at FROM staff_entrances WHERE token_hash = ? AND expires_at > ?', [await hash(token), Date.now()]);
-  return rows.length > 0;
+  try {
+    const rows = await query('SELECT expires_at FROM staff_entrances WHERE token_hash = ? AND expires_at > ?', [await hash(token), Date.now()]);
+    return rows.length > 0;
+  } catch (error) {
+    // No entrance has ever been issued against this database (or the table was
+    // just recreated), so there is nothing to accept. A missing table must not
+    // 500 the staff gate, and must not pay a DDL statement per gated request.
+    if (noSuchTable(error)) return false;
+    throw error;
+  }
 }
 export async function revokeEntrance(cookie: string, query: Query) {
   const token = tokenFromCookie(cookie);
