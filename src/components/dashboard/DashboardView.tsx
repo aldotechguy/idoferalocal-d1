@@ -176,14 +176,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
 
   const profitMarginPct = monthlyRevenue > 0 ? ((monthlyNetProfit / monthlyRevenue) * 100).toFixed(1) : '0.0';
 
-  // Dynamic 7-day Real-Time Sales Trend Data
-  const last7Days = Array.from({ length: 7 }, (_, i) => {
+  // Dynamic 7-day Real-Time Sales Trend Data. Memoized on the local day key so
+  // the trend memo below actually caches within a day (it was a fresh array on
+  // every render, which defeated that memo).
+  const last7Days = useMemo(() => Array.from({ length: 7 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - (6 - i));
     const isoDate = localIsoDate(d);
     const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
     return { isoDate, name: dayName };
-  });
+  }), [todayStr]);
 
   // The 7-day trend scanned validSales 7 times on EVERY render (the whole
   // metrics block was unmemoized); it now recomputes only when sales or the
@@ -230,7 +232,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const maxRecentSaleTotal = useMemo(() => {
     const topSlice = sales.slice(0, 4);
     if (topSlice.length === 0) return 1;
-    return Math.max(...topSlice.map((s) => s.totalAmount), 1);
+    // Number() guard: a legacy record with a string/NaN total used to poison
+    // Math.max into NaN, which blanked the bar chart scaling.
+    return topSlice.reduce((max, s) => Math.max(max, Number(s.totalAmount) || 0), 1);
   }, [sales]);
 
   return (

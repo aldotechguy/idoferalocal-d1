@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   uploadD1BackupToDrive,
   restoreFromLatestDriveBackup,
@@ -89,7 +89,7 @@ export function useCloudSync() {
 
   const { showToast } = useToast();
 
-  const pingD1Health = async (options?: {detail?: boolean; force?: boolean}): Promise<D1HealthStatus> => {
+  const pingD1Health = useCallback(async (options?: {detail?: boolean; force?: boolean}): Promise<D1HealthStatus> => {
     const detail = Boolean(options?.detail);
     const force = Boolean(options?.force);
     setIsCheckingHealth(true);
@@ -117,7 +117,7 @@ export function useCloudSync() {
     } finally {
       setIsCheckingHealth(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     const unsub = subscribeGoogleDriveSync(() => {
@@ -220,7 +220,7 @@ export function useCloudSync() {
       window.removeEventListener('online', handleOnline);
     };
   }, [flushAutoSync]);
-  const triggerDriveSync = async () => {
+  const triggerDriveSync = useCallback(async () => {
     if (isSyncing) return;
 
     if (!navigator.onLine) {
@@ -250,9 +250,9 @@ export function useCloudSync() {
     } finally {
       setIsSyncing(false);
     }
-  };
+  }, [isSyncing, showToast]);
 
-  const triggerD1Sync = async (forceFull = false) => {
+  const triggerD1Sync = useCallback(async (forceFull = false) => {
     if (isSyncing) return;
     if (!navigator.onLine) {
       showToast({title: 'Offline Mode', message: 'Cannot synchronize with Cloudflare D1 while offline.', type: 'warning'});
@@ -292,9 +292,9 @@ export function useCloudSync() {
     } finally {
       setIsSyncing(false);
     }
-  };
+  }, [isSyncing, showToast, pingD1Health]);
 
-  const triggerD1Pull = async () => {
+  const triggerD1Pull = useCallback(async () => {
     if (isSyncing) return;
     if (!navigator.onLine) {
       showToast({title: 'Offline Mode', message: 'Cannot pull from Cloudflare D1 while offline.', type: 'warning'});
@@ -309,10 +309,10 @@ export function useCloudSync() {
     } finally {
       setIsSyncing(false);
     }
-  };
+  }, [isSyncing, showToast]);
 
   // Trigger Google Drive Backup Restore
-  const prepareDriveRestore = async (): Promise<DriveRestorePreview | null> => {
+  const prepareDriveRestore = useCallback(async (): Promise<DriveRestorePreview | null> => {
     if (isSyncing) return null;
     if (!navigator.onLine) {
       showToast({title: 'Offline Mode', message: 'Cannot inspect a Drive backup while offline.', type: 'warning'});
@@ -332,9 +332,9 @@ export function useCloudSync() {
     } finally {
       setIsSyncing(false);
     }
-  };
+  }, [isSyncing, showToast, pingD1Health]);
 
-  const restoreDriveBackup = async () => {
+  const restoreDriveBackup = useCallback(async () => {
     if (isSyncing) return;
 
     if (!navigator.onLine) {
@@ -373,9 +373,9 @@ export function useCloudSync() {
     } finally {
       setIsSyncing(false);
     }
-  };
+  }, [isSyncing, showToast, pingD1Health]);
 
-  return {
+  return useMemo(() => ({
     isOnline,
     isNetworkGood: Boolean(d1Health ? d1Health.connected : isOnline),
     d1Health,
@@ -398,5 +398,7 @@ export function useCloudSync() {
     restoreDriveBackup,
     prepareDriveRestore,
     driveRestorePreview,
-  };
+  }), [isOnline, d1Health, isCheckingHealth, pingD1Health, isSyncing, unsyncedRecordsCount, hasDriveUnsynced,
+    lastDriveBackupFile, lastDriveBackupTime, driveAuthStatus, isDriveAuthModalOpen,
+    triggerD1Sync, triggerD1Pull, triggerDriveSync, restoreDriveBackup, prepareDriveRestore, driveRestorePreview]);
 }
