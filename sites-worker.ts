@@ -575,28 +575,33 @@ async function saveSnapshot(request: Request, env: Env) {
     ).bind(ownerId, revision, now),
   );
 
-  await runStatements(env, statements);
-  // A snapshot restore can replace every product; drop the catalog facet cache.
-  invalidateMallFacetCache();
-  // Document mirror is authoritative for the revision; a relational failure is reported, not fatal.
-  let relationalSynced = true;
-  let relationalError: string | undefined;
+  // The relational tables are what every read serves, so write them FIRST and
+  // refuse to move the revision if they fail. The old order wrote the document
+  // mirror and bumped the revision, then reported a relational failure as a
+  // non-fatal warning while answering ok:true — a client that restored a
+  // snapshot then re-read with the new revision would be told 304 and keep
+  // serving the pre-restore catalog.
   try {
     await runStatements(env, toD1Statements(env, relationalStmts));
     relationalBackfilled = true;
   } catch (error) {
-    relationalSynced = false;
-    relationalError = error instanceof Error ? error.message : String(error);
-    console.warn('Relational snapshot mirror failed:', relationalError);
+    const relationalError = error instanceof Error ? error.message : String(error);
+    console.warn('Relational snapshot write failed:', relationalError);
+    return json({
+      error: 'The snapshot could not be written to the live catalog; nothing was replaced and the revision is unchanged. Retry the restore.',
+      relationalError,
+    }, 500);
   }
+  await runStatements(env, statements);
+  // A snapshot restore can replace every product; drop the catalog facet cache.
+  invalidateMallFacetCache();
   return json({
     ok: true,
     revision,
     collections: Object.keys(body.stores).filter((name) => ALLOWED_STORES.has(name)),
     backend: 'relational',
     relationalStatements: relationalStmts.length,
-    relationalSynced,
-    relationalError,
+    relationalSynced: true,
   });
 }
 

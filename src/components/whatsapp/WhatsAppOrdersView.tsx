@@ -335,8 +335,9 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
       products.forEach((p) => {
         if (p.name && rawText && rawText.toLowerCase().includes(p.name.toLowerCase())) {
           const availStock = Math.max(0, p.currentStock);
+          // An out-of-stock product must not become a zero-quantity line item.
+          if (availStock < 1) { hasStockCapped = true; return; }
           const initialQty = Math.min(1, availStock);
-          if (availStock < 1) hasStockCapped = true;
 
           const isWholesale = initialQty >= p.minWholesaleQty;
           const unitPrice = isWholesale ? p.wholesalePrice : p.retailPrice;

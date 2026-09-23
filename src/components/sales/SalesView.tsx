@@ -392,22 +392,38 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
       } else if (s.paymentMethod === 'Mobile Transfer') {
         mobileTransferTotal += paid;
         mobileTransferTxCount += 1;
-      } else if (s.paymentMethod === 'Split' && s.notes) {
-        // Parse split details if recorded in format "Split Payment breakdown: Cash: ₦100, Mobile Transfer: ₦200" or similar
-        const cashMatch = s.notes.match(/Cash:\s*[^0-9]*([\d,]+(\.\d+)?)/i);
-        if (cashMatch && cashMatch[1]) {
-          const val = parseFloat(cashMatch[1].replace(/,/g, ''));
-          if (!isNaN(val)) {
-            cashTotal += val;
+      } else if (s.paymentMethod === 'Split') {
+        // Trust the structured breakdown the till wrote at checkout; it is the
+        // authoritative record and round-trips through relational storage. Only
+        // legacy sales without it fall back to parsing the free-text note.
+        const breakdown = s.paymentBreakdown;
+        if (breakdown && Object.keys(breakdown).length > 0) {
+          const cash = Number(breakdown.Cash) || 0;
+          if (cash > 0) {
+            cashTotal += cash;
             cashTxCount += 1;
           }
-        }
-        const transferMatch = s.notes.match(/Mobile Transfer:\s*[^0-9]*([\d,]+(\.\d+)?)/i);
-        if (transferMatch && transferMatch[1]) {
-          const val = parseFloat(transferMatch[1].replace(/,/g, ''));
-          if (!isNaN(val)) {
-            mobileTransferTotal += val;
+          const transfer = Number(breakdown['Mobile Transfer']) || 0;
+          if (transfer > 0) {
+            mobileTransferTotal += transfer;
             mobileTransferTxCount += 1;
+          }
+        } else if (s.notes) {
+          const cashMatch = s.notes.match(/Cash:\s*[^0-9]*([\d,]+(\.\d+)?)/i);
+          if (cashMatch && cashMatch[1]) {
+            const val = parseFloat(cashMatch[1].replace(/,/g, ''));
+            if (!isNaN(val)) {
+              cashTotal += val;
+              cashTxCount += 1;
+            }
+          }
+          const transferMatch = s.notes.match(/Mobile Transfer:\s*[^0-9]*([\d,]+(\.\d+)?)/i);
+          if (transferMatch && transferMatch[1]) {
+            const val = parseFloat(transferMatch[1].replace(/,/g, ''));
+            if (!isNaN(val)) {
+              mobileTransferTotal += val;
+              mobileTransferTxCount += 1;
+            }
           }
         }
       }
