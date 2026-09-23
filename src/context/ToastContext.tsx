@@ -33,7 +33,9 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       type = 'success',
       duration = 4000,
     }: Omit<ToastItem, 'id' | 'type'> & { type?: ToastType }) => {
-      const id = 'toast-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+      const id = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? `toast-${crypto.randomUUID()}`
+        : `toast-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       const newToast: ToastItem = { id, title, message, type, duration };
 
       setTimeout(() => {
