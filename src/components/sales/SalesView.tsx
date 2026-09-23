@@ -58,6 +58,14 @@ interface SalesViewProps {
   onNavigate?: (page: string) => void;
 }
 
+const GUEST_CUSTOMER_NAMES = new Set(['walk-in customer', 'cash customer', 'guest customer', 'walk-in']);
+
+/** True when a sale has no real customer identity (case-insensitive). */
+const isGuestCustomerName = (name?: string): boolean => {
+  const normalized = String(name || '').trim().toLowerCase();
+  return normalized === '' || GUEST_CUSTOMER_NAMES.has(normalized);
+};
+
 export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
   const { sales, products, customers, settings, refundSale, updateSale, deleteSale } = useApp();
   const { currentUser, isSuperAdmin, hasPermission } = useAuth();
@@ -175,10 +183,10 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
 
   const isTransferringOwnership = useMemo(() => {
     if (!editSaleTarget) return false;
-    const origKey = editSaleTarget.customerId || (editSaleTarget.customerName && editSaleTarget.customerName.toLowerCase() !== 'walk-in customer' ? editSaleTarget.customerName.toLowerCase() : '__walkin__');
+    const origKey = editSaleTarget.customerId || (editSaleTarget.customerName && !isGuestCustomerName(editSaleTarget.customerName) ? editSaleTarget.customerName.toLowerCase() : '__walkin__');
     const newKey = isCustomGuestMode
       ? `__custom_${editCustomerName.toLowerCase()}__`
-      : (selectedCustomerObj?.id || (editCustomerName.toLowerCase() !== 'walk-in customer' ? editCustomerName.toLowerCase() : '__walkin__'));
+      : (selectedCustomerObj?.id || (!isGuestCustomerName(editCustomerName) ? editCustomerName.toLowerCase() : '__walkin__'));
     return origKey !== newKey;
   }, [editSaleTarget, isCustomGuestMode, editCustomerName, selectedCustomerObj]);
 
@@ -211,7 +219,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
     setEditCustomerName(sale.customerName || 'Walk-in Customer');
     setCustomerSearchQuery('');
     setIsCustomerDropdownOpen(false);
-    setIsCustomGuestMode(!sale.customerId && Boolean(sale.customerName) && sale.customerName !== 'Walk-in Customer' && sale.customerName !== 'Cash Customer');
+    setIsCustomGuestMode(!sale.customerId && isGuestCustomerName(sale.customerName));
     setEditType(sale.type || 'Retail');
     setEditPaymentMethod(sale.paymentMethod || 'Card');
     setEditStatus(sale.status || 'Completed');
@@ -571,31 +579,38 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
       'Notes',
     ];
 
+    // Every text field is quoted and internal quotes doubled — only notes were
+    // escaped before, so a customer name containing a quote corrupted the row.
+    const cell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
     const rows = filteredSales.map((s) => [
-      `"${s.invoiceNo}"`,
-      `"${new Date(s.createdAt).toLocaleString()}"`,
-      `"${s.customerName}"`,
-      `"${s.type}"`,
+      cell(s.invoiceNo),
+      cell(new Date(s.createdAt).toLocaleString()),
+      cell(s.customerName),
+      cell(s.type),
       (s.items || []).length,
       (Number(s.subtotal) || 0).toFixed(2),
       (Number(s.discount) || 0).toFixed(2),
       (Number(s.tax) || 0).toFixed(2),
       (Number(s.totalAmount) || 0).toFixed(2),
       (Number(s.paidAmount) || 0).toFixed(2),
-      `"${s.paymentMethod}"`,
-      `"${s.status}"`,
-      `"${s.createdBy}"`,
-      `"${(s.notes || '').replace(/"/g, '""')}"`,
+      cell(s.paymentMethod),
+      cell(s.status),
+      cell(s.createdBy),
+      cell(s.notes),
     ]);
 
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
-    const encodedUri = encodeURI(csvContent);
+    // Blob URL instead of an encodeURI'd data: URI: '#' or '%' in any field
+    // truncated or mangled the download.
+    const csvContent = [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+    const encodedUri = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
     link.setAttribute('download', `Sales_Records_${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(encodedUri);
   };
 
   const getPaymentIcon = (method: PaymentMethod) => {
@@ -2353,17 +2368,29 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                         onClick={() => {
                           const prodToAdd = products.find((p) => p.id === selectedAddProductId);
                           if (prodToAdd) {
+                            const unitPrice = editType === 'Wholesale' ? prodToAdd.wholesalePrice : prodToAdd.retailPrice;
                             const newItem: SaleItem = {
                               productId: prodToAdd.id,
                               productName: prodToAdd.name,
                               sku: prodToAdd.sku,
                               quantity: 1,
-                              unitPrice: editType === 'Wholesale' ? prodToAdd.wholesalePrice : prodToAdd.retailPrice,
+                              unitPrice,
                               costPrice: prodToAdd.costPrice,
-                              total: editType === 'Wholesale' ? prodToAdd.wholesalePrice : prodToAdd.retailPrice,
+                              total: unitPrice,
                               isWholesale: editType === 'Wholesale',
                             };
-                            setEditingSaleItems((prev) => [newItem, ...prev]);
+                            // A product already on the sale is incremented, not
+                            // duplicated: two rows with the same productId gave
+                            // the list duplicate keys and ambiguous totals.
+                            setEditingSaleItems((prev) => {
+                              const existing = prev.find((line) => line.productId === newItem.productId);
+                              if (existing) {
+                                return prev.map((line) => line.productId === newItem.productId
+                                  ? { ...line, quantity: line.quantity + 1, total: (line.quantity + 1) * (Number(line.unitPrice) || 0) }
+                                  : line);
+                              }
+                              return [newItem, ...prev];
+                            });
                             setSelectedAddProductId('');
                           }
                         }}
@@ -2493,7 +2520,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                   ) : (
                     editingSaleItems.map((item, index) => (
                       <div
-                        key={index}
+                        key={item.productId || `edit-line-${index}`}
                         className="p-3 bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/80 rounded-2xl space-y-2.5"
                       >
                         <div className="flex justify-between items-start gap-2">

@@ -44,6 +44,7 @@ import { OrderNoteModal } from './OrderNoteModal';
 import { ConfirmPlaceOrderModal } from './ConfirmPlaceOrderModal';
 import { ProductSearchPicker, POItemFormState } from './ProductSearchPicker';
 import { useInteractions } from '../../context/InteractionContext';
+import { localIsoDate } from '../../shared/localDate';
 
 type DeliveryTab = 'All' | 'Draft' | 'Pending' | 'Partial' | 'Received' | 'Cancelled';
 
@@ -100,8 +101,11 @@ export const PurchasesView: React.FC = () => {
   const [selectedSupplierId, setSelectedSupplierId] = useState(suppliers[0]?.id || '');
   const [poItems, setPoItems] = useState<POItemFormState[]>([]);
   const [deliveryFee, setDeliveryFee] = useState<number>(0);
+  // Default delivery date is a LOCAL calendar date: the date input and every
+  // consumer treat it as local, while toISOString() gave the UTC date (one day
+  // earlier for anyone working before 01:00 WAT).
   const [expectedDelivery, setExpectedDelivery] = useState(
-    new Date(Date.now() + 86400000 * 5).toISOString().split('T')[0]
+    () => localIsoDate(new Date(Date.now() + 86400000 * 5))
   );
   const [initialPaymentStatus, setInitialPaymentStatus] = useState<'Unpaid' | 'Paid'>('Unpaid');
   const [initialPaymentSource, setInitialPaymentSource] = useState<LiquidAccountType>('Biz Account');
@@ -117,9 +121,9 @@ export const PurchasesView: React.FC = () => {
   const draftPOsCount = draftPOs.length;
   const draftPOsValue = draftPOs.reduce((sum, po) => sum + po.totalAmount, 0);
 
-  const officialPOs = purchases.filter((po) => po.deliveryStatus !== 'Draft');
+  const officialPOs = React.useMemo(() => purchases.filter((po) => po.deliveryStatus !== 'Draft'), [purchases]);
   const totalPOsCount = purchases.length;
-  const totalPOValue = purchases.reduce((sum, po) => sum + po.totalAmount, 0);
+  const totalPOValue = React.useMemo(() => purchases.reduce((sum, po) => sum + po.totalAmount, 0), [purchases]);
 
   const pendingPOs = purchases.filter((po) => po.deliveryStatus === 'Pending' || po.deliveryStatus === 'Partial');
   const pendingUnitsCount = pendingPOs.reduce(
@@ -129,13 +133,18 @@ export const PurchasesView: React.FC = () => {
     0
   );
 
-  const unpaidTotal = officialPOs.reduce((sum, po) => sum + Math.max(0, po.totalAmount - po.paidAmount), 0);
-  const passedInspectionsCount = purchases.filter(
-    (po) => po.inspectionStatus === 'Passed' || po.inspectionStatus === 'Passed with Exceptions'
-  ).length;
+  const unpaidTotal = React.useMemo(
+    () => officialPOs.reduce((sum, po) => sum + Math.max(0, po.totalAmount - po.paidAmount), 0),
+    [officialPOs],
+  );
+  const passedInspectionsCount = React.useMemo(
+    () => purchases.filter((po) => po.inspectionStatus === 'Passed' || po.inspectionStatus === 'Passed with Exceptions').length,
+    [purchases],
+  );
 
-  // Filtered Purchases list
-  const filteredPurchases = purchases.filter((po) => {
+  // Filtered Purchases list. Memoized: it was rebuilt on every render, so the
+  // pagination memo below never hit and every keystroke re-filtered the list.
+  const filteredPurchases = React.useMemo(() => purchases.filter((po) => {
     // Delivery status tab
     if (activeTab === 'Draft' && po.deliveryStatus !== 'Draft') return false;
     if (activeTab === 'Pending' && po.deliveryStatus !== 'Pending') return false;
@@ -158,7 +167,7 @@ export const PurchasesView: React.FC = () => {
     }
 
     return true;
-  });
+  }), [purchases, activeTab, paymentFilter, searchQuery]);
 
   // Pagination State
   const [currentPage, setCurrentPage] = useState(1);
@@ -191,7 +200,7 @@ export const PurchasesView: React.FC = () => {
     setEditingDraftPo(draft);
     setSelectedSupplierId(draft.supplierId || suppliers[0]?.id || '');
     setDeliveryFee(draft.deliveryFee || 0);
-    setExpectedDelivery(draft.expectedDelivery || new Date(Date.now() + 86400000 * 5).toISOString().split('T')[0]);
+    setExpectedDelivery(draft.expectedDelivery || localIsoDate(new Date(Date.now() + 86400000 * 5)));
     setDraftNotes(draft.notes || '');
     setPoItems(
       draft.items.map((i) => {
