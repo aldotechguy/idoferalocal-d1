@@ -157,12 +157,18 @@ export const SettingsView: React.FC = () => {
   const [showDesktopInstallModal, setShowDesktopInstallModal] = useState(false);
 
   // Refresh local record counts and probe the D1 health endpoint.
+  // Monotonic request id: a slow earlier refresh must not overwrite a newer one
+  // (and must not set state after the user navigated away).
+  const dbCountsRequestRef = useRef(0);
   const refreshDBCounts = async (isManualClick: boolean = false) => {
+    const requestId = ++dbCountsRequestRef.current;
     setIsRefreshingCounts(true);
     try {
       const counts = await getStoreRecordCounts();
+      if (requestId !== dbCountsRequestRef.current) return;
       setDbCounts(counts);
       const est = await getStorageEstimate();
+      if (requestId !== dbCountsRequestRef.current) return;
       setStorageEstimate(est);
 
       if (isManualClick) {
@@ -191,7 +197,7 @@ export const SettingsView: React.FC = () => {
         });
       }
     } finally {
-      setIsRefreshingCounts(false);
+      if (requestId === dbCountsRequestRef.current) setIsRefreshingCounts(false);
     }
   };
 
