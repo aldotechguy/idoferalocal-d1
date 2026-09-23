@@ -23,7 +23,6 @@ import { hasMallPrice } from '../shared/mallProductPresentation.js';
 import { createMallSearchMatcher } from '../shared/mallSearch.js';
 import { MALL_DELIVERY_ZONE_IDS, mallDeliveryFeeKobo, mallDeliveryLabel, mallDeliveryZone } from '../shared/mallDelivery.js';
 import { assertSql, revisionBumpStatement } from './mallSafety.js';
-import { mirrorMallWrites } from './mallMirror.js';
 import { normalizeMallPhone, normalizedPhoneSql } from '../shared/mallPhone.js';
 import { mallReadiness, mallRateLimit, publicMallConfig, type MallConfig } from './mallOperations.js';
 
@@ -747,14 +746,6 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
     if (/mall_state_conflict|INSUFFICIENT_STOCK/.test(String(error))) fail(409, 'Cart, price, or availability changed. Refresh your cart and retry.');
     throw error;
   }
-  // Option B delta acceleration: the revision bump makes a reload converge,
-  // and these mirror rows let an ALREADY-OPEN workspace see the committed
-  // stock (and the new-order notification) through its next delta read.
-  await mirrorMallWrites(exec, {
-    products: items.map((it) => it.productId),
-    stockMovements: stockMovementIds,
-    notifications: [`mall:${orderId}`],
-  });
   // Stock and purchase counts changed: the cached home rails must not show a
   // pre-checkout world past this write.
   invalidateMallFacetCache();

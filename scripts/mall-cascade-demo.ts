@@ -133,7 +133,7 @@ printRows('mall_outbox (webhook/email events, trigger-written)', `SELECT id, ord
 printRows('core records untouched before settlement', `SELECT (SELECT COUNT(*) FROM customers) AS customers, (SELECT COUNT(*) FROM sales) AS sales, (SELECT COUNT(*) FROM sale_items) AS sale_items, (SELECT COUNT(*) FROM money_movements) AS money_movements, (SELECT COUNT(*) FROM audit_logs) AS audit_logs FROM (SELECT 1)`);
 expect('no Sale mirrored yet', scalar('SELECT COUNT(*) FROM sales'), 0);
 expect('linked_sale_id still NULL', order.linked_sale_id ?? 'NULL', 'NULL');
-expect('checkout mirror-wrote stock + notification for delta readers', scalar(`SELECT COUNT(*) FROM app_documents WHERE collection IN ('products','stockMovements','notifications')`), 5);
+expect('checkout writes no document-mirror rows (the mirror is PUT-restore only)', scalar(`SELECT COUNT(*) FROM app_documents WHERE collection IN ('products','stockMovements','notifications')`), 0);
 
 console.log('\nStage 2 — STAFF SETTLEMENT (collect-payment): one guarded batch writes');
 console.log('  customers -> sales -> sale_items -> payments(paid) ->');
@@ -146,7 +146,7 @@ console.log(`\n  collect-payment -> HTTP ${settle.status}, sale ${String(settled
 expect('settlement status', settle.status, 200);
 expect('deterministic sale id (sale-{orderId})', settled.linked_sale_id, `sale-${orderId}`);
 expect('order moved to processing', settled.status, 'processing');
-expect('settlement mirror-wrote the sale for delta readers', scalar(`SELECT COUNT(*) FROM app_documents WHERE collection = 'sales' AND document_id = 'sale-${orderId}'`), 1);
+expect('settlement writes no document-mirror rows (mirror is PUT-restore only)', scalar(`SELECT COUNT(*) FROM app_documents WHERE collection = 'sales' AND document_id = 'sale-${orderId}'`), 0);
 
 printRows('customers (created / loyalty updated)', `SELECT id, name, phone, email, address, purchase_history_count AS purchases, loyalty_points AS loyalty, lifetime_value_kobo AS lifetime, outstanding_balance_kobo AS outstanding FROM customers`);
 printRows('sales (mirrored POS Sale)', `SELECT id, receipt_no, customer_name, type, subtotal_kobo AS subtotal, delivery_fee_kobo AS delivery, total_kobo AS total, paid_kobo AS paid, payment_method, status, notes, created_by FROM sales`);
@@ -155,7 +155,7 @@ printRows('payments (paid, linked to the Sale)', `SELECT id, order_id, sale_id, 
 printRows('money_movements (Sale Inflow)', `SELECT id, date, type, subtype, dest_account, amount_kobo AS amount, notes, ref_no, ref_id FROM money_movements`);
 printRows('audit_logs (cascade trail)', `SELECT action, entity, entity_id, details, created_at FROM audit_logs`);
 printRows('sync_revisions (bumped inside every Mall write batch)', `SELECT owner_id, revision FROM sync_revisions`);
-printRows('app_documents (Option B mirror: delta acceleration for open workspaces)', `SELECT collection, document_id, updated_at FROM app_documents`);
+printRows('app_documents (PUT-restore mirror / rollback snapshot only)', `SELECT collection, document_id, updated_at FROM app_documents`);
 
 console.log('\nStage 3 — IDEMPOTENCY: replaying settlement cannot duplicate the cascade.');
 const replay = await staffOp(orderId, 'collect-payment', { paymentMethod: 'Cash', amountKobo: order.total_kobo });
@@ -237,7 +237,7 @@ const refundedSales = String(scalar(`SELECT COUNT(*) FROM sales WHERE status = '
 const movements = String(scalar('SELECT COUNT(*) FROM money_movements'));
 const stock = String(scalar('SELECT SUM(stock_qty) FROM products'));
 console.log(`\nLifecycle summary: 2 orders -> ${salesCount} Sales (${refundedSales} refunded), ${movements} money movements, stock 35 -> ${stock}`);
-console.log(`Support trail: ${String(scalar('SELECT COUNT(*) FROM notifications'))} notifications, ${String(scalar('SELECT COUNT(*) FROM mall_outbox'))} outbox events, ${String(scalar(`SELECT COUNT(*) FROM audit_logs WHERE entity = 'MallOrder'`))} Mall audit entries, ${String(scalar('SELECT COUNT(*) FROM mall_order_events'))} timeline events, ${String(scalar('SELECT COUNT(*) FROM app_documents'))} mirror rows for delta readers`);
+console.log(`Support trail: ${String(scalar('SELECT COUNT(*) FROM notifications'))} notifications, ${String(scalar('SELECT COUNT(*) FROM mall_outbox'))} outbox events, ${String(scalar(`SELECT COUNT(*) FROM audit_logs WHERE entity = 'MallOrder'`))} Mall audit entries, ${String(scalar('SELECT COUNT(*) FROM mall_order_events'))} timeline events, ${String(scalar('SELECT COUNT(*) FROM app_documents'))} mirror rows (rollback only, written by snapshot PUTs)`);
 console.log(failed ? '\nCASCADE DEMO FAILED' : '\nCASCADE DEMO PASSED — Mall Orders fully cascaded into the core records.');
 db.close();
 process.exit(failed ? 1 : 0);

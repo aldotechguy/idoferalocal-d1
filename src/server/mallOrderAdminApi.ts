@@ -1,7 +1,6 @@
 import type { MallExecutor, MallStmt } from './mallApi.js';
 import { n, s } from './relationalMapper.js';
 import { revisionBumpStatement, runOrderBatch } from './mallSafety.js';
-import { mirrorMallWrites } from './mallMirror.js';
 import { normalizedPhoneSql, normalizeMallPhone } from '../shared/mallPhone.js';
 import { mallMetrics, runMallMaintenance } from './mallOperations.js';
 import { registerMallCacheInvalidator } from './mallApi.js';
@@ -233,12 +232,6 @@ async function cancelOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
     if (s(concurrent[0]?.status) === 'cancelled') return detail(exec, id);
     throw error;
   }
-  // Option B delta acceleration: an open workspace's next delta read sees the
-  // restored stock without a reload.
-  await mirrorMallWrites(exec, {
-    products: items.map((item) => String(item.product_id)),
-    stockMovements: cancelMovementIds,
-  });
   return detail(exec, id);
 }
 
@@ -348,13 +341,6 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
     if (s(concurrent[0]?.linked_sale_id)) return detail(exec, id);
     throw error;
   }
-  // Option B delta acceleration: an open workspace's next delta read sees the
-  // mirrored Sale, the customer and the Sale Inflow without a reload.
-  await mirrorMallWrites(exec, {
-    sales: [saleId],
-    customers: [customerId],
-    moneyMovements: [`mm-${saleId}`],
-  });
   return detail(exec, id);
 }
 
@@ -400,9 +386,6 @@ async function transitionOrder(exec: MallExecutor, id: string, actor: StaffActor
   // client-visible stores: bump the revision.
   stmts.push(revisionBumpStatement());
   await runOrderBatch(exec, row, stmts);
-  // Option B delta acceleration for dispatch/delivery: the SELECT inside
-  // mirrorMallWrites no-ops for transitions that touched no delivery_order.
-  await mirrorMallWrites(exec, { deliveryOrders: [`del-${id}`] });
   return detail(exec, id);
 }
 
@@ -446,19 +429,6 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
     if (s(concurrent[0]?.status) === 'refunded') return detail(exec, id);
     throw error;
   }
-  // Option B delta acceleration: an open workspace's next delta read sees the
-  // refunded Sale, the reverse money movement, the rolled-back customer, the
-  // returned delivery order and the restocked goods without a reload.
-  await mirrorMallWrites(exec, {
-    sales: [s(row.linked_sale_id)],
-    ...(row.customer_id ? { customers: [s(row.customer_id)] } : {}),
-    ...(returnStock ? {
-      products: items.map((item) => String(item.product_id)),
-      stockMovements: items.map((item) => `mv-refund-${id}-${item.id}`),
-    } : {}),
-    moneyMovements: [`mm-refund-${s(row.linked_sale_id)}`],
-    deliveryOrders: [`del-${id}`],
-  });
   return detail(exec, id);
 }
 

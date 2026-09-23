@@ -118,7 +118,7 @@ try {
 
 /**
  * Phase 4 bridge â€” if the relational store is still empty but legacy documents
- * exist (first boot on a fresh machine, or a pull from the old D1), project the
+ * exist (first boot on a fresh machine, or a restored document store), project the
  * documents into relational tables once. Idempotent: no-op once rows exist.
  */
 async function ensureRelationalBackfill(): Promise<{ statements: number; documents: number; skipped: number }> {
@@ -702,105 +702,6 @@ app.post("/api/auth/password", async (req, res) => {
 
 // =================== D1 STORAGE ROUTES ===================
 
-let configuredD1DatabaseId = process.env.CLOUDFLARE_D1_DATABASE_ID || "3e95a550-a091-490b-819d-f0acb7ea8dd8";
-let configuredAccountId = process.env.CLOUDFLARE_ACCOUNT_ID || "35b307711376954341708cbea8080dcc";
-let configuredApiToken = process.env.CLOUDFLARE_API_TOKEN || "";
-
-function loadSavedCloudflareConfig() {
-  try {
-    const row = db.prepare("SELECT payload FROM app_documents WHERE owner_id = ? AND collection = ? AND document_id = ?").get("system", "system_config", "cloudflare_d1") as any;
-    if (row?.payload) {
-      const data = JSON.parse(row.payload);
-      if (data.apiToken !== undefined && data.apiToken !== "") configuredApiToken = data.apiToken;
-      if (data.accountId) configuredAccountId = data.accountId;
-      if (data.databaseId) configuredD1DatabaseId = data.databaseId;
-      console.log("Loaded Cloudflare D1 configuration from database storage.");
-    }
-  } catch (err: any) {
-    console.warn("Notice: could not load stored Cloudflare config:", err?.message || err);
-  }
-}
-loadSavedCloudflareConfig();
-
-function updateEnvFile(token: string, accountId?: string, databaseId?: string) {
-  try {
-    const envPath = path.join(process.cwd(), ".env");
-    let content = "";
-    if (fs.existsSync(envPath)) {
-      content = fs.readFileSync(envPath, "utf-8");
-    } else {
-      const examplePath = path.join(process.cwd(), ".env.example");
-      if (fs.existsSync(examplePath)) {
-        content = fs.readFileSync(examplePath, "utf-8");
-      }
-    }
-
-    if (content.includes("CLOUDFLARE_API_TOKEN=")) {
-      content = content.replace(/CLOUDFLARE_API_TOKEN=.*/g, `CLOUDFLARE_API_TOKEN="${token}"`);
-    } else {
-      content += `\nCLOUDFLARE_API_TOKEN="${token}"\n`;
-    }
-
-    if (accountId) {
-      if (content.includes("CLOUDFLARE_ACCOUNT_ID=")) {
-        content = content.replace(/CLOUDFLARE_ACCOUNT_ID=.*/g, `CLOUDFLARE_ACCOUNT_ID="${accountId}"`);
-      } else {
-        content += `\nCLOUDFLARE_ACCOUNT_ID="${accountId}"\n`;
-      }
-    }
-
-    if (databaseId) {
-      if (content.includes("CLOUDFLARE_D1_DATABASE_ID=")) {
-        content = content.replace(/CLOUDFLARE_D1_DATABASE_ID=.*/g, `CLOUDFLARE_D1_DATABASE_ID="${databaseId}"`);
-      } else {
-        content += `\nCLOUDFLARE_D1_DATABASE_ID="${databaseId}"\n`;
-      }
-    }
-
-    fs.writeFileSync(envPath, content, "utf-8");
-  } catch (err) {
-    console.warn("Could not write to .env file:", err);
-  }
-}
-
-let lastCloudflareSyncTime = 0;
-let isCloudflareSyncing = false;
-let ongoingD1SyncPromise: Promise<{ success: boolean; count?: number; error?: string; reason?: string }> | null = null;
-let cloudflareAuthStatus: {
-  valid: boolean;
-  lastChecked: number;
-  errorMessage?: string;
-} = { valid: true, lastChecked: 0 };
-
-async function syncFromCloudflareD1WithLock(): Promise<{ success: boolean; count?: number; error?: string; reason?: string }> {
-  // If we synced within the last 60 seconds, skip to prevent redundant edge calls
-  if (Date.now() - lastCloudflareSyncTime < 60000) {
-    return { success: true, reason: "cached_recent_sync" };
-  }
-  if (!cloudflareAuthStatus.valid && Date.now() - cloudflareAuthStatus.lastChecked < 60000) {
-    return { success: false, reason: "auth_failed_paused", error: cloudflareAuthStatus.errorMessage };
-  }
-  if (ongoingD1SyncPromise) {
-    return ongoingD1SyncPromise;
-  }
-  ongoingD1SyncPromise = (async () => {
-    try {
-      isCloudflareSyncing = true;
-      const result = await syncFromCloudflareD1();
-      lastCloudflareSyncTime = Date.now();
-      await ensureBusinessDataOwner();
-      return result;
-    } catch (e: any) {
-      console.warn("Cloudflare D1 sync notice:", e?.message || e);
-      return { success: false, count: 0, error: e?.message || String(e) };
-    } finally {
-      isCloudflareSyncing = false;
-      ongoingD1SyncPromise = null;
-    }
-  })();
-  return ongoingD1SyncPromise;
-}
-
 // =================== MALL STOREFRONT API (Phase 5) ===================
 // #14 — durable image storage. Node writes to disk; the edge writes to R2.
 const mallImageStore = makeNodeImageStore(process.env.MALL_IMAGE_DIR || path.join(process.cwd(), 'data', 'mall-images'));
@@ -943,13 +844,6 @@ app.get("/api/storage/snapshot", async (req, res) => {
   try {
     const ownerId = BUSINESS_OWNER_ID;
 
-    // Refresh from remote D1 non-blocking in background if stale
-    if (Date.now() - lastCloudflareSyncTime > 60000 && cloudflareAuthStatus.valid) {
-      syncFromCloudflareD1WithLock().catch((e: any) => {
-        console.warn("Background D1 refresh notice:", e?.message || e);
-      });
-    }
-
     // Phase 4: relational read path â€” rows -> frontend snapshot (same contract).
     if (USE_RELATIONAL) {
       try {
@@ -962,7 +856,6 @@ app.get("/api/storage/snapshot", async (req, res) => {
           stores,
           hasData: Object.keys(stores).length > 0,
           revision,
-          lastCloudflareSync: lastCloudflareSyncTime,
           timestamp: new Date().toISOString(),
           backend: "relational",
           backfill: backfill.statements ? backfill : undefined,
@@ -995,197 +888,12 @@ app.get("/api/storage/snapshot", async (req, res) => {
       stores,
       hasData: Object.keys(stores).length > 0,
       revision,
-      lastCloudflareSync: lastCloudflareSyncTime,
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
     return res.status(500).json({ error: error.message || "Failed to read snapshot" });
   }
 });
-
-function sqlEscape(val: any): string {
-  if (val === null || val === undefined) return "NULL";
-  if (typeof val === "number") return Number.isFinite(val) ? String(val) : "NULL";
-  if (typeof val === "boolean") return val ? "1" : "0";
-  return `'${String(val).replace(/'/g, "''")}'`;
-}
-
-function interpolateSql(sql: string, params: any[] = []): string {
-  let paramIndex = 0;
-  return sql.replace(/\?/g, () => {
-    if (paramIndex < params.length) {
-      return sqlEscape(params[paramIndex++]);
-    }
-    return "NULL";
-  });
-}
-
-async function executeRemoteD1Statements(statements: { sql: string; params: any[] }[]) {
-  const accountId = configuredAccountId;
-  const databaseId = configuredD1DatabaseId;
-  const token = configuredApiToken;
-
-  if (!token || !accountId || !databaseId || statements.length === 0) {
-    return { success: false, reason: "skipped_or_missing_credentials" };
-  }
-
-  // If token failed authentication recently, skip remote edge queries to keep local server lightning fast
-  if (!cloudflareAuthStatus.valid && Date.now() - cloudflareAuthStatus.lastChecked < 60000) {
-    return { success: false, reason: "auth_failed_paused", error: cloudflareAuthStatus.errorMessage };
-  }
-
-  try {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}/query`;
-
-    // Group insert statements into multi-row parametric queries
-    const insertDocRows: any[][] = [];
-    const otherStatements: { sql: string; params: any[] }[] = [];
-
-    for (const stmt of statements) {
-      if (stmt.sql.includes("INSERT INTO app_documents") && Array.isArray(stmt.params) && stmt.params.length === 5) {
-        insertDocRows.push(stmt.params);
-      } else {
-        otherStatements.push(stmt);
-      }
-    }
-
-    // 1. Execute other statements (deletions, sync_revisions, relational upserts)
-    for (const stmt of mergeInsertStatements(otherStatements)) {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ sql: stmt.sql, params: stmt.params || [] }),
-        signal: AbortSignal.timeout(4000),
-      });
-
-      if (res.status === 401 || res.status === 403) {
-        cloudflareAuthStatus = {
-          valid: false,
-          lastChecked: Date.now(),
-          errorMessage: "Cloudflare API token authentication failed (HTTP " + res.status + ")",
-        };
-        console.warn("Cloudflare D1 authentication failure: token rejected. Using local SQLite store.");
-        return { success: false, reason: "auth_failed" };
-      }
-
-      const data = (await res.json()) as any;
-      if (!res.ok || !data.success) {
-        if (data.errors?.[0]?.code === 10000 || data.errors?.[0]?.message?.includes("Authentication")) {
-          cloudflareAuthStatus = { valid: false, lastChecked: Date.now(), errorMessage: data.errors?.[0]?.message };
-        }
-        console.warn("Cloudflare D1 query warning:", JSON.stringify(data.errors || data));
-        return { success: false, error: data.errors?.[0]?.message };
-      }
-    }
-
-    // 2. Execute document inserts in batches of 15 rows (75 variables, safely below the 100 SQLite limit)
-    const BATCH_SIZE = 15;
-    const batches: any[][][] = [];
-    for (let i = 0; i < insertDocRows.length; i += BATCH_SIZE) {
-      batches.push(insertDocRows.slice(i, i + BATCH_SIZE));
-    }
-
-    // Concurrency limit of 5 requests at a time
-    for (let b = 0; b < batches.length; b += 5) {
-      const chunk = batches.slice(b, b + 5);
-      await Promise.all(chunk.map(async (batch) => {
-        const placeholders = batch.map(() => "(?, ?, ?, ?, ?)").join(", ");
-        const sql = `INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-                     VALUES ${placeholders}
-                     ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-                     payload = excluded.payload, updated_at = excluded.updated_at;`;
-        const params = batch.flat();
-        const res = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ sql, params }),
-          signal: AbortSignal.timeout(4000),
-        });
-
-        if (res.status === 401 || res.status === 403) {
-          cloudflareAuthStatus = {
-            valid: false,
-            lastChecked: Date.now(),
-            errorMessage: "Cloudflare API token authentication failed (HTTP " + res.status + ")",
-          };
-          return;
-        }
-
-        const data = (await res.json()) as any;
-        if (!res.ok || !data.success) {
-          console.warn("Cloudflare D1 batched insert notice:", JSON.stringify(data.errors || data));
-        }
-      }));
-      if (!cloudflareAuthStatus.valid) break;
-    }
-
-    return { success: true, databaseId };
-  } catch (err: any) {
-    console.warn("Cloudflare D1 execution notice:", err.message);
-    return { success: false, error: err.message };
-  }
-}
-
-/**
- * Phase 4 â€” merge identical INSERT statements into multi-row inserts so a full
- * relational snapshot push costs hundreds of queries instead of thousands.
- * D1/SQLite caps bound variables, so rows-per-query is derived from arity.
- */
-function mergeInsertStatements(statements: { sql: string; params: any[] }[], maxVars = 75) {
-  const merged: { sql: string; params: any[]; groups: number }[] = [];
-  let current: { sql: string; params: any[]; groups: number; maxGroups: number; arity: number } | null = null;
-  const flush = () => {
-    if (current) merged.push({ sql: current.sql, params: current.params, groups: current.groups });
-    current = null;
-  };
-  for (const stmt of statements) {
-    const params = Array.isArray(stmt.params) ? stmt.params : [];
-    const valuesMatch = stmt.sql.match(/VALUES\s*\(([^()]*)\)/i);
-    const arity = valuesMatch ? valuesMatch[1].split(",").length : 0;
-    const mergeable = /^INSERT INTO/i.test(stmt.sql) && valuesMatch && arity > 0 && arity === params.length;
-    if (!mergeable) {
-      flush();
-      merged.push({ sql: stmt.sql, params, groups: 1 });
-      continue;
-    }
-    const maxGroups = Math.max(1, Math.floor(maxVars / arity));
-    if (current && current.sql === stmt.sql && current.groups < current.maxGroups) {
-      current.params.push(...params);
-      current.groups += 1;
-      continue;
-    }
-    flush();
-    current = { sql: stmt.sql, params: [...params], groups: 1, maxGroups, arity };
-  }
-  flush();
-  return merged.map((m) => {
-    if (m.groups <= 1) return { sql: m.sql, params: m.params };
-    const valuesMatch = m.sql.match(/VALUES\s*\(([^()]*)\)/i);
-    if (!valuesMatch) return { sql: m.sql, params: m.params };
-    const row = `(${valuesMatch[1]})`;
-    const expanded = m.sql.replace(valuesMatch[0], `VALUES ${Array.from({ length: m.groups }, () => row).join(", ")}`);
-    return { sql: expanded, params: m.params };
-  });
-}
-
-/** Push relational statements to D1 `idofera`; a failure never breaks the local write. */
-async function pushRelationalD1Statements(statements: { sql: string; params: any[] }[]) {
-  if (!statements.length) return { success: true, skipped: true };
-  try {
-    await executeRemoteD1Statements(statements);
-    return { success: true, skipped: false };
-  } catch (relErr: any) {
-    const message = relErr?.message || String(relErr);
-    console.warn("Relational D1 push failed (legacy document mirror already pushed):", message);
-    return { success: false, skipped: false, error: message };
-  }
-}
 
 app.put("/api/storage/snapshot", async (req, res) => {
   try {
@@ -1222,7 +930,6 @@ app.put("/api/storage/snapshot", async (req, res) => {
         payload = excluded.payload, updated_at = excluded.updated_at
     `);
 
-    const remoteStatements: { sql: string; params: any[] }[] = [];
     // Phase 4: mirror the full-replace snapshot into relational tables (idofera).
     const relStatements: { sql: string; params: any[] }[] = [];
     const nowIso = new Date(now).toISOString();
@@ -1233,10 +940,6 @@ app.put("/api/storage/snapshot", async (req, res) => {
       for (const [collection, documents] of Object.entries(body.stores)) {
         if (!ALLOWED_STORES.has(collection) || !Array.isArray(documents)) continue;
         deleteStoreStmt.run(ownerId, collection);
-        remoteStatements.push({
-          sql: "DELETE FROM app_documents WHERE owner_id = ? AND collection = ?",
-          params: [ownerId, collection],
-        });
         if (USE_RELATIONAL) {
           for (const st of replaceCollectionStatements(collection, documents, nowIso)) {
             tx.run(st.sql, st.params);
@@ -1249,13 +952,6 @@ app.put("/api/storage/snapshot", async (req, res) => {
           const documentId = String((doc as any).id || "singleton");
           const payloadStr = JSON.stringify(doc);
           insertDocStmt.run(ownerId, collection, documentId, payloadStr, now);
-          remoteStatements.push({
-            sql: `INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-                  VALUES (?, ?, ?, ?, ?)
-                  ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-                  payload = excluded.payload, updated_at = excluded.updated_at;`,
-            params: [ownerId, collection, documentId, payloadStr, now],
-          });
         }
       }
 
@@ -1264,11 +960,6 @@ app.put("/api/storage/snapshot", async (req, res) => {
         ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at
       `);
       setRevStmt.run(ownerId, revision, now);
-      remoteStatements.push({
-        sql: `INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?)
-              ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at;`,
-        params: [ownerId, revision, now],
-      });
 
       db.exec("COMMIT;");
     } catch (txErr) {
@@ -1279,23 +970,17 @@ app.put("/api/storage/snapshot", async (req, res) => {
     // A snapshot restore can replace every product; drop the catalog facet cache.
     invalidateMallFacetCache();
 
-    // Replicate to Cloudflare D1 non-blocking so local SQLite commit is instant and reliable
-    executeRemoteD1Statements(remoteStatements).catch((remoteErr: any) => {
-      console.warn("Non-blocking Cloudflare D1 replication notice:", remoteErr?.message || remoteErr);
-    });
-
-    const relational = await pushRelationalD1Statements(relStatements);
-
+    // Cloudflare D1 is written by the deployed Worker, so a local restore only
+    // touches this runtime's own store.
     return res.json({
       ok: true,
       revision,
-      d1Synced: true,
-      d1DatabaseId: configuredD1DatabaseId,
       collections: Object.keys(body.stores).filter((name) => ALLOWED_STORES.has(name)),
       backend: USE_RELATIONAL ? "relational" : "documents",
       relationalStatements: relStatements.length,
-      relationalSynced: relational.success,
-      relationalError: (relational as any).error,
+      // The relational rows commit inside the same transaction as the mirror, so a
+      // committed PUT is always relationally synced; a failure rolls back to a 500.
+      relationalSynced: true,
     });
   } catch (error: any) {
     return res.status(500).json({ error: error.message || "Failed to save snapshot" });
@@ -1334,8 +1019,6 @@ app.patch("/api/storage/records", async (req, res) => {
       DELETE FROM app_documents WHERE owner_id = ? AND collection = ? AND document_id = ?
     `);
 
-    const remoteStatements: { sql: string; params: any[] }[] = [];
-
     for (const item of upserts) {
       const collection = String(item?.collection || "");
       const document = item?.document;
@@ -1344,13 +1027,6 @@ app.patch("/api/storage/records", async (req, res) => {
       const payloadStr = JSON.stringify(document);
       if (mirror) {
         insertStmt.run(ownerId, collection, documentId, payloadStr, now);
-        remoteStatements.push({
-          sql: `INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-                payload = excluded.payload, updated_at = excluded.updated_at`,
-          params: [ownerId, collection, documentId, payloadStr, now],
-        });
       }
       if (USE_RELATIONAL) {
         for (const st of upsertToStatements(collection, document, nowIso)) {
@@ -1366,10 +1042,6 @@ app.patch("/api/storage/records", async (req, res) => {
       if (!ALLOWED_STORES.has(collection) || !documentId) continue;
       if (mirror) {
         deleteStmt.run(ownerId, collection, documentId);
-        remoteStatements.push({
-          sql: "DELETE FROM app_documents WHERE owner_id = ? AND collection = ? AND document_id = ?",
-          params: [ownerId, collection, documentId],
-        });
       }
       if (USE_RELATIONAL) {
         for (const st of deleteToStatements(collection, documentId)) {
@@ -1391,35 +1063,30 @@ app.patch("/api/storage/records", async (req, res) => {
       INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at
     `).run(ownerId, revision, now);
-    remoteStatements.push({
-      sql: `INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at`,
-      params: [ownerId, revision, now],
-    });
 
-    // Replicate to Cloudflare D1 non-blocking
-    executeRemoteD1Statements(remoteStatements).catch((remoteErr: any) => {
-      console.warn("Non-blocking Cloudflare D1 replication notice:", remoteErr?.message || remoteErr);
-    });
-
-    const relational = await pushRelationalD1Statements(relStatements);
-
+    // Cloudflare D1 is written by the deployed Worker; this runtime only bumps
+    // its own revision for the local read path.
     return res.json({
       ok: true,
       revision,
-      d1Synced: true,
-      d1DatabaseId: configuredD1DatabaseId,
       upserted: upserts.length,
       deleted: deletes.length,
       backend: USE_RELATIONAL ? "relational" : "documents",
       relationalStatements: relStatements.length,
-      relationalSynced: relational.success,
-      relationalError: (relational as any).error,
+      // A relational write that throws here fails the whole PATCH, so reaching this
+      // response means the live catalog rows are in place.
+      relationalSynced: true,
     });
   } catch (error: any) {
     return res.status(500).json({ error: error.message || "Failed to patch records" });
   }
 });
+
+/**
+ * Reported for parity with the Worker health payload. The Node runtime holds no
+ * Cloudflare credentials: the deployed Worker owns every D1 write.
+ */
+const NODE_D1_DATABASE_ID = process.env.CLOUDFLARE_D1_DATABASE_ID || "3e95a550-a091-490b-819d-f0acb7ea8dd8";
 
 app.get("/api/storage/d1/health", async (req, res) => {
   try {
@@ -1458,151 +1125,22 @@ app.get("/api/storage/d1/health", async (req, res) => {
       status: "healthy",
       connected: true,
       backend: USE_RELATIONAL ? "relational" : "documents",
-      databaseId: configuredD1DatabaseId,
-      accountId: configuredAccountId,
+      databaseId: NODE_D1_DATABASE_ID,
       revision: Number(revRow?.revision || 0),
       totalDocuments: Number(countRow?.total || 0),
       relational,
       latencyMs,
       endpoint: "Cloudflare D1 Primary Edge",
-      remoteSync: {
-        configured: Boolean(configuredApiToken),
-        authValid: cloudflareAuthStatus.valid,
-        status: !configuredApiToken ? "unconfigured" : !cloudflareAuthStatus.valid ? "auth_error" : "synced",
-        message: !configuredApiToken
-          ? "Local D1 SQLite active. Cloudflare API token not configured."
-          : !cloudflareAuthStatus.valid
-            ? (cloudflareAuthStatus.errorMessage || "Cloudflare API token returned 401. Local database serving requests.")
-            : "Cloudflare D1 edge connected.",
-      },
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
     return res.status(500).json({
       status: "unhealthy",
       connected: false,
-      databaseId: configuredD1DatabaseId,
+      databaseId: NODE_D1_DATABASE_ID,
       error: error.message || "D1 storage check failed",
       timestamp: new Date().toISOString(),
     });
-  }
-});
-
-// Cloudflare D1 Configuration APIs for user credential management
-app.get("/api/storage/d1/config", (req, res) => {
-  res.json({
-    configured: Boolean(configuredApiToken),
-    hasToken: Boolean(configuredApiToken),
-    maskedToken: configuredApiToken
-      ? (configuredApiToken.length > 8
-          ? configuredApiToken.slice(0, 4) + "••••••••" + configuredApiToken.slice(-4)
-          : "••••••••")
-      : "",
-    accountId: configuredAccountId,
-    databaseId: configuredD1DatabaseId,
-    authStatus: cloudflareAuthStatus,
-  });
-});
-
-app.post("/api/storage/d1/config", async (req, res) => {
-  try {
-    const { apiToken, accountId, databaseId, testOnly } = req.body || {};
-    const newToken = apiToken !== undefined ? String(apiToken).trim() : configuredApiToken;
-    const newAccountId = accountId ? String(accountId).trim() : configuredAccountId;
-    const newDbId = databaseId ? String(databaseId).trim() : configuredD1DatabaseId;
-
-    if (!newToken) {
-      if (!testOnly) {
-        configuredApiToken = "";
-        configuredAccountId = newAccountId;
-        configuredD1DatabaseId = newDbId;
-        cloudflareAuthStatus = { valid: false, lastChecked: Date.now(), errorMessage: "Token cleared" };
-        updateEnvFile("", newAccountId, newDbId);
-        const now = Date.now();
-        db.prepare(`
-          INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-          VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-            payload = excluded.payload,
-            updated_at = excluded.updated_at
-        `).run("system", "system_config", "cloudflare_d1", JSON.stringify({ apiToken: "", accountId: newAccountId, databaseId: newDbId }), now);
-      }
-      return res.json({ ok: true, message: "Cloudflare token cleared." });
-    }
-
-    // Verify token with Cloudflare API
-    let verifySuccess = false;
-    let verifyError = "";
-    try {
-      const testRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${newAccountId}/d1/database/${newDbId}`, {
-        headers: {
-          "Authorization": `Bearer ${newToken}`,
-          "Content-Type": "application/json",
-        },
-        signal: AbortSignal.timeout(6000),
-      });
-
-      const testData = (await testRes.json()) as any;
-      if (testRes.ok && testData.success) {
-        verifySuccess = true;
-      } else {
-        verifyError = testData.errors?.[0]?.message || `HTTP ${testRes.status} authentication failure`;
-      }
-    } catch (fetchErr: any) {
-      verifyError = fetchErr.message || "Network request timed out or failed";
-    }
-
-    if (testOnly) {
-      return res.json({
-        ok: verifySuccess,
-        error: verifyError,
-        message: verifySuccess ? "Cloudflare API token is valid!" : `Verification failed: ${verifyError}`,
-      });
-    }
-
-    // Save configuration
-    configuredApiToken = newToken;
-    configuredAccountId = newAccountId;
-    configuredD1DatabaseId = newDbId;
-    cloudflareAuthStatus = {
-      valid: verifySuccess,
-      lastChecked: Date.now(),
-      errorMessage: verifySuccess ? undefined : verifyError,
-    };
-
-    updateEnvFile(newToken, newAccountId, newDbId);
-
-    const now = Date.now();
-    db.prepare(`
-      INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-        payload = excluded.payload,
-        updated_at = excluded.updated_at
-    `).run("system", "system_config", "cloudflare_d1", JSON.stringify({
-      apiToken: newToken,
-      accountId: newAccountId,
-      databaseId: newDbId,
-    }), now);
-
-    // If verified successfully, trigger a background hydration/sync
-    if (verifySuccess) {
-      lastCloudflareSyncTime = 0;
-      syncFromCloudflareD1WithLock().catch((err) => {
-        console.warn("Post-token-save sync notice:", err?.message || err);
-      });
-    }
-
-    return res.json({
-      ok: true,
-      verified: verifySuccess,
-      warning: !verifySuccess ? `Token saved, but Cloudflare test returned: ${verifyError}.` : undefined,
-      message: verifySuccess
-        ? "Cloudflare API token verified and saved! Edge replication active."
-        : `Token saved (Note: verification failed: ${verifyError}).`,
-    });
-  } catch (err: any) {
-    return res.status(500).json({ ok: false, error: err.message || "Failed to update config" });
   }
 });
 
@@ -1684,375 +1222,6 @@ function normalizeDocumentPayload(collection: string, payloadStr: string): strin
     return payloadStr;
   }
 }
-
-async function syncFromCloudflareD1() {
-  const accountId = configuredAccountId;
-  const databaseId = configuredD1DatabaseId;
-  const token = configuredApiToken;
-
-  if (!token || !accountId || !databaseId) {
-    return { success: false, reason: "skipped_or_missing_credentials" };
-  }
-
-  if (!cloudflareAuthStatus.valid && Date.now() - cloudflareAuthStatus.lastChecked < 60000) {
-    return { success: false, reason: "auth_failed_paused", error: cloudflareAuthStatus.errorMessage };
-  }
-
-  try {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}/query`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        sql: "SELECT owner_id, collection, document_id, payload, updated_at FROM app_documents;",
-      }),
-      signal: AbortSignal.timeout(4000),
-    });
-
-    if (res.status === 401 || res.status === 403) {
-      cloudflareAuthStatus = {
-        valid: false,
-        lastChecked: Date.now(),
-        errorMessage: "Cloudflare API token authentication failed (HTTP " + res.status + ")",
-      };
-      console.warn("Cloudflare D1 sync auth failure: token rejected. Using local SQLite store.");
-      return { success: false, reason: "auth_failed", error: cloudflareAuthStatus.errorMessage };
-    }
-
-    const data = (await res.json()) as any;
-    if (!res.ok || !data.success) {
-      if (data.errors?.[0]?.code === 10000 || data.errors?.[0]?.message?.includes("Authentication")) {
-        cloudflareAuthStatus = { valid: false, lastChecked: Date.now(), errorMessage: data.errors?.[0]?.message };
-      }
-      return { success: false, error: data.errors?.[0]?.message || "Cloudflare D1 query failed" };
-    }
-
-    cloudflareAuthStatus = { valid: true, lastChecked: Date.now() };
-    const docs = data.result?.[0]?.results || [];
-
-    if (docs.length > 0) {
-      const insertStmt = db.prepare(`
-        INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-          payload = excluded.payload, updated_at = excluded.updated_at
-        WHERE excluded.updated_at IS NULL OR app_documents.updated_at IS NULL OR excluded.updated_at >= app_documents.updated_at
-      `);
-      db.exec("BEGIN TRANSACTION;");
-      for (const doc of docs) {
-        const normalized = normalizeDocumentPayload(doc.collection, doc.payload);
-        insertStmt.run(doc.owner_id, doc.collection, doc.document_id, normalized, doc.updated_at);
-      }
-      db.exec("COMMIT;");
-      console.log(`âœ“ Synced ${docs.length} documents from Cloudflare D1 into local SQLite store.`);
-    }
-
-    const revRes = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        sql: "SELECT owner_id, revision, updated_at FROM sync_revisions;",
-      }),
-      signal: AbortSignal.timeout(4000),
-    });
-    const revData = (await revRes.json()) as any;
-    const revs = revData.result?.[0]?.results || [];
-    if (revs.length > 0) {
-      const revStmt = db.prepare(`
-        INSERT INTO sync_revisions (owner_id, revision, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at
-      `);
-      for (const r of revs) {
-        revStmt.run(r.owner_id, r.revision, r.updated_at);
-      }
-    }
-
-    return { success: true, count: docs.length };
-  } catch (err: any) {
-    console.warn("Could not sync from Cloudflare D1:", err.message);
-    return { success: false, error: err.message };
-  }
-}
-
-app.post("/api/storage/d1/pull", async (req, res) => {
-  try {
-    const syncRes = await syncFromCloudflareD1WithLock();
-    const ownerId = BUSINESS_OWNER_ID;
-    const countRow = db.prepare("SELECT count(*) as total FROM app_documents WHERE owner_id = ?").get(ownerId) as any;
-    const revRow = db.prepare("SELECT revision FROM sync_revisions WHERE owner_id = ?").get(ownerId) as any;
-    return res.json({
-      ok: true,
-      result: syncRes,
-      totalDocuments: Number(countRow?.total || 0),
-      revision: Number(revRow?.revision || 0),
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error: any) {
-    return res.status(500).json({ error: error.message || "Failed to pull from D1" });
-  }
-});
-
-app.post("/api/storage/d1/push-full", async (req, res) => {
-  try {
-    const ownerId = BUSINESS_OWNER_ID;
-    const rows = db.prepare(`
-      SELECT collection, document_id, payload, updated_at FROM app_documents
-      WHERE owner_id = ?
-    `).all(ownerId) as any[];
-
-    const remoteStatements: { sql: string; params: any[] }[] = [];
-
-    for (const row of rows) {
-      remoteStatements.push({
-        sql: `INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-              VALUES (?, ?, ?, ?, ?)
-              ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-              payload = excluded.payload, updated_at = excluded.updated_at`,
-        params: [ownerId, row.collection, row.document_id, row.payload, row.updated_at],
-      });
-    }
-
-    const revRow = db.prepare("SELECT revision, updated_at FROM sync_revisions WHERE owner_id = ?").get(ownerId) as any;
-    if (revRow) {
-      remoteStatements.push({
-        sql: `INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?)
-              ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at`,
-        params: [ownerId, revRow.revision, revRow.updated_at],
-      });
-    }
-
-    await executeRemoteD1Statements(remoteStatements);
-
-    return res.json({
-      ok: true,
-      d1Synced: true,
-      d1DatabaseId: configuredD1DatabaseId,
-      totalDocuments: rows.length,
-    });
-  } catch (error: any) {
-    return res.status(500).json({ error: error.message || "Failed to push full database to D1" });
-  }
-});
-
-async function runHistoricalDeliveryDataMigration() {
-  const ownerId = BUSINESS_OWNER_ID;
-  const salesRows = db.prepare("SELECT document_id, payload, updated_at FROM app_documents WHERE owner_id = ? AND collection = 'sales'").all(ownerId) as any[];
-  const expenseRows = db.prepare("SELECT document_id, payload, updated_at FROM app_documents WHERE owner_id = ? AND collection = 'expenses'").all(ownerId) as any[];
-  const mmRows = db.prepare("SELECT document_id, payload, updated_at FROM app_documents WHERE owner_id = ? AND collection = 'moneyMovements'").all(ownerId) as any[];
-
-  const expensesMap = new Map<string, any>();
-  for (const r of expenseRows) {
-    try {
-      expensesMap.set(r.document_id, { row: r, doc: JSON.parse(r.payload) });
-    } catch {}
-  }
-
-  const mmMap = new Map<string, any>();
-  for (const r of mmRows) {
-    try {
-      mmMap.set(r.document_id, { row: r, doc: JSON.parse(r.payload) });
-    } catch {}
-  }
-
-  const insertDocStmt = db.prepare(`
-    INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-      payload = excluded.payload, updated_at = excluded.updated_at
-  `);
-
-  const remoteStatements: { sql: string; params: any[] }[] = [];
-  let migratedCount = 0;
-  const now = Date.now();
-
-  for (const sRow of salesRows) {
-    let sale: any;
-    try {
-      sale = JSON.parse(sRow.payload);
-    } catch {
-      continue;
-    }
-    const isHist = Boolean(
-      sale.isHistorical ||
-      (typeof sale.id === "string" && sale.id.startsWith("sale-imp-")) ||
-      (typeof sale.notes === "string" &&
-        (sale.notes.includes("Historical") ||
-          sale.notes.includes("Past Entry") ||
-          sale.notes.includes("Import Wizard")))
-    );
-    const fee = Number(sale.deliveryFee) || 0;
-    if (!isHist || fee <= 0) continue;
-
-    let saleUpdated = false;
-    if (!sale.isHistorical) {
-      sale.isHistorical = true;
-      saleUpdated = true;
-    }
-
-    // Look for matching expense
-    let matchingExpEntry: any = null;
-    for (const entry of expensesMap.values()) {
-      const e = entry.doc;
-      if (sale.expenseId && e.id === sale.expenseId) { matchingExpEntry = entry; break; }
-      if (e.saleId && e.saleId === sale.id) { matchingExpEntry = entry; break; }
-      if (e.id === `exp-hist-${sale.id}`) { matchingExpEntry = entry; break; }
-      if (e.category === "Logistics" && e.description && typeof e.description === "string" && e.description.includes(sale.id)) {
-        matchingExpEntry = entry; break;
-      }
-    }
-
-    let expId = sale.expenseId || (matchingExpEntry ? matchingExpEntry.doc.id : `exp-hist-${sale.id}`);
-
-    if (matchingExpEntry) {
-      let expUpdated = false;
-      const expDoc = matchingExpEntry.doc;
-      if (!expDoc.isHistorical) { expDoc.isHistorical = true; expUpdated = true; }
-      if (expDoc.saleId !== sale.id) { expDoc.saleId = sale.id; expUpdated = true; }
-      if (expDoc.amount !== fee) { expDoc.amount = fee; expUpdated = true; }
-      if (expDoc.category !== "Logistics") { expDoc.category = "Logistics"; expUpdated = true; }
-      if (sale.expenseId !== expDoc.id) { sale.expenseId = expDoc.id; saleUpdated = true; }
-
-      const payloadStr = JSON.stringify(expDoc);
-      insertDocStmt.run(ownerId, "expenses", expDoc.id, payloadStr, now);
-      remoteStatements.push({
-        sql: `INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-              VALUES (?, ?, ?, ?, ?)
-              ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-              payload = excluded.payload, updated_at = excluded.updated_at`,
-        params: [ownerId, "expenses", expDoc.id, payloadStr, now],
-      });
-      migratedCount++;
-    } else {
-      // Create new expense
-      const invoiceRef = sale.invoiceNo && sale.invoiceNo !== "N/A"
-        ? sale.invoiceNo
-        : (typeof sale.id === "string" ? sale.id.slice(-6).toUpperCase() : "HIST");
-      const saleDate = sale.createdAt ? String(sale.createdAt).slice(0, 10) : new Date().toISOString().slice(0, 10);
-      const saleIso = sale.createdAt || new Date().toISOString();
-
-      const newExpense = {
-        id: expId,
-        title: `Logistics Delivery Fee - Historical (${invoiceRef})`,
-        category: "Logistics",
-        amount: fee,
-        description: `Historical delivery fee expense for ${sale.customerName || "Walk-in Customer"}. Sale ${invoiceRef}.${sale.notes ? " " + sale.notes : ""}`.trim(),
-        paidBy: sale.createdBy || "Administrator",
-        paymentMethod: sale.paymentMethod === "Split" ? "Cash" : (sale.paymentMethod || "Cash"),
-        date: saleDate,
-        createdAt: saleIso,
-        isHistorical: true,
-        saleId: sale.id,
-      };
-
-      const payloadStr = JSON.stringify(newExpense);
-      insertDocStmt.run(ownerId, "expenses", newExpense.id, payloadStr, now);
-      remoteStatements.push({
-        sql: `INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-              VALUES (?, ?, ?, ?, ?)
-              ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-              payload = excluded.payload, updated_at = excluded.updated_at`,
-        params: [ownerId, "expenses", newExpense.id, payloadStr, now],
-      });
-      expensesMap.set(newExpense.id, { row: null, doc: newExpense });
-      sale.expenseId = expId;
-      saleUpdated = true;
-      migratedCount++;
-    }
-
-    if (sale.expenseId !== expId) {
-      sale.expenseId = expId;
-      saleUpdated = true;
-    }
-
-    const salePayloadStr = JSON.stringify(sale);
-    insertDocStmt.run(ownerId, "sales", sale.id, salePayloadStr, now);
-    remoteStatements.push({
-      sql: `INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-            payload = excluded.payload, updated_at = excluded.updated_at`,
-      params: [ownerId, "sales", sale.id, salePayloadStr, now],
-    });
-    migratedCount++;
-
-    // Check MoneyMovement
-    const mmId = `mm-hist-exp-${sale.id}`;
-    let hasMM = false;
-    for (const mmEntry of mmMap.values()) {
-      if (mmEntry.doc.referenceId === expId || mmEntry.doc.id === mmId) {
-        hasMM = true;
-        break;
-      }
-    }
-    const saleIso = sale.createdAt || new Date().toISOString();
-    const isCash = sale.paymentMethod === "Cash";
-    const invoiceRef = sale.invoiceNo && sale.invoiceNo !== "N/A"
-      ? sale.invoiceNo
-      : (typeof sale.id === "string" ? sale.id.slice(-6).toUpperCase() : "HIST");
-    const mmDoc = {
-      id: mmId,
-      date: saleIso,
-      type: "Expense Outflow",
-      subtype: "Logistics",
-      sourceAccount: isCash ? "Physical Cash" : "Biz Account",
-      amount: fee,
-      referenceNo: `Logistics Delivery Fee - Historical (${invoiceRef})`,
-      referenceId: expId,
-      performedBy: sale.createdBy || "Administrator",
-      notes: `Historical Delivery fee expense: Logistics Delivery Fee - Historical (${invoiceRef})`,
-      createdAt: saleIso,
-    };
-    const mmPayloadStr = JSON.stringify(mmDoc);
-    insertDocStmt.run(ownerId, "moneyMovements", mmDoc.id, mmPayloadStr, now);
-    remoteStatements.push({
-      sql: `INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-            payload = excluded.payload, updated_at = excluded.updated_at`,
-      params: [ownerId, "moneyMovements", mmDoc.id, mmPayloadStr, now],
-    });
-    mmMap.set(mmDoc.id, { row: null, doc: mmDoc });
-    migratedCount++;
-  }
-
-  if (remoteStatements.length > 0) {
-    const newRev = Date.now();
-    db.prepare(`
-      INSERT INTO sync_revisions (owner_id, revision, updated_at)
-      VALUES (?, ?, ?)
-      ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at
-    `).run(ownerId, newRev, newRev);
-
-    remoteStatements.push({
-      sql: `INSERT INTO sync_revisions (owner_id, revision, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at`,
-      params: [ownerId, newRev, newRev],
-    });
-
-    const d1Res = await executeRemoteD1Statements(remoteStatements);
-    console.log(`âœ“ Executed historical delivery data migration. Migrated ${migratedCount} operations, synced to Cloudflare D1:`, d1Res);
-    return { ok: true, migratedCount, d1Res, newRev };
-  }
-
-  return { ok: true, migratedCount: 0 };
-}
-
-app.post("/api/storage/d1/migrate-historical", async (req, res) => {
-  try {
-    const result = await runHistoricalDeliveryDataMigration();
-    return res.json({ ok: true, result, timestamp: new Date().toISOString() });
-  } catch (error: any) {
-    return res.status(500).json({ error: error.message || "Failed to execute historical migration" });
-  }
-});
 
 // =================== GOOGLE DRIVE BACKUP PROXY ROUTES ===================
 
@@ -2395,16 +1564,14 @@ async function startServer() {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`IdoferaLabs Server running on http://0.0.0.0:${PORT}`);
 
-    // Asynchronously perform background hydration and migration without blocking HTTP readiness
+    // Asynchronously seed the business owner without blocking HTTP readiness.
+    // The deployed Worker owns Cloudflare D1, so startup only prepares this
+    // runtime's own store.
     (async () => {
       try {
-        console.log("Hydrating business database from Cloudflare D1 in background...");
-        await syncFromCloudflareD1();
-        lastCloudflareSyncTime = Date.now();
         await ensureBusinessDataOwner();
-        await runHistoricalDeliveryDataMigration();
-      } catch (syncErr: any) {
-        console.warn("Background startup hydration warning:", syncErr?.message || syncErr);
+      } catch (seedErr: any) {
+        console.warn("Background startup seed warning:", seedErr?.message || seedErr);
       }
 
       if (process.env.MALL_SEED_HEROES === 'true') {

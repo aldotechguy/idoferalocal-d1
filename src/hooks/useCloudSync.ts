@@ -29,8 +29,6 @@ import {
   registerAutoSyncFlush,
   flushAutoSyncNow,
   scheduleAutoSync,
-  readDeltaCursor,
-  saveDeltaCursor,
   getD1PendingDeletions,
   type D1Snapshot,
   type D1HealthStatus,
@@ -173,9 +171,9 @@ export function useCloudSync() {
 
   /**
    * Automatic save. A local edit marks only its own key, so this sends just those
-   * records in one micro-batch and then merges back only what changed since the
-   * last confirmed read. It deliberately avoids the full-store push, the ~1,900
-   * row snapshot pull and the health read that the manual Sync path performs.
+   * records in one micro-batch. It deliberately avoids the full-store push and
+   * the health read that the manual Sync path performs; convergence on other
+   * devices' writes rides the revision-guarded full snapshot (refresh or Pull).
    */
   const flushAutoSync = useCallback(async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
@@ -190,8 +188,6 @@ export function useCloudSync() {
       readRecord: async (collection: string, documentId: string) => (
         isStoreName(collection) ? getItem<Record<string, unknown>>(collection, documentId) : null
       ),
-      readCursor: async () => readDeltaCursor(),
-      saveCursor: async (cursor: string | null) => saveDeltaCursor(cursor),
     };
     try {
       if (!changes.length) {

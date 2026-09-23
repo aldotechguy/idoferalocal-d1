@@ -280,7 +280,10 @@ async function emptyRelational(env: Env): Promise<boolean> {
 /**
  * Phase 4 bridge (edge) — when the relational tables are empty but legacy
  * app_documents rows exist (fresh database, or the pre-ETL prod D1), project the
- * documents once. Chunked so it stays inside D1 limits; idempotent per isolate.
+ * documents once. Chunked so it stays inside D1 limits. `relationalBackfilled` is a
+ * per-isolate cache of "this isolate already checked", never proof that the bound
+ * database still holds rows: the read path below still falls back to documents when
+ * a relational read comes back empty.
  */
 async function ensureRelationalBackfill(env: Env): Promise<{ documents: number; statements: number; skipped: number }> {
   const none = { documents: 0, statements: 0, skipped: 0 };
@@ -598,77 +601,6 @@ function snapshotResponse(body: Record<string, unknown>, revision: number, backe
   return response;
 }
 
-/** One bounded page: a single edit must never trigger a whole-store read. */
-const SNAPSHOT_DELTA_LIMIT = 500;
-
-type SnapshotCursor = { ms: number; collection: string; documentId: string };
-
-/**
- * Composite delta watermark. `updated_at` alone cannot bound a read: the bulk
- * PUT path stamps every row with the same millisecond, so a watermark of
- * `since.updated_at` would silently skip every row sharing that millisecond on
- * the next page. The (collection, document_id) tail makes the watermark a
- * strict keyset bound instead.
- */
-function parseSnapshotCursor(since: string | null): SnapshotCursor | null {
-  if (!since) return null;
-  try {
-    const parsed = JSON.parse(since);
-    if (parsed && typeof parsed === 'object') {
-      const ms = Number((parsed as { ms?: unknown }).ms);
-      if (Number.isFinite(ms) && ms >= 0) {
-        return {
-          ms,
-          collection: String((parsed as { collection?: unknown }).collection || ''),
-          documentId: String((parsed as { documentId?: unknown }).documentId || ''),
-        };
-      }
-      return null;
-    }
-  } catch {
-    // Legacy ISO-string watermarks predate the composite cursor.
-  }
-  const ms = Date.parse(since);
-  return Number.isFinite(ms) ? { ms, collection: '', documentId: '' } : null;
-}
-
-/**
- * Delta read for an open staff workspace, which already holds the full store and
- * therefore only needs the rows written after its watermark. Returns one bounded
- * page plus the next cursor; the client repeats while `bounded` is true.
- */
-async function readSnapshotDelta(env: Env, ownerId: string, revision: number, since: string) {
-  const watermark = parseSnapshotCursor(since);
-  const sinceMs = watermark?.ms ?? 0;
-  const rows = await env.DB.prepare(
-    `SELECT collection, document_id, payload, updated_at FROM app_documents
-     WHERE owner_id = ?
-       AND (updated_at > ? OR (updated_at = ? AND (collection > ? OR (collection = ? AND document_id > ?))))
-     ORDER BY updated_at, collection, document_id LIMIT ?`,
-  ).bind(ownerId, sinceMs, sinceMs, watermark?.collection ?? '', watermark?.collection ?? '', watermark?.documentId ?? '', SNAPSHOT_DELTA_LIMIT)
-    .all<{ collection: string; document_id: string; payload: string; updated_at: number }>();
-  const list = rows.results || [];
-  let cursor: SnapshotCursor = { ms: sinceMs, collection: watermark?.collection ?? '', documentId: watermark?.documentId ?? '' };
-  const stores: Record<string, unknown[]> = {};
-  for (const row of list) {
-    cursor = { ms: Number(row.updated_at) || 0, collection: row.collection, documentId: row.document_id };
-    try {
-      (stores[row.collection] ||= []).push(JSON.parse(row.payload));
-    } catch {
-      // Ignore a malformed row without losing the rest of the page.
-    }
-  }
-  return snapshotResponse({
-    stores,
-    hasData: Object.keys(stores).length > 0,
-    revision,
-    backend: 'documents',
-    delta: true,
-    cursor: JSON.stringify(cursor),
-    bounded: list.length >= SNAPSHOT_DELTA_LIMIT,
-  }, revision, 'documents');
-}
-
 async function readSnapshot(request: Request, env: Env) {
   await ensureSchema(env);
   const ownerId = BUSINESS_OWNER_ID;
@@ -677,11 +609,9 @@ async function readSnapshot(request: Request, env: Env) {
     .bind(ownerId).all<{ revision: number }>();
   const revision = Number(revisions.results?.[0]?.revision || 0);
 
-  // A supplied watermark means delta mode, and is handled before the relational
-  // branch so an automatic save never falls back to the 18-query snapshot builder.
-  const since = new URL(request.url).searchParams.get('since') || null;
-  if (since) return readSnapshotDelta(env, ownerId, revision, since);
-
+  // Option B: every read is a full snapshot. A legacy `?since=` watermark is
+  // ignored rather than answered with a partial store — the revision guard
+  // above still 304s unchanged stores, so the common case stays cheap.
   // Phase 4: relational read path. Falls back to the document store when the
   // relational tables are still empty (pre-ETL / fresh database).
   try {
@@ -689,14 +619,24 @@ async function readSnapshot(request: Request, env: Env) {
     if (relationalBackfilled) {
       if (snapshotNotModified(request, revision, 'relational')) return snapshotUnchanged(revision, 'relational');
       const { stores, capped } = await buildSnapshot(makeD1QueryAll(env));
-      return snapshotResponse({
-        stores,
-        hasData: Object.keys(stores).length > 0,
-        revision,
-        backend: 'relational',
-        backfill: backfill.statements ? backfill : undefined,
-        ...(capped.length ? { bounds: { capped } } : {}),
-      }, revision, 'relational');
+      // The flag is a cache, not proof: after a database reset (or against a
+      // different bound D1) it can be stale while the tables are empty. Answering
+      // with a blank catalog would look like data loss, so an empty relational read
+      // falls through to the document read below — the same fallback a pre-ETL
+      // database takes. `toStores` always emits a key per collection (usually as an
+      // empty array), so emptiness must be counted in rows, not in keys.
+      const relationalRows = Object.values(stores).reduce<number>(
+        (total, docs) => total + (Array.isArray(docs) ? docs.length : 0), 0);
+      if (relationalRows > 0) {
+        return snapshotResponse({
+          stores,
+          hasData: true,
+          revision,
+          backend: 'relational',
+          backfill: backfill.statements ? backfill : undefined,
+          ...(capped.length ? { bounds: { capped } } : {}),
+        }, revision, 'relational');
+      }
     }
   } catch (error) {
     console.warn('Relational snapshot failed, serving documents:', error instanceof Error ? error.message : error);
@@ -778,18 +718,6 @@ async function patchRecords(request: Request, env: Env) {
     relationalError = error instanceof Error ? error.message : String(error);
     console.warn('Relational record write failed:', relationalError);
   }
-  // Keyset cursor for the next delta: the max key this batch wrote, so rows
-  // sharing the same millisecond with rows from another batch are never
-  // excluded by a bare `updated_at > ?` bound. The cursor advances even though
-  // PATCHes are mirror-less: delta reads see PUT-driven mirror rows only, and
-  // every client still converges on PATCH changes through the revision bump
-  // above plus the full relational snapshot read.
-  const lastWritten = [...writtenKeys]
-    .sort((left, right) => (left.collection < right.collection ? -1 : left.collection > right.collection ? 1 : left.documentId < right.documentId ? -1 : left.documentId > right.documentId ? 1 : 0))
-    .pop();
-  const patchCursor = lastWritten
-    ? JSON.stringify({ ms: now, collection: lastWritten.collection, documentId: lastWritten.documentId })
-    : nowIso;
   return json({
     ok: true,
     revision,
@@ -802,8 +730,6 @@ async function patchRecords(request: Request, env: Env) {
     relationalStatements: relationalStmts.length,
     relationalSynced,
     relationalError,
-    // Server-clock watermark the client stores to bound its next delta read.
-    cursor: patchCursor,
   });
 }
 

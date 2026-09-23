@@ -6,7 +6,7 @@ import { migrateSnapshot } from '../utils/dataMigration';
 export type D1Record = Record<string, any>;
 export type D1Snapshot = Record<string, D1Record[]>;
 
-type SnapshotResponse = {stores: D1Snapshot; hasData: boolean; revision: number; backend?: string; notModified?: boolean};
+type SnapshotResponse = {stores: D1Snapshot; hasData: boolean; revision: number; backend?: string; notModified?: boolean; bounds?: {capped?: string[]}};
 
 const REVISION_KEY = 'idofera_d1_revision';
 /**
@@ -67,7 +67,7 @@ function getUnsyncedKeys(): Set<string> {
   }
 }
 
-export function mergeRemoteWithPendingLocal(local: D1Snapshot, remote: D1Snapshot): D1Snapshot {
+export function mergeRemoteWithPendingLocal(local: D1Snapshot, remote: D1Snapshot, capped?: ReadonlySet<string>): D1Snapshot {
   const unsyncedKeys = getUnsyncedKeys();
   const pendingDeletions = new Set(getDeletions().map(({collection, documentId}) => `${collection}:${documentId}`));
   const merged: D1Snapshot = {};
@@ -102,18 +102,19 @@ export function mergeRemoteWithPendingLocal(local: D1Snapshot, remote: D1Snapsho
 
       const remoteRecord = records.get(id);
 
-      if (!remoteRecord && unsyncedKeys.has(itemKey)) {
+      if (!remoteRecord) {
         // Preserve records explicitly queued by saveDocument. A missing local
         // record must not be inferred as pending after D1 has acknowledged it.
-        records.set(id, record);
-      } else {
-        // D1 is authoritative unless this exact record is explicitly pending.
-        // Timestamp-only inference caused acknowledged records to reappear as
-        // unsynced when clients had incomplete/legacy timestamps.
-        const isLocallyModified = unsyncedKeys.has(itemKey);
-        if (isLocallyModified) {
+        // A capped response is not exhaustive: rows the server cap omitted must
+        // survive locally instead of being inferred as deleted elsewhere.
+        if (unsyncedKeys.has(itemKey) || capped?.has(store)) {
           records.set(id, record);
         }
+      } else if (unsyncedKeys.has(itemKey)) {
+        // An explicitly pending local edit wins over the remote copy.
+        // (Timestamp-only inference caused acknowledged records to reappear as
+        // unsynced when clients had incomplete/legacy timestamps.)
+        records.set(id, record);
       }
     }
 
@@ -159,6 +160,27 @@ export function forgetSnapshotGuard() {
   catch { /* storage unavailable */ }
 }
 
+/**
+ * Bump when the sync engine's contract changes in a way that makes previously
+ * persisted snapshot state unsafe. The old delta-replace engine could leave
+ * wholesale-truncated IndexedDB stores behind; on a version mismatch every
+ * browser forces one clean full relational re-read on its next boot, rebuilding
+ * local stores from D1 (which was never damaged).
+ */
+const SYNC_ENGINE_VERSION = 1;
+const SYNC_ENGINE_VERSION_KEY = 'idofera_sync_engine_version';
+
+export function enforceSyncEngineVersion() {
+  try {
+    const stored = localStorage.getItem(SYNC_ENGINE_VERSION_KEY);
+    if (stored === String(SYNC_ENGINE_VERSION)) return;
+    localStorage.setItem(SYNC_ENGINE_VERSION_KEY, String(SYNC_ENGINE_VERSION));
+    forgetSnapshotGuard();
+    // A legacy delta watermark must never bound a read on the new engine.
+    localStorage.removeItem('idofera_d1_delta_cursor');
+  } catch { /* storage unavailable: nothing persisted to invalidate */ }
+}
+
 async function readCloudSnapshot(fresh = false): Promise<SnapshotResponse> {
   const authHeaders = await getAuthHeaders();
   const url = fresh ? '/api/storage/snapshot?fresh=true' : '/api/storage/snapshot';
@@ -174,64 +196,6 @@ async function readCloudSnapshot(fresh = false): Promise<SnapshotResponse> {
   const cloud = await response.json() as SnapshotResponse;
   rememberSnapshotGuard(cloud.revision, cloud.backend || 'documents');
   return cloud;
-}
-
-const DELTA_CURSOR_KEY = 'idofera_d1_delta_cursor';
-
-/**
- * Watermark of the last confirmed read, so a delta read can be bounded. It is
- * seeded from the server clock on every push (`cursor` in the PATCH response)
- * because a client clock cannot be trusted to bound a read.
- */
-export function readDeltaCursor(): string | null {
-  try { return localStorage.getItem(DELTA_CURSOR_KEY); } catch { return null; }
-}
-
-export function saveDeltaCursor(cursor: string | null | undefined) {
-  try {
-    if (cursor) localStorage.setItem(DELTA_CURSOR_KEY, cursor);
-    else localStorage.removeItem(DELTA_CURSOR_KEY);
-  } catch { /* storage unavailable: the next delta simply stays unbounded */ }
-}
-
-export function forgetDeltaCursor() {
-  saveDeltaCursor(null);
-}
-
-type SnapshotDelta = {stores: D1Snapshot; cursor: string | null; bounded: boolean; silent: boolean};
-
-/**
- * The delta read is memoized per (cursor, revision) because three consumers can
- * flush the same batch. `silent` failures are never cached, so a transient
- * network error cannot permanently suppress a pull.
- */
-const deltaMemo = new Map<string, SnapshotDelta>();
-
-async function readSnapshotDelta(since: string | null, revision: number): Promise<SnapshotDelta> {
-  const key = `${since || ''}|${revision}`;
-  const cached = deltaMemo.get(key);
-  if (cached) return cached;
-  try {
-    const authHeaders = await getAuthHeaders();
-    const query = since ? `?since=${encodeURIComponent(since)}` : '';
-    const response = await fetch(`/api/storage/snapshot${query}`, {
-      headers: {...(authHeaders as Record<string, string>), 'cache-control': 'no-cache'},
-      credentials: 'include',
-    });
-    if (!response.ok) return {stores: {}, cursor: since, bounded: false, silent: true};
-    const payload = await response.json() as {stores?: D1Snapshot; cursor?: string; bounded?: boolean};
-    const result: SnapshotDelta = {
-      stores: payload.stores || {},
-      cursor: payload.cursor || since,
-      bounded: Boolean(payload.bounded),
-      silent: false,
-    };
-    deltaMemo.set(key, result);
-    if (deltaMemo.size > 8) deltaMemo.delete([...deltaMemo.keys()][0]);
-    return result;
-  } catch {
-    return {stores: {}, cursor: since, bounded: false, silent: true};
-  }
 }
 
 async function writeSnapshot(snapshot: D1Snapshot, expectedRevision: number, force = false) {
@@ -253,6 +217,10 @@ async function writeSnapshot(snapshot: D1Snapshot, expectedRevision: number, for
 }
 
 export async function initializeD1Storage(local?: D1Snapshot): Promise<D1Snapshot | null> {
+  // One-time engine self-heal: a version mismatch drops the guard (and any
+  // legacy delta watermark) so this boot forces one clean full re-read and
+  // rebuilds IndexedDB from D1.
+  enforceSyncEngineVersion();
   // Read current local state from IndexedDB to guarantee 100% of offline/unsynced records are included
   let localSnapshot: D1Snapshot = local || {};
   try {
@@ -270,7 +238,10 @@ export async function initializeD1Storage(local?: D1Snapshot): Promise<D1Snapsho
   localStorage.setItem(REVISION_KEY, String(cloud.revision));
   if (!cloud.hasData) return null;
 
-  const merged = mergeRemoteWithPendingLocal(localSnapshot, cloud.stores);
+  // Capped append-only collections arrive truncated: the merge must union them
+  // by id instead of treating rows the cap omitted as deleted elsewhere.
+  const capped = new Set(cloud.bounds?.capped || []);
+  const merged = mergeRemoteWithPendingLocal(localSnapshot, cloud.stores, capped);
   latestSnapshot = merged;
   // Write merged snapshot back to IndexedDB so all new local records are preserved alongside remote data
   await writeD1SnapshotToIndexedDB(merged);
@@ -278,15 +249,9 @@ export async function initializeD1Storage(local?: D1Snapshot): Promise<D1Snapsho
 }
 
 export async function pullLatestFromD1(): Promise<D1Snapshot | null> {
-  try {
-    await fetch('/api/storage/d1/pull', {
-      method: 'POST',
-      credentials: 'include',
-    });
-  } catch (err) {
-    console.warn('D1 backend pull warning:', err);
-  }
-
+  // Option B: convergence is one guarded full relational read — there is no
+  // backend-side pull to trigger (the old /api/storage/d1/pull route was a
+  // Node-only legacy of the pre-Worker REST bridge and 404s on the Worker).
   const cloud = await readCloudSnapshot(true);
   if (cloud.notModified) return null;
   if (!cloud.hasData) return null;
@@ -300,7 +265,8 @@ export async function pullLatestFromD1(): Promise<D1Snapshot | null> {
     console.warn('IndexedDB read during pullLatestFromD1:', err);
   }
 
-  const merged = mergeRemoteWithPendingLocal(localSnapshot, cloud.stores);
+  const capped = new Set(cloud.bounds?.capped || []);
+  const merged = mergeRemoteWithPendingLocal(localSnapshot, cloud.stores, capped);
   latestSnapshot = merged;
   localStorage.setItem(REVISION_KEY, String(cloud.revision));
 
@@ -414,14 +380,12 @@ export async function syncLocalRecordsToD1(snapshot: D1Snapshot, requestedDeleti
     body: JSON.stringify({upserts, deletes}),
   });
   if (!response.ok) throw Object.assign(new Error(`D1 record sync failed (${response.status})`), {status: response.status});
-  const result = await response.json() as {revision: number; upserted: number; deleted: number; skippedUnchanged?: number; relationalSynced?: boolean; cursor?: string | null};
+  const result = await response.json() as {revision: number; upserted: number; deleted: number; skippedUnchanged?: number; relationalSynced?: boolean};
   if (result.relationalSynced === false) {
     throw new Error('Records reached storage, but the live catalog update failed. Pending changes have been retained. Retry Sync Now; if it fails again, contact support.');
   }
   localStorage.setItem(REVISION_KEY, String(result.revision));
   rememberSnapshotGuard(result.revision, 'relational');
-  // The server clock seeds the delta watermark: a client clock must not bound a read.
-  saveDeltaCursor(result.cursor);
   localStorage.removeItem(REMOTE_PENDING_KEY);
   const submittedDeletionKeys = new Set(deletes.map(({collection, documentId}) => `${collection}:${documentId}`));
   const remainingDeletions = getDeletions().filter(
@@ -441,9 +405,10 @@ export async function syncLocalRecordsToD1(snapshot: D1Snapshot, requestedDeleti
 // Automatic save: coalesced micro-batches
 //
 // A local edit only marks its own key dirty. The flush below sends just those
-// records as one PATCH, replaces the 1,900-row snapshot pull with a bounded
-// `since` delta, and skips the ~2,185-row health read that the manual path
-// performs. Cost per edit is therefore a handful of rows instead of thousands.
+// records as one PATCH and skips the ~2,185-row health read that the manual
+// path performs. Cost per edit is a handful of relational rows; convergence on
+// other devices' writes rides the revision-guarded full snapshot (refresh or
+// manual Pull) — there is no delta read anymore (Option B).
 // ---------------------------------------------------------------------------
 export const AUTO_SYNC_DEBOUNCE_MS = 2000;
 
@@ -503,82 +468,34 @@ function asChangedRecords(records: ChangedRecord[]): ChangedRecord[] {
 export interface AutoSyncDeps {
   /** Read exactly one record; returning null (locally deleted) skips it. */
   readRecord: (collection: string, documentId: string) => Promise<D1Record | null>;
-  /** Watermark of the last confirmed read, for `since`. */
-  readCursor: () => Promise<string | null>;
-  saveCursor: (cursor: string | null) => Promise<void>;
-  /** Defaults to the registered app-level applier (see `registerDeltaApplier`). */
-  applyDelta?: (snapshot: D1Snapshot) => Promise<void>;
   now?: () => string;
-}
-
-/**
- * The app layer owns how delta records reach React state and IndexedDB, so it
- * registers that merge here instead of this service reaching into a provider.
- */
-let deltaApplier: ((snapshot: D1Snapshot) => Promise<void>) | undefined;
-
-export function registerDeltaApplier(applier: ((snapshot: D1Snapshot) => Promise<void>) | undefined) {
-  deltaApplier = applier;
-  return () => { if (deltaApplier === applier) deltaApplier = undefined; };
-}
-
-function applyDeltaToApp(stores: D1Snapshot): Promise<void> {
-  return deltaApplier ? deltaApplier(stores) : Promise.resolve();
 }
 
 export interface AutoSyncResult {
   changedCount: number;
   pushed: boolean;
   skipped?: 'no-changes' | 'not-newer';
-  deltaApplied: number;
 }
 
 /**
- * Push only the changed documents, then pull only what changed since the last
- * confirmed read. A push is rejected with 409 only when the row exists elsewhere
- * with a newer `updatedAt`, which means this device has nothing newer to send.
+ * Push only the changed documents. A push is rejected with 409 only when the row
+ * exists elsewhere with a newer `updatedAt`, which means this device has nothing
+ * newer to send; convergence on that copy rides the revision-guarded full
+ * snapshot (refresh or manual Pull) — there is no delta pull anymore (Option B).
  */
-async function applyAutoSyncDelta(
-  deps: AutoSyncDeps,
-  revision: number,
-  since: string | null,
-): Promise<number> {
-  let applied = 0;
-  let cursor = since;
-  // Without a watermark a delta read cannot be bounded, so it is skipped rather
-  // than pulling the whole store. The push above seeds the cursor for next time.
-  if (!cursor) return 0;
-  // Advance the watermark per page: every page returns the max key it wrote, so
-  // reusing the original `since` would re-read page one forever on multi-page
-  // deltas.
-  let watermark: string | null = since;
-  for (let round = 0; round < 3; round += 1) {
-    const delta = await readSnapshotDelta(watermark, revision);
-    const stores = delta.silent ? {} : (delta.stores || {});
-    const count = Object.values(stores).reduce((total, records) => total + records.length, 0);
-    if (count === 0) break;
-    await (deps.applyDelta || applyDeltaToApp)(stores);
-    applied += count;
-    cursor = delta.cursor || cursor;
-    watermark = delta.cursor || watermark;
-    if (!delta.bounded) break;
-  }
-  await deps.saveCursor(cursor);
-  return applied;
-}
 
 export async function autoSyncChangedRecords(
   records: ChangedRecord[],
   deps: AutoSyncDeps,
 ): Promise<AutoSyncResult> {
   const unique = asChangedRecords(records);
-  if (!unique.length) return {changedCount: 0, pushed: false, skipped: 'no-changes', deltaApplied: 0};
+  if (!unique.length) return {changedCount: 0, pushed: false, skipped: 'no-changes'};
 
   if (autoSyncRunning) {
     // A flush is already in flight; fold this batch into a follow-up run so two
     // consumers can never write the same records concurrently.
     scheduleAutoSync();
-    return {changedCount: unique.length, pushed: false, skipped: 'no-changes', deltaApplied: 0};
+    return {changedCount: unique.length, pushed: false, skipped: 'no-changes'};
   }
   autoSyncRunning = true;
   try {
@@ -600,27 +517,22 @@ async function pushChangedRecords(
     const stamp = deps.now ? deps.now() : new Date().toISOString();
     upserts.push({collection: record.collection, document: {...document, updatedAt: stamp}});
   }
-  if (!upserts.length) return {changedCount: unique.length, pushed: false, skipped: 'no-changes', deltaApplied: 0};
+  if (!upserts.length) return {changedCount: unique.length, pushed: false, skipped: 'no-changes'};
 
   const grouped: D1Snapshot = {};
   for (const {collection, document} of upserts) {
     (grouped[collection] ||= []).push(document);
   }
 
-  const since = await deps.readCursor();
-  let revision: number;
   try {
-    const result = await syncLocalRecordsToD1(grouped);
-    revision = result.revision;
+    await syncLocalRecordsToD1(grouped);
+    return {changedCount: unique.length, pushed: true};
   } catch (error) {
     if ((error as {status?: number})?.status !== 409) throw error;
-    // Another device already stored a newer copy; pull it instead of overwriting.
-    await applyAutoSyncDelta(deps, 0, since);
-    return {changedCount: unique.length, pushed: false, skipped: 'not-newer', deltaApplied: 0};
+    // Another device already stored a newer copy; do not overwrite it. Option B
+    // has no delta pull here — the next guarded full read converges this device.
+    return {changedCount: unique.length, pushed: false, skipped: 'not-newer'};
   }
-
-  const deltaApplied = await applyAutoSyncDelta(deps, revision, since);
-  return {changedCount: unique.length, pushed: true, deltaApplied};
 }
 
 export async function readD1ForBackup(): Promise<{stores: D1Snapshot; revision: number}> {
@@ -649,12 +561,6 @@ export interface D1HealthStatus {
   endpoint: string;
   error?: string;
   status: 'healthy' | 'degraded' | 'offline' | 'error';
-  remoteSync?: {
-    configured: boolean;
-    authValid: boolean;
-    status: string;
-    message: string;
-  };
 }
 
 export async function checkD1Health(detail = false): Promise<D1HealthStatus> {
@@ -703,7 +609,6 @@ export async function checkD1Health(detail = false): Promise<D1HealthStatus> {
         relational: data.relational,
         endpoint: data.endpoint || 'Cloudflare D1 Primary Edge',
         status: latencyMs > 3000 ? 'degraded' : 'healthy',
-        remoteSync: data.remoteSync,
       };
     } else {
       return {
@@ -788,42 +693,3 @@ async function flushD1Snapshot() {
   }
 }
 
-export interface D1ConfigInfo {
-  configured: boolean;
-  hasToken: boolean;
-  maskedToken: string;
-  accountId: string;
-  databaseId: string;
-  authStatus?: {
-    valid: boolean;
-    lastChecked: number;
-    errorMessage?: string;
-  };
-}
-
-export async function getD1Config(): Promise<D1ConfigInfo> {
-  const authHeaders = await getAuthHeaders();
-  const res = await fetch('/api/storage/d1/config', {
-    headers: { ...authHeaders, 'cache-control': 'no-cache' },
-  });
-  if (!res.ok) throw new Error('Failed to fetch D1 config');
-  return res.json();
-}
-
-export async function saveD1Config(payload: {
-  apiToken?: string;
-  accountId?: string;
-  databaseId?: string;
-  testOnly?: boolean;
-}): Promise<{ ok: boolean; message: string; error?: string; warning?: string; verified?: boolean }> {
-  const authHeaders = await getAuthHeaders();
-  const res = await fetch('/api/storage/d1/config', {
-    method: 'POST',
-    headers: {
-      ...authHeaders,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-  return res.json();
-}

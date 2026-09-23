@@ -35,7 +35,7 @@
 - `src/services/d1StorageService.ts` — snapshot merge (local IndexedDB <-> D1 payload)
 - `src/db/indexedDB.ts` — offline cache
 - `src/firebase/syncManager.ts`, `src/hooks/useCloudSync.ts` — revision-based sync
-- `scripts/push-to-d1.ts` — local `data/d1_storage.db` -> Cloud D1 via REST `/query` (batches of 25/50, UPSERT app_documents)
+- `scripts/push-to-d1.ts` — local `data/d1_storage.db` -> Cloud D1 via REST `/query` (batches of 25/50, UPSERT app_documents) — **removed** with the Node REST bridge: the deployed Worker owns every D1 write and the Node runtime only serves its own local store
 - Money: kobo-INTEGER decision for new schema (avoid float). Existing TS uses naira floats — ETL must Math.round(x*100).
 
 ## 5. Business rules captured (to become acceptance tests)

@@ -550,19 +550,59 @@ test('staff sync stays quiet in the background and counts stay opt-in', () => {
   assert.match(workerSource, /searchParams\.get\('detail'\) === '1'/);
 });
 
-test('automatic save batches only changed records with a bounded follow-up read', () => {
+test('automatic save batches only changed records and never reads deltas', () => {
   const hook = fs.readFileSync('src/hooks/useCloudSync.ts', 'utf8');
   assert.match(hook, /autoSyncChangedRecords\(changes, deps\)/);
   assert.match(hook, /getItem<Record<string, unknown>>\(collection, documentId\)/);
-  assert.match(hook, /readDeltaCursor\(\)/);
   const flush = hook.slice(hook.indexOf('const flushAutoSync = useCallback'), hook.indexOf('}, []);', hook.indexOf('const flushAutoSync = useCallback')));
   assert.doesNotMatch(flush, /getAllItems/);
   const service = fs.readFileSync('src/services/d1StorageService.ts', 'utf8');
   assert.match(service, /export const AUTO_SYNC_DEBOUNCE_MS = 2000;/);
-  assert.match(service, /const query = since \? `\?since=\$\{encodeURIComponent\(since\)\}` : '';/);
+  // Option B: the delta subsystem is gone — no watermark cursor, no delta read,
+  // no app-level delta applier. Convergence rides the revision-guarded full read.
+  assert.doesNotMatch(service, /readSnapshotDelta|registerDeltaApplier|readDeltaCursor/);
+  assert.match(service, /const SYNC_ENGINE_VERSION = 1;/);
+  // A bounded (capped) response must merge by id instead of truncating a store.
+  assert.match(service, /mergeRemoteWithPendingLocal\(local: D1Snapshot, remote: D1Snapshot, capped\?: ReadonlySet<string>\)/);
   const workerSource = fs.readFileSync('sites-worker.ts', 'utf8');
-  assert.match(workerSource, /const SNAPSHOT_DELTA_LIMIT = 500;/);
+  assert.doesNotMatch(workerSource, /SNAPSHOT_DELTA_LIMIT/);
+  assert.doesNotMatch(workerSource, /searchParams\.get\('since'\)/);
 });
+test('the Node runtime ships no Cloudflare REST write engine', () => {
+  const server = fs.readFileSync('server.ts', 'utf8');
+  // The deployed Worker owns D1: no credentials, no REST /query executor, no
+  // token-config route, and no startup hydration from the edge.
+  assert.doesNotMatch(server, /api\.cloudflare\.com/);
+  assert.doesNotMatch(server, /CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID/);
+  assert.doesNotMatch(server, /executeRemoteD1Statements|pushRelationalD1Statements|mergeInsertStatements|updateEnvFile/);
+  assert.doesNotMatch(server, /syncFromCloudflareD1|remoteSync/);
+  assert.doesNotMatch(server, /"\/api\/storage\/d1\/(config|pull|push-full|migrate-historical)"/);
+  // The local status route stays (the health badge reads it) and a real write still
+  // reports relational success, so the client's guard stays honest.
+  assert.match(server, /app\.get\("\/api\/storage\/d1\/health"/);
+  assert.match(server, /relationalSynced: true/);
+  // No runtime prompts for a Cloudflare token any more.
+  for (const file of ['src/components/common/D1NetworkHealthBadge.tsx', 'src/components/settings/SettingsView.tsx']) {
+    assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /apiToken|D1Config/);
+  }
+});
+
+test('the mall mirror layer stays deleted', () => {
+  assert.equal(fs.existsSync('src/server/mallMirror.ts'), false);
+  for (const file of ['src/server/mallApi.ts', 'src/server/mallOrderAdminApi.ts']) {
+    assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /mallMirror|mirrorMall/);
+  }
+});
+
+test('the edge falls back to documents when a stale relational flag meets empty tables', () => {
+  // `relationalBackfilled` is a per-isolate cache: after a database reset it can be
+  // true while the tables are empty, and an empty catalog must never be served.
+  const workerSource = fs.readFileSync('sites-worker.ts', 'utf8');
+  assert.match(workerSource, /const relationalRows = Object\.values\(stores\)\.reduce<number>/);
+  assert.match(workerSource, /if \(relationalRows > 0\) \{/);
+});
+
+
 
 test('unchanged store answers 304 and a stale token still returns the catalog', async t => {
   const db = new DatabaseSync(':memory:');

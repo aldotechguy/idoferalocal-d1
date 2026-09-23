@@ -419,32 +419,36 @@ for (const runtime of ['node', 'worker'] as const) {
     assert.equal(stale.status, 200, 'settlement bumped the revision: the pre-settlement guard must not 304');
     const staleBody = await stale.json() as any;
     const sale = (staleBody.stores.sales || []).find((s: any) => s.id === `sale-${f.id()}`);
-    assert.ok(sale, 'the re-read returns the Mall-mirrored sale');
+    assert.ok(sale, 'the re-read returns the relational Sale');
     assert.equal(sale.status, 'Completed');
     const fresh = await guardedGet(`${staleBody.revision}-${staleBody.backend}`);
     assert.equal(fresh.status, 304, 'the post-settlement guard 304s until the next write');
   });
 
-  test(`${runtime}: settlement mirror-writes the sale so an open workspace's delta read delivers it`, async t => {
+  test(`${runtime}: legacy ?since= watermarks are ignored — every read is a full snapshot`, async t => {
     const f = await fixture(runtime); t.after(() => f.db.close());
     await f.checkout();
     await f.pay();
-    // An open workspace polls with its composite watermark; since=<zero>
-    // replays every mirror row it has not confirmed yet.
-    const delta = await worker.fetch(new Request('http://test/api/storage/snapshot?since=' + encodeURIComponent(JSON.stringify({ ms: 0, collection: '', documentId: '' })), {
+    // Option B: a stale composite watermark must not shrink the read. The
+    // endpoint serves the full snapshot, so an open workspace converges on the
+    // settlement without a delta envelope.
+    const legacy = await worker.fetch(new Request('http://test/api/storage/snapshot?since=' + encodeURIComponent(JSON.stringify({ ms: 0, collection: '', documentId: '' })), {
       headers: { cookie: `idofera_session=${f.token}` },
     }), f.env);
-    assert.equal(delta.status, 200);
-    const body = await delta.json() as any;
+    assert.equal(legacy.status, 200);
+    const body = await legacy.json() as any;
+    assert.equal(body.delta, undefined, 'no delta envelope anymore');
+    assert.equal(body.cursor, undefined, 'the server no longer issues keyset cursors');
+    assert.equal(body.bounded, undefined, 'a full read is never page-bounded');
     const sale = (body.stores.sales || []).find((s: any) => s.id === `sale-${f.id()}`);
-    assert.ok(sale, 'the delta read delivers the Mall-mirrored sale');
-    assert.ok(sale.invoiceNo.startsWith('INV-'), 'the mirror payload keeps the snapshot sale shape');
-    assert.equal(sale.totalAmount, 200, 'the mirror payload is in naira like every other sale doc');
-    assert.ok((body.stores.customers || []).some((c: any) => c.id === `cust-${f.id()}`), 'the delta delivers the settlement customer');
-    assert.ok((body.stores.moneyMovements || []).some((m: any) => m.id === `mm-sale-${f.id()}`), 'the delta delivers the Sale Inflow');
-    assert.ok((body.stores.products || []).some((p: any) => p.id === 'p' && p.currentStock === 8), 'the delta delivers the checkout stock change');
-    assert.ok((body.stores.stockMovements || []).some((m: any) => String(m.referenceNo) === `checkout:${f.id()}`), 'the delta delivers the checkout stock movement');
-    assert.ok((body.stores.notifications || []).some((x: any) => x.id === `mall:${f.id()}`), 'the delta delivers the new-order notification');
+    assert.ok(sale, 'the full read delivers the settlement Sale');
+    assert.ok(sale.invoiceNo.startsWith('INV-'), 'the sale keeps the snapshot sale shape');
+    assert.equal(sale.totalAmount, 200, 'the sale is in naira like every other sale doc');
+    assert.ok((body.stores.customers || []).some((c: any) => c.id === `cust-${f.id()}`), 'the settlement customer is delivered');
+    assert.ok((body.stores.moneyMovements || []).some((m: any) => m.id === `mm-sale-${f.id()}`), 'the Sale Inflow is delivered');
+    assert.ok((body.stores.products || []).some((p: any) => p.id === 'p' && p.currentStock === 8), 'the checkout stock change is delivered');
+    assert.ok((body.stores.stockMovements || []).some((m: any) => String(m.referenceNo) === `checkout:${f.id()}`), 'the checkout stock movement is delivered');
+    assert.ok((body.stores.notifications || []).some((x: any) => x.id === `mall:${f.id()}`), 'the new-order notification is delivered');
   });
   test(`${runtime}: simultaneous checkout retries return one order; new attempt permits repeat purchase`, async (t) => {
     const f = await fixture(runtime); t.after(() => f.db.close());
@@ -1031,7 +1035,7 @@ test('catalog visibility indexes exist once and the marker skips the bootstrap a
   assert.doesNotMatch(operations, /WHERE version=2/);
 });
 
-test('delta read returns only rows written after the watermark', async (t) => {
+test('legacy since= watermarks are ignored: the read stays one full snapshot', async (t) => {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
   await worker.fetch(new Request('http://test/api/mall/health'), env);
@@ -1046,26 +1050,36 @@ test('delta read returns only rows written after the watermark', async (t) => {
     .run('idofera-business', 41, Date.now());
   const oldAt = Date.parse('2026-01-01T00:00:00.000Z');
   const newAt = Date.parse('2026-02-01T00:00:00.000Z');
+  const product = (id: string) => JSON.stringify({
+    id, sku: `SKU-${id.toUpperCase()}`, name: `Product ${id}`, category: 'Caps',
+    brand: 'Brand', unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 1,
+  });
   db.prepare('INSERT INTO app_documents(owner_id,collection,document_id,payload,updated_at) VALUES (?,?,?,?,?)')
-    .run('idofera-business', 'products', 'old', JSON.stringify({ id: 'old' }), oldAt);
+    .run('idofera-business', 'products', 'old', product('old'), oldAt);
   db.prepare('INSERT INTO app_documents(owner_id,collection,document_id,payload,updated_at) VALUES (?,?,?,?,?)')
-    .run('idofera-business', 'products', 'new', JSON.stringify({ id: 'new' }), newAt);
+    .run('idofera-business', 'products', 'new', product('new'), newAt);
   const cookie = { cookie: `idofera_session=${token}` };
-  // Legacy ISO watermarks keep working: they bound only on `updated_at`.
-  const delta = await worker.fetch(new Request(
-    `http://test/api/storage/snapshot?since=${encodeURIComponent('2026-01-15T00:00:00.000Z')}`,
-    { headers: cookie },
-  ), env);
-  assert.equal(delta.status, 200);
-  const payload = await delta.json() as any;
-  assert.equal(payload.delta, true);
-  assert.equal(payload.bounded, false);
-  assert.deepEqual(Object.keys(payload.stores || {}), ['products']);
-  assert.deepEqual((payload.stores.products || []).map((record: any) => record.id), ['new']);
-  assert.deepEqual(JSON.parse(payload.cursor), { ms: newAt, collection: 'products', documentId: 'new' });
+  // Two different legacy watermarks must produce the identical full read:
+  // rows older than the watermark are never sliced out anymore (Option B).
+  const read = async (watermark: string) => {
+    const res = await worker.fetch(new Request(
+      `http://test/api/storage/snapshot?since=${encodeURIComponent(watermark)}`,
+      { headers: cookie },
+    ), env);
+    assert.equal(res.status, 200);
+    return await res.json() as any;
+  };
+  const first = await read('2026-01-15T00:00:00.000Z');
+  const second = await read('2027-01-01T00:00:00.000Z');
+  assert.equal(first.delta, undefined, 'a snapshot is never a delta envelope');
+  assert.equal(first.cursor, undefined, 'the server no longer issues keyset cursors');
+  assert.equal(first.bounded, undefined, 'a full read is never page-bounded');
+  assert.deepEqual((first.stores.products || []).map((record: any) => record.id).sort(), ['new', 'old']);
+  assert.deepEqual(second.stores, first.stores, 'the watermark cannot change what is served');
+  assert.equal(second.revision, first.revision, 'nor the revision');
 });
 
-test('delta keyset never skips rows sharing one millisecond', async (t) => {
+test('PATCH re-push bumps the revision but never touches the document mirror', async (t) => {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
   await worker.fetch(new Request('http://test/api/mall/health'), env);
@@ -1078,27 +1092,33 @@ test('delta keyset never skips rows sharing one millisecond', async (t) => {
     .run(hash, 'delta-tie', Date.now(), Date.now() + 60000);
   db.prepare('INSERT INTO sync_revisions(owner_id,revision,updated_at) VALUES (?,?,?)')
     .run('idofera-business', 42, Date.now());
-  // Bulk PUT stamps every row with the same millisecond: a bare
-  // `updated_at > ?` watermark would skip the tail of the page. The composite
-  // (updated_at, collection, document_id) cursor must return both rows.
+  // Rows sharing one millisecond both survive into the full read: there is no
+  // keyset cursor that could skip the tail of a same-millisecond page anymore.
   const sharedAt = Date.parse('2026-03-01T00:00:00.000Z');
   for (const id of ['a-row', 'b-row']) {
+    const payload = JSON.stringify({
+      id, sku: `SKU-${id.toUpperCase()}`, name: `Product ${id}`, category: 'Caps',
+      brand: 'Brand', unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 1,
+    });
     db.prepare('INSERT INTO app_documents(owner_id,collection,document_id,payload,updated_at) VALUES (?,?,?,?,?)')
-      .run('idofera-business', 'products', id, JSON.stringify({ id }), sharedAt);
+      .run('idofera-business', 'products', id, payload, sharedAt);
   }
   const cookie = { cookie: `idofera_session=${token}` };
-  const first = await worker.fetch(new Request(
+  const full = await worker.fetch(new Request(
     `http://test/api/storage/snapshot?since=${encodeURIComponent(JSON.stringify({ ms: sharedAt, collection: 'products', documentId: 'a-row' }))}`,
     { headers: cookie },
   ), env);
-  assert.equal(first.status, 200);
-  const firstPayload = await first.json() as any;
-  assert.deepEqual((firstPayload.stores.products || []).map((record: any) => record.id), ['b-row']);
-  assert.deepEqual(JSON.parse(firstPayload.cursor), { ms: sharedAt, collection: 'products', documentId: 'b-row' });
+  assert.equal(full.status, 200);
+  const fullPayload = await full.json() as any;
+  assert.equal(fullPayload.cursor, undefined, 'the server no longer issues keyset cursors');
+  assert.deepEqual(
+    (fullPayload.stores.products || []).map((record: any) => record.id).sort(),
+    ['a-row', 'b-row'],
+    'a legacy composite watermark cannot slice rows out of the read',
+  );
 
   // Option B (mirror-less PATCH): a re-push writes the relational row again
-  // (idempotent) and bumps the revision, but never touches the document
-  // store — the b-row watermark stays intact for PUT-driven delta readers.
+  // (idempotent) and bumps the revision, but never touches the document store.
   const unchanged = await worker.fetch(new Request('http://test/api/storage/records', {
     method: 'PATCH',
     headers: { ...cookie, 'content-type': 'application/json' },
@@ -1116,7 +1136,6 @@ test('delta keyset never skips rows sharing one millisecond', async (t) => {
   assert.equal(unchangedBody.skippedUnchanged, 0);
   assert.equal(unchangedBody.upserted, 1);
   assert.ok(unchangedBody.revision > 42, 'a written batch bumps the revision even without a mirror write');
-  assert.ok(unchangedBody.cursor, 'a written batch returns a keyset cursor');
   assert.equal(db.prepare('SELECT updated_at AS u FROM app_documents WHERE document_id = ?').get('b-row')?.u, sharedAt,
     'PATCHes must never write the document mirror; only snapshot PUTs do');
 });

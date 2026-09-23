@@ -54,9 +54,9 @@ from the mirror for the unchanged re-push guard. After the D1 row-cost pass:
   again. `skippedUnchanged` stays in the response (always 0) so older clients keep
   parsing it. Node keeps the dual-write only while `VITE_USE_RELATIONAL=false`,
   because the documents backend still owns its store there.
-* **Delta reads** (`GET /api/storage/snapshot?since=…`) read the mirror, so they
-  see PUT-driven rows only. Clients still converge on PATCH changes through the
-  revision bump and the full relational snapshot read, which are unchanged.
+* **Delta reads are gone**: a legacy `?since=` watermark is ignored and the read is
+  a full snapshot. Clients converge on PATCH changes through the revision bump plus
+  that full relational read, unchanged.
 * **Rollback** — `VITE_USE_RELATIONAL=false` still restores the document path, but
   the mirror is now only as current as the last snapshot PUT: run a full snapshot
   restore first if the relational store has moved on. There is no separate
@@ -68,11 +68,22 @@ from the mirror for the unchanged re-push guard. After the D1 row-cost pass:
   (`scripts/push-to-d1.ts`) UPSERTed only `app_documents`, so after option B its
   data would be invisible to every relational read. Refresh live data through a
   snapshot PUT restore or the ETL import instead.
+* **The Node REST replication engine is gone**: the Node runtime holds no Cloudflare
+  credentials any more. `POST /api/storage/d1/config` (token verify/save and `.env`
+  rewriting), `POST /api/storage/d1/pull`, `POST /api/storage/d1/push-full` and
+  `POST /api/storage/d1/migrate-historical` were deleted along with
+  `executeRemoteD1Statements()`, `pushRelationalD1Statements()`,
+  `mergeInsertStatements()`, `sqlEscape()` and the `api.cloudflare.com` `/query`
+  fetches they wrapped. Startup no longer hydrates from the edge: it seeds the
+  business owner in the local store and stops there. `GET /api/storage/d1/health` is
+  the only D1 route left and reports local status only (`remoteSync` and `accountId`
+  are gone), so the client has no token to prompt for. The deployed Worker owns D1
+  writes in every environment.
 
 Reads prefer relational; the mirror is a repair input and rollback snapshot, not the
 primary path.
 
-## The legacy bridge
+## Document-to-relational backfill
 
 `ensureRelationalBackfill()` exists in both runtimes and uses the shared
 `backfillStatementsFromDocumentRows()`:
@@ -84,6 +95,11 @@ primary path.
 
 Previously the PATCH route returned early in relational mode, so rows written by an
 older build were invisible; the bridge closes that gap.
+
+The edge keeps a per-isolate `relationalBackfilled` flag so a warm isolate skips the
+emptiness probe on every read, but that flag is only a cache: if a relational read
+comes back with zero rows (a reset database, or a different bound D1) the read falls
+through to the document store instead of answering with an empty catalog.
 ## Money and images
 
 * **Money** is stored as INTEGER **kobo** in every table (`*_kobo`). The mapper
@@ -101,12 +117,13 @@ older build were invisible; the bridge closes that gap.
   Policy is asserted byte-identical between the ETL and the running app by
   `scripts/verify-relational.ts`.
 
-## Remote push efficiency
+## Remote write batching
 
-A full snapshot is thousands of statements. `mergeInsertStatements()` collapses
-identical `INSERT`s into multi-row inserts (75 bound vars per query, arity-aware),
-so a full push costs hundreds of queries instead of thousands. This applies to the
-legacy document inserts *and* the relational ones.
+A full snapshot is thousands of statements. Nothing batches on the Node side any more
+(the REST bridge and its `mergeInsertStatements()` are gone); the Worker binds every
+statement up front with `toD1Statements()` and flushes them through
+`runStatements()`, which chunks 50 statements per `env.DB.batch()` call. A full push
+is therefore a handful of batched round trips, and a staff PATCH is a single one.
 
 ## Drift guard: ETL === backfill
 
