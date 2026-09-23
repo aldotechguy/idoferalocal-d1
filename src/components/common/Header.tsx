@@ -143,6 +143,17 @@ export const Header: React.FC<HeaderProps> = ({
   const predictions = useMemo(() => {
     if (!cleanQuery) return [];
 
+    // Null-safe dashboard search. These fields are typed as required, but
+    // imported/legacy rows routinely carry null, and one bad record used to
+    // throw inside this memo — crashing the whole header (Cmd+K included) on
+    // every keystroke. String(undefined) would match 'undefined', so an absent
+    // value is treated as an empty string.
+    const matches = (value: unknown) => {
+      if (value === null || value === undefined) return false;
+      return String(value).toLowerCase().includes(cleanQuery);
+    };
+    const matchesAll = (values: unknown[]) => values.some(matches);
+
     const list: {
       id: string;
       typeLabel: string;
@@ -156,14 +167,7 @@ export const Header: React.FC<HeaderProps> = ({
 
     // 1. Products (up to 4)
     products
-      .filter(
-        (p) =>
-          p.name.toLowerCase().includes(cleanQuery) ||
-          p.sku.toLowerCase().includes(cleanQuery) ||
-          p.barcode.toLowerCase().includes(cleanQuery) ||
-          p.category.toLowerCase().includes(cleanQuery) ||
-          p.brand.toLowerCase().includes(cleanQuery)
-      )
+      .filter((p) => matchesAll([p.name, p.sku, p.barcode, p.category, p.brand]))
       .slice(0, 4)
       .forEach((p) => {
         list.push({
@@ -186,12 +190,9 @@ export const Header: React.FC<HeaderProps> = ({
 
     // 2. Sales & Invoices (up to 3)
     sales
-      .filter(
-        (s) =>
-          s.invoiceNo.toLowerCase().includes(cleanQuery) ||
-          s.customerName.toLowerCase().includes(cleanQuery) ||
-          s.items.some((i) => i.productName.toLowerCase().includes(cleanQuery))
-      )
+      .filter((s) =>
+        matches(s.invoiceNo) || matches(s.customerName) ||
+        (Array.isArray(s.items) && s.items.some((i) => matches(i.productName))))
       .slice(0, 3)
       .forEach((s) => {
         list.push({
@@ -214,12 +215,7 @@ export const Header: React.FC<HeaderProps> = ({
 
     // 3. Customers (up to 2)
     customers
-      .filter(
-        (c) =>
-          c.name.toLowerCase().includes(cleanQuery) ||
-          c.phone.toLowerCase().includes(cleanQuery) ||
-          c.email.toLowerCase().includes(cleanQuery)
-      )
+      .filter((c) => matchesAll([c.name, c.phone, c.email]))
       .slice(0, 2)
       .forEach((c) => {
         list.push({
@@ -239,12 +235,7 @@ export const Header: React.FC<HeaderProps> = ({
 
     // 4. Suppliers (up to 2)
     suppliers
-      .filter(
-        (sup) =>
-          sup.name.toLowerCase().includes(cleanQuery) ||
-          sup.contactPerson.toLowerCase().includes(cleanQuery) ||
-          sup.phone.toLowerCase().includes(cleanQuery)
-      )
+      .filter((sup) => matchesAll([sup.name, sup.contactPerson, sup.phone]))
       .slice(0, 2)
       .forEach((sup) => {
         list.push({
@@ -262,11 +253,7 @@ export const Header: React.FC<HeaderProps> = ({
 
     // 5. Expenses (up to 2)
     expenses
-      .filter(
-        (e) =>
-          e.title.toLowerCase().includes(cleanQuery) ||
-          e.category.toLowerCase().includes(cleanQuery)
-      )
+      .filter((e) => matchesAll([e.title, e.category]))
       .slice(0, 2)
       .forEach((e) => {
         list.push({
