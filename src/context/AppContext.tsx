@@ -870,6 +870,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (isStorageReady) mirrorArmedRef.current = true;
   }, [isStorageReady]);
 
+  /** Product writes collected by updateProduct and flushed once per commit. */
+  const pendingProductWritesRef = useRef<Map<string, Product>>(new Map());
+  useEffect(() => {
+    if (pendingProductWritesRef.current.size === 0) return;
+    const records = [...pendingProductWritesRef.current.values()];
+    pendingProductWritesRef.current.clear();
+    for (const record of records) saveDocument('products', record);
+  });
+
   const currentD1Snapshot = (): D1Snapshot => ({
     products,
     customers,
@@ -1014,18 +1023,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateProduct = (id: string, updates: Partial<Product>, reason?: string) => {
-    const target = products.find((p) => p.id === id);
-    const targetName = target?.name || 'Product';
-    // Build and persist the record OUTSIDE the state updater: an updater must
-    // be pure, and under StrictMode it runs twice, which duplicated the
-    // IndexedDB write, the D1 dirty mark and the cross-tab broadcast of every
-    // product edit.
-    const updated = target ? { ...target, ...updates, updatedAt: new Date().toISOString() } : null;
-    if (updated) {
-      updated.status = catalogStatus(updates.status ?? target!.status);
-      saveDocument('products', updated);
-    }
-    setProducts((prev) => prev.map((prod) => (prod.id === id && updated ? updated : prod)));
+    const targetName = products.find((p) => p.id === id)?.name || 'Product';
+    setProducts((prev) =>
+      prev.map((prod) => {
+        if (prod.id !== id) return prod;
+        const updated = { ...prod, ...updates, updatedAt: new Date().toISOString() };
+        updated.status = catalogStatus(updates.status ?? prod.status);
+        // Persisting straight from the updater doubled every write under
+        // StrictMode; computing the record from component state outside the
+        // updater drops a second update to the SAME product in one tick (the
+        // PO-receiving path updates cost price and then retail price). The
+        // composed record is collected here and flushed once per commit below.
+        pendingProductWritesRef.current.set(updated.id, updated);
+        return updated;
+      })
+    );
     logAudit('UPDATE_PRODUCT', 'Product', id, 'User', reason || `Updated product details for ${id}.`);
     showToast({ title: 'Product Updated', message: `Updated details for "${targetName}".`, type: 'info' });
   };
