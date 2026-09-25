@@ -22,3 +22,6 @@ tmp_*.txt
 .wrangler/
 # Editor state (may hold local API keys / machine-specific settings)
 .vscode/
+# Agent/tooling state: worktree copies, session traces and local preferences
+.kilo/
+.commandcode/
