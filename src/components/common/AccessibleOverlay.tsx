@@ -16,6 +16,13 @@ export const AccessibleOverlay: React.FC<AccessibleOverlayProps> = ({
   const panelRef = React.useRef<HTMLDivElement>(null);
   const titleId = React.useId();
   const descriptionId = React.useId();
+  // Keep the latest onClose in a ref so the focus/scroll-lock effect below only
+  // re-runs when `open` changes. Callers pass inline arrow callbacks (e.g.
+  // `onClose={() => setSelected(null)}`), so depending onClose directly made
+  // the effect re-run on every parent re-render — including each keystroke in a
+  // field inside the overlay — which stole focus back to the first control.
+  const onCloseRef = React.useRef(onClose);
+  onCloseRef.current = onClose;
   React.useEffect(() => {
     if (!open) return;
     const previous = document.activeElement as HTMLElement | null;
@@ -23,7 +30,7 @@ export const AccessibleOverlay: React.FC<AccessibleOverlayProps> = ({
     document.body.style.overflow = 'hidden';
     requestAnimationFrame(() => (panelRef.current?.querySelector(FOCUSABLE) as HTMLElement | null)?.focus());
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); onClose(); return; }
+      if (event.key === 'Escape') { event.preventDefault(); onCloseRef.current(); return; }
       if (event.key !== 'Tab' || !panelRef.current) return;
       const controls = Array.from(panelRef.current.querySelectorAll(FOCUSABLE)) as HTMLElement[];
       if (!controls.length) return;
@@ -33,7 +40,7 @@ export const AccessibleOverlay: React.FC<AccessibleOverlayProps> = ({
     };
     document.addEventListener('keydown', onKeyDown);
     return () => { document.removeEventListener('keydown', onKeyDown); document.body.style.overflow = oldOverflow; previous?.focus?.(); };
-  }, [onClose, open]);
+  }, [open]);
   if (!open) return null;
   const drawer = kind === 'drawer';
   return createPortal(

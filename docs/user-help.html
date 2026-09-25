@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Idofera Labs - Staff Workspace Help Guide</title>
+<style>
+  @page { size: A4; margin: 16mm 14mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #1e293b; font-size: 11.5px; line-height: 1.55; margin: 0;
+  }
+  h1 { font-size: 24px; font-weight: 800; color: #0f172a; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h2 {
+    font-size: 16px; font-weight: 800; color: #0f172a;
+    margin: 22px 0 8px; padding-bottom: 4px; border-bottom: 2px solid #e2e8f0;
+    page-break-after: avoid;
+  }
+  h3 { font-size: 13px; font-weight: 800; color: #1e293b; margin: 16px 0 6px; page-break-after: avoid; }
+  p { margin: 0 0 8px; }
+  ul, ol { margin: 0 0 10px; padding-left: 20px; }
+  li { margin: 0 0 4px; }
+  li > ul { margin-top: 4px; }
+  a { color: #2563eb; text-decoration: none; word-break: break-word; }
+  strong { color: #0f172a; }
+  code {
+    background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 4px;
+    padding: 0 4px; font-family: "Cascadia Code", Consolas, monospace; font: 10.5px;
+  }
+  hr { border: 0; border-top: 1px solid #e2e8f0; margin: 16px 0; }
+  blockquote {
+    margin: 0 0 12px; padding: 10px 14px; background: #fffbeb;
+    border-left: 4px solid #f59e0b; border-radius: 0 6px 6px 0; color: #78350f;
+  }
+  blockquote p { margin: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 4px 0 14px; page-break-inside: avoid; }
+  th, td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #f8fafc; font-weight: 700; color: #0f172a; }
+  figure { margin: 10px 0 16px; page-break-inside: avoid; text-align: center; }
+  figure img {
+    max-width: 62%; max-height: 300px; height: auto; border: 1px solid #e2e8f0;
+    border-radius: 10px; box-shadow: 0 1px 4px rgba(15,23,42,0.08);
+  }
+  figcaption { font-size: 10px; color: #64748b; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>IdoferaLabs — Staff Workspace Help Guide</h1>
+<p>This guide is for <strong>staff using the workspace day to day</strong>: shop staff, managers, and accountants. It explains what each screen does, the order in which things should be done, and the rules the system enforces so you are never surprised by a blocked action.</p>
+<p>Shopping on the customer-facing storefront is covered separately in <a href="./mall-storefront-help.md"><code>docs/mall-storefront-help.md</code></a>.</p>
+<p>Operator-facing references (deployment, activation, monitoring) live in:</p>
+<ul><li><a href="./mall-operations.md"><code>docs/mall-operations.md</code></a> — Mall activation, monitoring, notifications, lifecycle.</li><li><a href="./04-relational-backend.md"><code>docs/04-relational-backend.md</code></a> — data model and backend behaviour.</li><li><a href="./mall-launch-safety.md"><code>docs/mall-launch-safety.md</code></a> — go-live gates and safety checks.</li></ul>
+<blockquote><p>All screenshots below are captured from a populated local workspace, so figures and order numbers are sample data.</p></blockquote>
+<hr>
+<h2>1. Getting in</h2>
+<p>The workspace is separate from the public storefront. Staff pages live under <code>/labs</code> (the older <code>/app</code> path still redirects). If you have no valid staff session you are sent back to the storefront instead of being shown the form.</p>
+<figure><img src="screenshots/staff-dashboard.png" alt="The workspace dashboard after signing in"><figcaption>The workspace dashboard after signing in</figcaption></figure>
+<p><strong>Signing in</strong></p>
+<ol><li>Open the staff workspace URL. If you are not signed in you land on the <strong>Login</strong> page.</li><li>Enter your credentials (or use the offered Google / email sign-in where enabled).</li><li>Once authenticated you are taken to your <strong>Dashboard</strong>.</li></ol>
+<p><strong>Notes</strong></p>
+<ul><li>Your role decides which hubs appear in the sidebar. Pages you are not allowed to open are hidden; if you reach one directly, you see an <strong>Access Restricted</strong> card with a <strong>Return to Dashboard</strong> button.</li><li>Staff sessions expire for security. If a page suddenly asks you to sign in again, sign in and continue — nothing saved to the database is lost.</li><li>On small screens the header shows a menu toggle. On desktop the sidebar can be <strong>collapsed to an icon rail</strong> (chevron at the top of the sidebar); the choice is remembered on that device.</li><li>On supported browsers the app can be <strong>installed</strong> like a native app, which makes POS usable full-screen.</li></ul>
+<hr>
+<h2>2. Roles and what they can do</h2>
+<p>There are four standard roles. A user's role gates both the pages they can open and the buttons they can press.</p>
+<table><thead><tr><th>Role</th><th>Typical use</th><th>Page access highlights</th></tr></thead><tbody><tr><td><strong>Administrator</strong></td><td>Owner / full control</td><td>Everything, including Settings, Import, user management, and every management action</td></tr><tr><td><strong>Store Manager</strong></td><td>Day-to-day operations and approvals</td><td>All operational hubs; approves delivery quotes, cancellations, listing changes</td></tr><tr><td><strong>Sales Staff</strong></td><td>Counter and order handling</td><td>Dashboard, POS, Sales &amp; Orders, Products &amp; Stock, Customers, Settings</td></tr><tr><td><strong>Accountant</strong></td><td>Money, reconciliation, reporting</td><td>Dashboard, Sales &amp; Orders, Customers, Purchases &amp; Suppliers, Finance &amp; Expenses, Reports</td></tr></tbody></table>
+<p>Important nuances:</p>
+<ul><li><strong>Administrator is effectively unrestricted.</strong> The permission check treats the Administrator role as allowed everywhere; other roles are matched against an explicit allow-list per page.</li><li><strong>The Super-User account</strong> is a special protected login (used for initial setup and role switching). A regular Administrator cannot modify, delete, or reset its password.</li><li>There must always be at least one Administrator; the system refuses to delete the last one.</li><li><strong>Some actions are narrower than the page.</strong> For example, on the Mall Orders tab, only Administrators and Store Managers can confirm delivery-address serviceability, cancel orders, or set a delivery quote, and only Administrators and Accountants can process refunds. The buttons simply are not shown to other roles.</li></ul>
+<p>If a button you expect is missing, it is almost always a role restriction — not a bug.</p>
+<hr>
+<h2>3. The workspace, hub by hub</h2>
+<p>The sidebar is organised into eight <strong>Operational Hubs</strong> plus a <strong>Settings</strong> hub. Several hubs contain tabs.</p>
+<h3>3.1 Dashboard</h3>
+<p>Your landing page and the business at a glance.</p>
+<figure><img src="screenshots/staff-dashboard.png" alt="Dashboard"><figcaption>Dashboard</figcaption></figure>
+<ul><li><strong>Command Center</strong> with quick actions: <strong>New Sale</strong>, <strong>New Product</strong>, <strong>New Expense</strong>, <strong>New Customer</strong>, <strong>New Supplier</strong>.</li><li><strong>KPIs and overview</strong> — today's sales, stock and money signals for the period.</li><li><strong>Monthly Performance &amp; Reports Hub</strong> — jump to the current or previous month's statements.</li><li>Day-based figures use your <strong>local calendar</strong>, so a "today" total matches the working day at the shop, not UTC.</li><li>Most cards navigate straight to the relevant hub, so treat it as a launch pad.</li></ul>
+<h3>3.2 Point of Sale (POS)</h3>
+<p>Counter terminal for fast in-person sales. Roles: Administrator, Store Manager, Sales Staff.</p>
+<figure><img src="screenshots/staff-pos.png" alt="Point of Sale terminal"><figcaption>Point of Sale terminal</figcaption></figure>
+<p><strong>Making a sale</strong></p>
+<ol><li>Find products on the left — search, or tap product cards.</li><li>Add items to the cart. The cart on the right totals as you go.</li><li>Optionally attach a <strong>customer</strong> (needed for a credit sale) and apply a <strong>discount</strong>.</li><li>Choose the <strong>Payment Method</strong>: <code>Card</code>, <code>Cash</code>, <code>Mobile Transfer</code>, or <code>Split Payment</code>. - For <strong>Split Payment</strong>, enter the amount taken by each tender. The system shows whether the split covers the order before you can complete it. - For single-tender sales you may enter an <strong>amount tendered / paid</strong> to work out change.</li><li>Press <strong>Complete Sale</strong> (the button shows the amount being taken). A receipt is produced.</li></ol>
+<p><strong>Wholesale tiers happen automatically.</strong> When a line reaches the product's minimum wholesale quantity, that line is charged the wholesale price — but only when it is a genuine discount that stays above the product's floor price. It can never raise a price or beat a better active promotion. The product cards show the tier, e.g. "Wholesale: ₦100.00 (Min 10)".</p>
+<p><strong>Credit sales and holds</strong></p>
+<ul><li><strong>Credit pricing mode</strong> applies the defined credit price to eligible items and records the debt against the customer's ledger.</li><li><strong>Order holds</strong> let you park an in-progress cart and resume it later.</li></ul>
+<p><strong>Receipts</strong> — after checkout the receipt can be viewed and printed. It records the sale lines, totals, tender and any split breakdown.</p>
+<h3>3.3 Sales &amp; Orders</h3>
+<p>A three-tab hub: <strong>Sales Records</strong>, <strong>Mall Orders</strong>, and <strong>Deliveries &amp; Pickups</strong>. The Deliveries tab shows a pending count when pickups await confirmation, and the sidebar shows an <strong>Active</strong> badge when there is actionable work across sales and Mall orders.</p>
+<h4>Tab — Sales Records</h4>
+<p>The history of completed sales, with a <strong>daily calendar</strong> view and an <strong>All Sales Records</strong> table.</p>
+<figure><img src="screenshots/staff-sales-orders.png" alt="Sales Records tab"><figcaption>Sales Records tab</figcaption></figure>
+<p>Search and filter to find a past transaction, then open it to review its lines, tender, customer and receipt. The header also summarises totals by payment method (Cash, Card, Mobile Transfer).</p>
+<h4>Tab — Mall Orders</h4>
+<p>This is where you work online storefront orders. It is the most workflow-driven screen, so the details matter.</p>
+<figure><img src="screenshots/staff-mall-orders.png" alt="Mall Orders tab"><figcaption>Mall Orders tab</figcaption></figure>
+<p><strong>The list</strong> shows every Mall order with order number, customer, item count, total and status. Use the search box (order number, transfer reference, customer name or phone) and the status filter, then <strong>Refresh</strong> — the list also auto-refreshes periodically.</p>
+<p>Three counters sit above the list: <strong>Actionable</strong>, <strong>Awaiting payment</strong>, and <strong>Processing</strong>.</p>
+<p>Managers additionally see an <strong>Operational readiness</strong> panel: whether checks are passing, notification counts, and a <strong>Retry failed notifications</strong> button. Treat "unavailable" as unknown, not as healthy.</p>
+<p><strong>Opening an order</strong> shows the full detail: items, delivery zone/address, totals, the <strong>Order timeline</strong> (who did what, when), payment state and every action available to you.</p>
+<p><strong>The order lifecycle</strong> the system enforces:</p>
+<p>``<code> pending → confirmed → processing → packed → ready_for_pickup → completed packed → out_for_delivery → completed </code>``</p>
+<ul><li><strong>Confirm Order</strong> — moves a <code>pending</code> order to <code>confirmed</code>.</li><li><strong>Start Processing → Mark Packed → Mark Ready for Pickup → Complete Pickup</strong> — the pickup chain.</li><li><strong>Send Out for Delivery</strong> (from <code>packed</code>, delivery orders only) requires an <strong>Assigned courier</strong>; then <strong>Mark Delivered</strong> completes it.</li><li><strong>Cancel Order</strong> (Administrator / Store Manager) — for unpaid orders; cancels the pending payment and <strong>releases the stock</strong>.</li><li><strong>Reject payment and cancel order</strong> (Administrator / Store Manager) — for a transfer you could not verify. This cancels and releases stock rather than pretending money arrived.</li></ul>
+<p><strong>Payment</strong></p>
+<ul><li><strong>Tender</strong> choices are Cash, Card, Mobile Transfer and Bank Transfer, plus a <strong>Reference</strong> field.</li><li><strong>Collect Payment &amp; Create Sale</strong> records the money and creates the corresponding sale.</li><li><strong>Verify Transfer &amp; Create Sale</strong> is used for Bank Transfer once you have confirmed the deposit. Payment status becomes paid atomically with the sale and accounting entry.</li></ul>
+<p><strong>Delivery orders have extra gates.</strong> Before an order can be confirmed or paid, staff must verify the address is serviceable: press <strong>I verified this address is serviceable within the selected zone</strong>. Other-location orders also need a <strong>delivery quote</strong> — enter the <strong>Delivery fee (₦)</strong> and <strong>Save Delivery Quote</strong> before confirming or taking payment. A delivery order can never enter the pickup branch, and a pickup order can never be dispatched.</p>
+<p><strong>Refunds</strong> (Administrator / Accountant) require a <strong>reason</strong> and an explicit <strong>stock disposition</strong>:</p>
+<ul><li><em>Returned / never dispatched</em> — restock the goods.</li><li><em>Not returned / not resellable</em> — do not restock.</li></ul>
+<p>If goods had already been dispatched or collected, restocking also needs a <strong>goods-received reference</strong>. Partial refunds and partial returns are not supported.</p>
+<p><strong>Practical rules to avoid mistakes</strong></p>
+<ul><li>Do not pay a customer's order twice. A cancelled order must not be reactivated automatically; if a late bank receipt arrives after cancellation, handle it as a manual exception with the customer.</li><li>Cancelling releases stock; do not also adjust stock by hand for the same order.</li><li>Unverified transfers should be cancelled, not marked paid.</li></ul>
+<h4>Tab — Deliveries &amp; Pickups</h4>
+<p>Dispatch and pickup operations, filterable by status (<strong>All</strong>, <strong>Pending Pickup</strong>, <strong>Picked Up</strong>, <strong>Out for Delivery</strong>, <strong>Delivered</strong>, <strong>Cancelled</strong>).</p>
+<figure><img src="screenshots/staff-deliveries.png" alt="Deliveries & Pickups tab"><figcaption>Deliveries &amp; Pickups tab</figcaption></figure>
+<p>A delivery tied to a Mall order stays in step with that order — conflicting changes made from this generic view are rejected. Always make the change in the place that owns the workflow (Mall Orders for Mall orders).</p>
+<h3>3.4 Products &amp; Stock</h3>
+<p>One hub with five tabs: <strong>Product Catalog</strong>, <strong>Stock Control &amp; Movements</strong>, <strong>Multiple Pricing Tiers</strong>, <strong>Mall Listings</strong>, and <strong>Archived Products</strong>.</p>
+<figure><img src="screenshots/staff-products-stock.png" alt="Products & Stock hub"><figcaption>Products &amp; Stock hub</figcaption></figure>
+<ul><li><strong>Product Catalog</strong> — create and edit products, set prices and stock. Product images are uploaded here; the app downscales them in the browser first, so you do not need to pre-size them.</li><li><strong>Stock Control &amp; Movements</strong> — stock levels and stock movement history, so you can see what changed and why.</li><li><strong>Multiple Pricing Tiers</strong> — retail, wholesale (with a minimum wholesale quantity), the minimum floor price, credit price and the optional promotional price.</li><li><strong>Mall Listings</strong> — the storefront-specific overrides (see section 4).</li><li><strong>Archived Products</strong> — retired products. Archiving is how you retire a product without losing its history.</li></ul>
+<p><strong>How pricing drives the storefront</strong> (so shop and online prices agree):</p>
+<ul><li><strong>Retail Selling Price</strong> is the default online price when there is no override.</li><li><strong>Wholesale Price</strong> becomes an automatic per-line tier online once a cart line reaches the minimum wholesale quantity.</li><li><strong>Minimum Floor Price</strong> protects every price source — no promo or automatic tier can take the storefront below it.</li><li><strong>Promotional Price</strong> (the flat POS promo field) only reaches the storefront when an administrator enables it for the deployment. Order of precedence online is: active Mall promo window → Mall price → POS promo (if enabled) → retail.</li><li><strong>Dealer / B2B Price</strong> is not used on the storefront.</li></ul>
+<h3>3.5 Customers</h3>
+<p>The customer directory, credit and ledgers.</p>
+<figure><img src="screenshots/staff-customers.png" alt="Customers hub"><figcaption>Customers hub</figcaption></figure>
+<ul><li>Look up a customer and open their history.</li><li>See balances and credit activity. Credit sales made at the POS post to the customer's ledger, so the balance here reflects what the shop is owed.</li><li>Keep phone numbers accurate — the storefront matches orders by phone number, and numbers must be well-formed to match.</li></ul>
+<h3>3.6 Purchases &amp; Suppliers</h3>
+<p>Two tabs: <strong>Purchases</strong> and <strong>Suppliers</strong>. Roles: Administrator, Store Manager, Accountant.</p>
+<figure><img src="screenshots/staff-purchases-suppliers.png" alt="Purchases & Suppliers hub"><figcaption>Purchases &amp; Suppliers hub</figcaption></figure>
+<ul><li><strong>Purchases</strong> — purchase orders and goods-received records, the counterpart to selling: this is how stock re-enters the shop.</li><li><strong>Suppliers</strong> — the supplier directory.</li></ul>
+<h3>3.7 Finance &amp; Expenses</h3>
+<p>Tabs for <strong>Expenses &amp; Money Movement</strong>, <strong>Money Movement</strong>, and <strong>Investment Planner</strong>. Roles: Administrator, Store Manager, Accountant.</p>
+<figure><img src="screenshots/staff-finance-expenses.png" alt="Finance & Expenses hub"><figcaption>Finance &amp; Expenses hub</figcaption></figure>
+<ul><li><strong>Expenses</strong> — record and categorise business expenses.</li><li><strong>Money Movement</strong> — the flow of money between accounts, with treasury balances. Sale inflows (including Mall orders) are recorded here.</li><li><strong>Investment Planner</strong> — capital and investment planning views.</li></ul>
+<h3>3.8 Reports &amp; Analytics</h3>
+<p>Financial reporting and P&amp;L. Roles: Administrator, Store Manager, Accountant. Use this to review performance over a period.</p>
+<figure><img src="screenshots/staff-reports.png" alt="Reports & Analytics hub"><figcaption>Reports &amp; Analytics hub</figcaption></figure>
+<p>Sub-tabs include <strong>Monthly Biz Report</strong>, <strong>Income &amp; Expense (P&amp;L)</strong>, <strong>Sales Transactions</strong>, <strong>Top Selling Products</strong>, <strong>Inventory Valuation</strong>, <strong>Retail vs Wholesale</strong>, and <strong>Dead / Slow Stock</strong>, with period controls such as <strong>This Month</strong>, <strong>Last Month</strong> and <strong>All Time</strong>. Day-based reports use the <strong>local calendar day</strong>, so totals line up with the working day.</p>
+<h3>3.9 Settings &amp; Tools</h3>
+<p>Three tabs: <strong>Settings</strong>, <strong>Import</strong>, and <strong>AI Assistant</strong>.</p>
+<figure><img src="screenshots/staff-settings-tools.png" alt="Settings & Tools hub"><figcaption>Settings &amp; Tools hub</figcaption></figure>
+<ul><li><strong>Settings</strong> — general configuration, users and roles, and access to tools.</li><li><strong>Import</strong> (Administrator / Store Manager) — bulk import of existing data.</li><li><strong>AI Assistant</strong> — the in-app assistant for questions and help. Roles: Administrator, Store Manager, Accountant.</li></ul>
+<p><strong>Managing users (Administrator).</strong> You can add users, set their role, reset passwords, and deactivate accounts. Remember the built-in protections:</p>
+<ul><li>The <strong>Super-User</strong> account is protected from edits, deletion and password resets by regular Administrators.</li><li>The <strong>last Administrator</strong> cannot be deleted.</li></ul>
+<hr>
+<h2>4. Mall listings — controlling the storefront catalogue</h2>
+<p>Open <strong>Products &amp; Stock → Mall Listings</strong>.</p>
+<figure><img src="screenshots/staff-mall-listings.png" alt="Mall Listings tab"><figcaption>Mall Listings tab</figcaption></figure>
+<p>The single rule for Mall visibility is: <strong>Active product status</strong>. Every Active product appears on the storefront automatically; there is no separate publish step and no approval queue.</p>
+<ul><li>To <strong>hide</strong> a product from the Mall, set its status to Inactive or Archived in Products.</li><li>To <strong>show</strong> it, set it back to Active.</li><li>Buying online additionally requires <strong>stock</strong> and a <strong>valid price</strong>. A product can be visible but not purchasable if it is out of stock or unpriced — the Mall Listings screen flags this as an advisory issue (e.g. "The product needs stock available").</li></ul>
+<p>The Mall Listings tab shows <strong>Visible / Hidden / Issues</strong> counters and lets you merchandise each product for the storefront:</p>
+<ul><li>Set a <strong>Mall price</strong> (a positive amount, never below the product's floor price).</li><li>Set a <strong>Mall description</strong> (customer-facing).</li><li><strong>Feature</strong> a product and set its <strong>display order</strong> (lower shows first).</li><li>Optionally set a <strong>promotional price</strong> with a start and end window (the promo must be lower than the normal Mall price, stay above the floor, and end after it starts).</li></ul>
+<p>Things to know:</p>
+<ul><li>Listings carry <strong>advisory issues</strong> such as a missing image, no stock, or an unpriced product. These warn you — they do not stop the list from loading.</li><li>If images were uploaded before the current image system, a listing may be flagged until you re-upload the image.</li><li>Saves are <strong>protected against conflicting edits</strong>: if someone else edited the same listing first, your save is rejected and you must reload to see their version before retrying.</li></ul>
+<hr>
+<h2>5. Common tasks, step by step</h2>
+<p><strong>Ring up a walk-in sale</strong> POS → add items → optional customer/discount → choose payment method → <strong>Complete Sale</strong>.</p>
+<p><strong>Take a Mall order from new to collected</strong> Sales &amp; Orders → Mall Orders → open the order → (delivery? verify address + quote fee) → <strong>Confirm Order</strong> → <strong>Start Processing</strong> → <strong>Mark Packed</strong> → <strong>Mark Ready for Pickup</strong> → <strong>Complete Pickup</strong>.</p>
+<p><strong>Dispatch a Mall delivery</strong> …→ <strong>Mark Packed</strong> → enter <strong>Assigned courier</strong> → <strong>Send Out for Delivery</strong> → <strong>Mark Delivered</strong>.</p>
+<p><strong>Confirm a bank transfer payment</strong> Open the Mall order → set <strong>Tender</strong> to Bank Transfer and enter the <strong>Reference</strong> → <strong>Verify Transfer &amp; Create Sale</strong>.</p>
+<p><strong>Cancel an unpaid Mall order</strong> Open the order → set a <strong>Cancellation reason</strong> → <strong>Cancel Order</strong> (stock is released). If the issue is an unverifiable transfer, use <strong>Reject payment and cancel order</strong> instead.</p>
+<p><strong>Refund a paid Mall order</strong> Open the order → enter <strong>Refund reason</strong> → choose <strong>Stock disposition</strong> → add a <strong>goods-received reference</strong> if goods had already left the shop → <strong>Refund Sale</strong>.</p>
+<p><strong>Change what appears on the Mall</strong> Products &amp; Stock → Mall Listings (section 4).</p>
+<hr>
+<h2>6. Messages, notifications and statuses</h2>
+<ul><li><strong>In-app toasts</strong> confirm successes ("Order confirmed") and explain failures. Read the message — it tells you what the system actually did.</li><li><strong>Order statuses</strong> you will see: Pending review, Confirmed, Processing, Packed, Ready for pickup, Out for delivery, Completed, Cancelled, Refunded.</li><li><strong>Payment status is separate from order status.</strong> An order can be Confirmed while payment is still pending. Payment becomes paid at the moment the sale is created.</li><li>The shop receives <strong>email notifications</strong> for order events (received, paid, dispatched, delivered, cancelled, refunded). Customers who supplied an email also receive customer-facing updates.</li></ul>
+<hr>
+<h2>7. Troubleshooting</h2>
+<p><strong>"Access Restricted" page</strong> Your role does not include that page. Use <strong>Return to Dashboard</strong>, or ask an Administrator if you need the access.</p>
+<p><strong>A button I need is not shown</strong> Most management actions are role-limited (for example, delivery quotes and cancellations are Administrator / Store Manager; refunds are Administrator / Accountant). This is intended.</p>
+<p><strong>"A delivery quote is required before confirmation or payment."</strong> The order is to an "other location" zone. Enter the delivery fee and <strong>Save Delivery Quote</strong>, then continue.</p>
+<p><strong>"I verified this address…" is shown</strong> Delivery orders need address serviceability confirmed before confirmation/payment. If you genuinely verified the address is serviceable in the zone, press it.</p>
+<p><strong>Confirm/Pay buttons are disabled</strong> Check the order status. Confirm only applies to <code>pending</code>; payment cannot be taken on an order that is still <code>pending</code>. Also make sure the courier field and quote requirements above are satisfied where they apply.</p>
+<p><strong>I type one character and the cursor jumps / I cannot type</strong> This was a defect in the modal's focus handling and has been fixed. If you see it again, note the screen and the field, refresh once, and report it — it should not recur.</p>
+<p><strong>A Mall listing change was rejected</strong> Another editor changed it first. Reload the listing to get the current version, then re-apply your change.</p>
+<p><strong>The workspace looks empty / no data loads</strong> Refresh once. If a page shows an error with a Retry action, press it. Persistent errors usually mean a connectivity or sign-in problem — re-authenticate and try again.</p>
+<hr>
+<h2>8. Good practice and safety</h2>
+<ul><li><strong>Never</strong> mark a payment as received unless you have actually confirmed it.</li><li><strong>Cancel rather than fake</strong> when a transfer cannot be verified — this releases stock correctly.</li><li>Take refunds and returns seriously: always record a reason and the correct stock disposition, and use a goods-received reference when goods had already left the shop.</li><li>Keep <strong>stock, prices and product status</strong> accurate — the Mall sells from the same records; a wrong status hides a product and a wrong price sells it wrong.</li><li>Keep <strong>phone numbers</strong> well-formed for customers; the storefront matches by phone.</li><li>Treat delivery addresses and customer contact details as <strong>private information</strong>.</li></ul>
+<hr>
+<h2>9. Where to get help</h2>
+<ul><li>In the app: <strong>Settings &amp; Tools → AI Assistant</strong>.</li><li>Customer-facing help: <a href="./mall-storefront-help.md"><code>docs/mall-storefront-help.md</code></a>.</li><li>Deployment, activation and monitoring: <a href="./mall-operations.md"><code>docs/mall-operations.md</code></a>.</li><li>Data model and backend behaviour: <a href="./04-relational-backend.md"><code>docs/04-relational-backend.md</code></a>.</li></ul>
+</body>
+</html>
