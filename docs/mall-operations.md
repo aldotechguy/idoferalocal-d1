@@ -32,9 +32,11 @@ Set all Mall secrets as Wrangler variables on the `mall` environment — never p
 on the public command line. A local `.env` mirrors the variable names and is the
 canonical list of required secrets; verify it is git-ignored before deployment.
 configured five-minute Cron Trigger for both environments. Verify cron deployment
-and an external process supervisor for Node. At most one expired order is processed
-per maintenance invocation to bound database work; oldest orders are processed first.
-Monitor the expiry backlog and increase throughput deliberately if volume requires it.
+and an external process supervisor for Node. At most 20 expired orders are processed
+per maintenance invocation to bound database work; oldest orders are processed first,
+and a single failed expiry is logged and left queued for the next run instead of
+aborting that run's cart cleanup, outbox drain and scheduler marker. Monitor the
+expiry backlog and raise the per-run bound deliberately if volume requires it.
 
 ## Readiness and monitoring
 
@@ -42,9 +44,15 @@ Monitor the expiry backlog and increase throughput deliberately if volume requir
 - `GET /api/mall/ready`: 200 only when dependency/configuration checks pass; otherwise 503.
 - Staff Mall Orders shows readiness, notification counts, order timelines, and retry
   controls. Management API: `GET /api/staff/mall-orders/operations`.
-- Readiness requires required schema objects, a recent successful scheduler run,
-  bank/pickup configuration, webhook configuration, a recorded successful webhook
-  delivery, no dead/old undelivered notifications, and checkout enabled.
+- Readiness requires required schema objects, a valid stock/oversell trigger, listing
+  fields, a recent successful scheduler run, bank/pickup configuration, webhook
+  configuration, a recorded successful webhook delivery, no dead/old undelivered
+  notifications, no stalled fulfilment queue, configured image storage, and checkout
+  enabled.
+- The schema version marker is the deployed Worker's cold-start guard and is
+  intentionally never written by the Node bootstrap, so the Node runtime accepts
+  physical schema-object evidence instead; that is what lets `GET /api/mall/ready`
+  answer 200 from `npm run dev`.
 - Checkout/conflict/error counters are daily aggregates without customer PII.
 - The configured webhook receives hourly `MALL_HEARTBEAT` events. Configure an
   independent monitor for missing heartbeats and readiness failures. An outage of
@@ -192,15 +200,16 @@ is behind a proxy, configure/verify trusted-proxy behavior carefully to avoid al
 customers sharing one limit. Add perimeter Cloudflare abuse controls before high-volume
 launch; database rate limiting itself consumes database operations.
 
-Enforcement is sampled to keep that cost bounded: each isolate keeps a group-keyed
-counter in memory and only writes the durable `mall_rate_limits` row every Nth hit
-(checkout/tracking 1, cart 5, catalog 10; the UPSERT uses
-`count = MAX(count + 1, excluded.count)` so an isolate restart cannot double-count).
-The in-process counter is deliberately keyed **group + window, not per-IP** — the
-limits above are group-global (a whole isolate shares one checkout/tracking budget),
-and the durable per-caller row is the cross-isolate backstop. Expect the sampled
-durable row to lag the true hit count; readiness/abuse analysis should treat the
-durable rows as a floor, not a total.
+Enforcement is sampled to keep that cost bounded: each isolate keeps a caller-keyed
+counter in memory (`group:window:hashed-IP`) and only writes the durable
+`mall_rate_limits` row every Nth hit (checkout/tracking 1, cart 5, catalog 10; the
+UPSERT uses `count = MAX(count + 1, excluded.count)` so an isolate restart cannot
+double-count). The in-process counter uses the same per-caller scope as the durable
+row, so the two counts agree and one abusive address cannot consume another buyer's
+allowance; the oversell guarantee never depends on this limiter, because the write
+batch revalidates stock atomically. Expect the sampled durable row to lag the true
+hit count; readiness/abuse analysis should treat the durable rows as a floor, not a
+total.
 
 ## D1 row-cost notes (schema marker v9)
 

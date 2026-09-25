@@ -68,7 +68,11 @@ Do not commit credentials. After initial provisioning, remove the bootstrap
 secrets. A database already containing users is never automatically reseeded.
 
 IMPORTANT: removal of default provisioning does not revoke existing credentials.
-Before launch, rotate previously seeded administrator passwords, invalidate their
+The staff client no longer bundles super-administrator or administrator passwords —
+they were dropped from `AuthContext` so no script can read them out of the bundle, and
+super-user status is now derived from server-set identity/flags only instead of a
+display-name match. That still does not revoke credentials already stored server-side:
+before launch, rotate previously seeded administrator passwords, invalidate their
 existing sessions, and verify authorized administrators can still sign in.
 
 ## Validation and limitations
@@ -81,6 +85,9 @@ bootstrap behavior. This is not a deployed D1/workerd test and does not establis
 Cloudflare platform limits, network behavior, or production configuration.
 
 Before launch, repeat the contract checks in a disposable deployed preview database,
-including the maximum intended cart size and existing-schema rollout. Priorities
-8–9 (notifications, tracking privacy, rate limiting, readiness, bank instructions,
-catalog administration) remain outstanding.
+including the maximum intended cart size and existing-schema rollout. Priorities 8–9
+(notifications, rate limiting, readiness, bank instructions, catalog administration) are
+now implemented — see `mall-operations.md` for their current behaviour and remaining
+deployment gates. Tracking privacy stays deliberately minimal (exact order number plus
+normalized phone; phone-only lookup rejected) and is not customer authentication.
+Partial refunds/returns and reverse-logistics integrations remain unimplemented.
