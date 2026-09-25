@@ -653,3 +653,35 @@ test('unchanged store answers 304 and a stale token still returns the catalog', 
   assert.equal(stale.status, 200);
   assert.ok((await stale.json() as any).revision === 7);
 });
+
+test('the staff client ships no bundled credentials and derives super-user status from identity only', () => {
+  const auth = fs.readFileSync('src/context/AuthContext.tsx', 'utf8');
+  // A literal credential in the client bundle is readable by any script on the
+  // page; the shipped constants used to carry the super-admin password verbatim.
+  assert.doesNotMatch(auth, /password:\s*'[^']*'/);
+  assert.doesNotMatch(auth, /aidy2800|admin123/);
+  // Super-user status comes from server-set identity/flags only: a display name
+  // that happens to contain a person's name must never promote an account.
+  assert.doesNotMatch(auth, /includes\('(michael|aidy|idofera)'\)/);
+  assert.match(auth, /user\.id === 'usr-admin-1' \|\| user\.username === 'admin'/);
+  // Passwords stay in memory for the one request that needs them, so the local
+  // mirror may only ever hold profiles.
+  assert.match(auth, /const persistable = users\.map\(\(\{ password, \.\.\.profile \}\) => profile\)/);
+  assert.doesNotMatch(auth, /JSON\.stringify\(users\)/);
+});
+
+test('the staff API refuses cross-account takeover and never acks an unwritten record', () => {
+  const node = fs.readFileSync('server.ts', 'utf8');
+  const workerSource = fs.readFileSync('sites-worker.ts', 'utf8');
+  // A regular Administrator must not rewrite the super-admin or a protected
+  // account (that upsert could reset the password), and a password change on
+  // another account must revoke that account's live sessions.
+  assert.match(node, /if \(existing\?\.is_super_admin && !actor\.is_super_admin\)/);
+  assert.match(node, /DELETE FROM app_sessions WHERE user_id = \?/);
+  assert.match(workerSource, /if \(existing\?\.is_super_admin && !actor\.is_super_admin\) return json/);
+  // Records and snapshots are written to the live catalog FIRST; a failed write
+  // answers 5xx with the revision untouched, so the client keeps its dirty keys
+  // and retries instead of acking records that were never stored.
+  assert.match(workerSource, /The live catalog update failed; no records were written and the revision is unchanged\. Retry the sync\./);
+  assert.match(workerSource, /The snapshot could not be written to the live catalog; nothing was replaced and the revision is unchanged\. Retry the restore\./);
+});
