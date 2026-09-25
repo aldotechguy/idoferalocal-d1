@@ -7,7 +7,11 @@ async function main() {
   const base=new URL(configured);
   if(base.protocol!=='https:' || base.username || base.password || base.pathname!=='/') throw new Error('Use an HTTPS origin without credentials/path.');
   for(const path of ['/','/mall','/api/mall/health','/api/mall/products?limit=1']) {
-    const response=await fetch(new URL(path,base),{signal:AbortSignal.timeout(15000)});
+    // Page routes must advertise an HTML accept header: the Worker's SPA fallback
+    // serves index.html only to requests that want HTML, which is what a browser
+    // sends. A bare fetch() sends `accept: */*` and would wrongly 404 on /mall.
+    const headers = path.startsWith('/api/') ? undefined : { accept: 'text/html' };
+    const response=await fetch(new URL(path,base),{headers,signal:AbortSignal.timeout(15000)});
     assert.equal(response.status,200,`${path} should respond with 200`);
     if(path.startsWith('/api/')) await response.json(); else assert.match(response.headers.get('content-type') || '',/text\/html/);
     console.log(`PASS ${path}`);
