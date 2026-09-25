@@ -80,3 +80,46 @@ MALL_PICKUP_HOURS = "10AM - 6PM"
   # posts it to MALL_WEBHOOK_URL above; the receiver verifies that signature and
   # emails the operator via Resend.
 
+# Disposable preview target for the launch contract checks (maximum intended cart
+# size and existing-schema rollout). Isolated D1 + R2 and placeholder business
+# config, so preview runs never touch live orders, stock, customers or bank
+# details. No cron trigger on purpose: the preview must not open a second
+# notification pipeline. Readiness therefore reports scheduler:false here.
+# Usage: `npx wrangler deploy --env preview`
+[env.preview]
+name = "idomall-preview"
+
+[env.preview.assets]
+directory = "./dist"
+binding = "ASSETS"
+run_worker_first = true
+
+# The top-level [triggers] cron is inherited by named environments, so it must be
+# explicitly emptied here: the disposable preview must not open a second
+# notification pipeline (or email the operator for contract-check orders).
+[env.preview.triggers]
+crons = []
+
+[[env.preview.d1_databases]]
+binding = "DB"
+database_name = "idofera-preview"
+database_id = "647becf9-e665-4a85-9fa5-dbb5dedbcefa"
+
+[[env.preview.r2_buckets]]
+binding = "MALL_IMAGES"
+bucket_name = "idomall-preview"
+
+[env.preview.vars]
+D1_DATABASE_ID = "647becf9-e665-4a85-9fa5-dbb5dedbcefa"
+MALL_HONOR_POS_PROMOS = "false"
+MALL_CHECKOUT_ENABLED = "true"
+MALL_PICKUP_ADDRESS = "Preview pickup (disposable)"
+MALL_PICKUP_HOURS = "9AM - 5PM"
+MALL_BANK_NAME = "PREVIEW BANK"
+MALL_BANK_ACCOUNT_NAME = "IDOFERA PREVIEW"
+MALL_BANK_ACCOUNT_NUMBER = "0000000000"
+MALL_EMAIL_FROM = "Idofera Preview <orders@idofera.de5.net>"
+MALL_WEBHOOK_URL = "https://idomall-preview.olz.workers.dev/api/mall-webhook"
+# MALL_WEBHOOK_SECRET, MALL_NOTIFY_EMAIL and RESEND_API_KEY are set the same way
+# as the mall environment: `npx wrangler secret put --env preview <NAME>`.
+

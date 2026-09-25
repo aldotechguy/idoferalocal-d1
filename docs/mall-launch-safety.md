@@ -85,7 +85,10 @@ bootstrap behavior. This is not a deployed D1/workerd test and does not establis
 Cloudflare platform limits, network behavior, or production configuration.
 
 Before launch, repeat the contract checks in a disposable deployed preview database,
-including the maximum intended cart size and existing-schema rollout. Priorities 8–9
+including the maximum intended cart size and existing-schema rollout. This is now
+automated by `npm run verify:mall-contract` against the `--env preview` deployment —
+see `mall-operations.md` for configuration, safety guards and the last run result.
+Priorities 8–9
 (notifications, rate limiting, readiness, bank instructions, catalog administration) are
 now implemented — see `mall-operations.md` for their current behaviour and remaining
 deployment gates. Tracking privacy stays deliberately minimal (exact order number plus

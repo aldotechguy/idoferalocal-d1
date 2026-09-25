@@ -15,6 +15,7 @@
     "verify:frontend": "npm run lint && npm run audit:frontend && npm run test:frontend",
     "verify:mall": "npm run lint && npm run test:mall-backend",
     "verify:mall-preview": "tsx scripts/mall-preview-check.ts",
+    "verify:mall-contract": "tsx scripts/mall-contract-check.ts",
     "demo:mall-cascade": "tsx scripts/mall-cascade-demo.ts",
     "mail:test": "tsx scripts/send-mall-test-emails.ts",
     "ddl:gen": "tsx scripts/etl/gen-ddl.ts",

@@ -372,7 +372,23 @@ are included. This is NOT a deployed D1/workerd certification.
 `npm run verify:mall-preview` runs read-only checks against an explicitly configured
 `MALL_PREVIEW_BASE_URL` HTTPS origin. It checks storefront routing, catalog/health,
 anonymous staff access rejection, phone-only lookup rejection and readiness. It
-does not create orders or mutate stock. No preview URL was supplied or tested.
+does not create orders or mutate stock. Note that it asserts readiness 200, so it
+only passes against a fully activated environment — the disposable preview below
+intentionally reports `scheduler:false` and fails that last assertion.
+
+`npm run verify:mall-contract` runs the write-heavy launch contract checks against
+the disposable `--env preview` deployment (`[env.preview]` in `wrangler.toml`:
+isolated `idofera-preview` D1, `idomall-preview` R2, placeholder bank config, no
+cron trigger). Configure `MALL_CONTRACT_BASE_URL`, `MALL_CONTRACT_D1` and
+`MALL_CONTRACT_WRANGLER_ENV`; the script refuses the live `idomall` origin and the
+live `idofera` database unless `MALL_CONTRACT_ALLOW_LIVE=1`. It seeds preview-only
+products/carts and verifies on real D1 + workerd: cold-start schema bootstrap,
+existing-schema rollout marker, a maximum 100-line x 1000-unit cart committing
+atomically (status 201, every line kept, total priced server-side), attempt-scoped
+checkout replay, stock decrement, and the documented caps (1000 units/line,
+100 lines, 1,000,000,000 kobo total). Last run on 2026-09-25 against
+`https://idomall-preview.olz.workers.dev`: all checks passed. This does not
+verify payment settlement, courier handoff or notification-provider delivery.
 
 Before activation: back up the database; inspect duplicate/invalid legacy records;
 apply the change in a disposable preview; test maximum intended order size under
