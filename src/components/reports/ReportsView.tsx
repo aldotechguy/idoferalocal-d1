@@ -254,11 +254,13 @@ export const ReportsView: React.FC = () => {
       .sort((a, b) => b.total - a.total);
   }, [periodSales, periodRevenue]);
 
-  // Top Selling Products in Active Period
-  const productSalesMap: Record<
-    string,
-    { name: string; sku: string; unitsSold: number; totalRevenue: number; totalCost: number }
-  > = {};
+  // Top Selling Products in Active Period. Memoized: this aggregation walks
+  // every line of every sale in the period and used to re-run on every render.
+  const { topSellersList, deadStockList } = useMemo(() => {
+    const productSalesMap: Record<
+      string,
+      { name: string; sku: string; unitsSold: number; totalRevenue: number; totalCost: number }
+    > = {};
 
   periodSales.forEach((s) => {
     (s.items || []).forEach((item) => {
@@ -283,15 +285,17 @@ export const ReportsView: React.FC = () => {
     });
   });
 
-  const topSellersList = Object.values(productSalesMap).sort(
+  const topSellers = Object.values(productSalesMap).sort(
     (a, b) => b.totalRevenue - a.totalRevenue
   );
 
   // Dead / Slow Moving Stock Aggregation (Catalog-wide)
   const soldProductIds = new Set(Object.keys(productSalesMap));
-  const deadStockList = products.filter(
+  const deadStock = products.filter(
     (p) => !soldProductIds.has(p.id) || (productSalesMap[p.id]?.unitsSold || 0) === 0
   );
+    return { topSellersList: topSellers, deadStockList: deadStock };
+  }, [periodSales, products]);
 
   // Export CSV Handler
   const handleExportCSV = () => {

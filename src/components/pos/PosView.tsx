@@ -33,6 +33,7 @@ import { ReceiptModal } from '../common/ReceiptModal';
 import { useAuth } from '../../context/AuthContext';
 import { useInteractions } from '../../context/InteractionContext';
 import { navigateStaff } from '../../hooks/useRoute';
+import { localIsoDate } from '../../shared/localDate';
 
 export const PosView: React.FC = () => {
   const {
@@ -77,8 +78,10 @@ export const PosView: React.FC = () => {
   const [qtyInputVal, setQtyInputVal] = useState<string>('1');
   const [isBackdateMode, setIsBackdateMode] = useState(false);
   const [backdateDate, setBackdateDate] = useState(() => {
+    // datetime-local values are LOCAL; seeding from toISOString() (UTC) recorded
+    // the wrong instant by the UTC offset for users who left the field alone.
     const now = new Date();
-    return now.toISOString().slice(0, 16);
+    return localIsoDate(now) + 'T' + now.toTimeString().slice(0, 5);
   });
   const [hasDeliveryFee, setHasDeliveryFee] = useState<boolean>(false);
   const [deliveryFeeInput, setDeliveryFeeInput] = useState<string>('');
@@ -133,7 +136,10 @@ export const PosView: React.FC = () => {
     setIsClearanceSaleOpen(false);
   };
 
-  const categories = ['All', ...Array.from(new Set(products.map((p) => p.category)))];
+  const categories = useMemo(
+    () => ['All', ...Array.from(new Set(products.map((p) => p.category)))],
+    [products],
+  );
 
   const productSalesFrequency = useMemo(() => {
     const frequency = new Map<string, number>();
@@ -144,7 +150,9 @@ export const PosView: React.FC = () => {
     return frequency;
   }, [sales]);
 
-  const filteredProducts = products.filter((p) => {
+  // Full catalog filter + ranking, memoized: this used to run on every render
+  // of a screen whose state changes on every keystroke and cart edit.
+  const filteredProducts = useMemo(() => products.filter((p) => {
     if (!p) return false;
     const q = (searchQuery || '').toLowerCase();
     const matchesSearch =
@@ -153,7 +161,8 @@ export const PosView: React.FC = () => {
       (p.barcode || '').toLowerCase().includes(q);
     const matchesCategory = selectedCategory === 'All' || p.category === selectedCategory;
     return matchesSearch && matchesCategory && p.status !== 'Archived';
-  }).sort((a, b) => (productSalesFrequency.get(b.id) || 0) - (productSalesFrequency.get(a.id) || 0));
+  }).sort((a, b) => (productSalesFrequency.get(b.id) || 0) - (productSalesFrequency.get(a.id) || 0)),
+  [products, searchQuery, selectedCategory, productSalesFrequency]);
 
   const toggleUseRetailPrice = (productId: string) => {
     const product = products.find((p) => p.id === productId);
@@ -419,6 +428,25 @@ export const PosView: React.FC = () => {
         .map(([method, amt]) => `${method}: ${settings.currencySymbol}${amt.toFixed(2)}`);
       notesToSave = `Split Payment: ${activeSplits.length > 0 ? activeSplits.join(', ') : 'Custom Split'}`;
       paid = totalSplitPaid;
+    }
+
+    // A split that does not cover the total silently recorded the shortfall as
+    // customer debt (paid < total) with no warning at the till. Hold the sale
+    // and send the cashier back to the split amounts unless the difference is
+    // meant to be credit, which the explicit credit-sale path already covers.
+    if (
+      paymentMethod === 'Split' &&
+      customPaid === undefined &&
+      !customNotes &&
+      totalSplitPaid + 0.005 < grandTotal
+    ) {
+      notify(
+        `Split payments total ${settings.currencySymbol}${totalSplitPaid.toFixed(2)} but the sale total is ${settings.currencySymbol}${grandTotal.toFixed(2)}. Add the missing amount, or use the credit sale option to record the balance as debt.`,
+        'Split payment incomplete',
+        'error',
+      );
+      setShowSplitModal(true);
+      return;
     }
 
     const isWholesaleOrder = cart.some((i) => i.isWholesale);

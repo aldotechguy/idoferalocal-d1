@@ -124,7 +124,6 @@ export function webhookSecretReady(config: MallConfig) {
 export async function mallReadiness(exec: MallExecutor) {
   const checks: Record<string, boolean> = {};
   try {
-    checks.schema = (await exec.queryAll('SELECT version FROM mall_schema_versions WHERE version=?', [MALL_SCHEMA_VERSION])).length === 1;
     // One sqlite_master lookup answers the oversell-trigger probe AND the
     // schema-object probe that used to be separate round trips.
     const expected = ['mall_write_guards','mall_checkout_attempts','mall_order_events','mall_outbox','mall_returns','mall_rate_limits','mall_metrics','idx_mall_normalized_phone','idx_mall_cart_product_unique','idx_mall_active_session','mall_order_created','mall_order_audited','mall_delivery_consistency'];
@@ -135,6 +134,14 @@ export async function mallReadiness(exec: MallExecutor) {
     const names = new Set(present.map((row: any) => String(row.name)));
     checks.stockTrigger = names.has('trg_products_no_oversell');
     checks.schemaObjects = expected.every((name) => names.has(name));
+    // The marker row is the deployed Worker's cold-start guard, and the Node
+    // bootstrap intentionally never writes it (it must not make the Worker's
+    // ensureSchema skip tables the Node set does not create, such as
+    // app_users/app_sessions). Requiring the marker here therefore reported
+    // schema:false forever on the Node runtime even though its bootstrap had
+    // installed and verified every mall object — /api/mall/ready could never
+    // answer 200 from `npm run dev`. Physical evidence is accepted instead.
+    checks.schema = (await exec.queryAll('SELECT version FROM mall_schema_versions WHERE version=?', [MALL_SCHEMA_VERSION])).length === 1 || checks.schemaObjects;
     await exec.queryAll('SELECT o.id FROM mall_orders o JOIN mall_order_items i ON i.mall_order_id=o.id JOIN payments p ON p.order_id=o.id LIMIT 1');
     checks.database = true;
     try {
@@ -190,14 +197,13 @@ export function mallRateLimitGroup(pathname: string): keyof typeof MALL_RATE_LIM
 }
 
 /**
- * Scope note: the in-isolate counter keys on mall group + minute window only —
- * deliberately NOT the caller IP. That keeps the hot-storefront semantics
- * identical to the old durable key (`tracking` already enforced a GLOBAL
- * 5/minute across all callers; `checkout` enforces a global 10/minute, which
- * is what stops two sessions racing one stock row). Keying per caller would
- * let N callers x cap through — strictly weaker than the prod behaviour being
- * replaced — and would have let the oversell tests pass trivially while
- * weakening the real store. The durable row stays per caller (cross-isolate).
+ * Scope note: the in-isolate counter keys on mall group + minute window + a
+ * SHA-256 hash of the trusted caller IP. The hash keeps raw IPs out of memory,
+ * and per-caller keying keeps one abusive address from consuming another
+ * buyer's allowance. The durable `mall_rate_limits` row uses the same per-caller
+ * scope, so the sampled in-isolate counter and the durable count agree. The
+ * oversell guarantee itself never relies on this limiter: the write batch
+ * revalidates stock under `BEGIN IMMEDIATE` (Node) / an atomic D1 batch.
  */
 
 export function mallRateLimitFor(pathname: string): number {
@@ -314,8 +320,22 @@ export async function runMallMaintenance(exec: MallExecutor, expire: (id:string)
   await exec.runBatch([{sql:"INSERT OR IGNORE INTO mall_outbox(id,event,payload_json,next_attempt_at,created_at) VALUES (?,'MALL_HEARTBEAT','{}',0,?)",params:[`heartbeat:${new Date(now).toISOString().slice(0,13)}`,new Date(now).toISOString()]}]);
   const configured=Number(exec.config?.MALL_UNPAID_EXPIRY_HOURS || 48);
   const hours=Number.isFinite(configured) && configured>=1 && configured<=720 ? configured : 48;
-  const old=await exec.queryAll("SELECT o.id FROM mall_orders o WHERE o.status IN ('pending','confirmed') AND o.linked_sale_id IS NULL AND o.created_at<? ORDER BY o.created_at LIMIT 1",[new Date(now-hours*3600_000).toISOString()]);
-  for(const row of old) { const response=await expire(row.id); if(!response.ok && response.status!==409) throw new Error('Unpaid order expiry failed'); }
+  const old=await exec.queryAll("SELECT o.id FROM mall_orders o WHERE o.status IN ('pending','confirmed') AND o.linked_sale_id IS NULL AND o.created_at<? ORDER BY o.created_at LIMIT 20",[new Date(now-hours*3600_000).toISOString()]);
+  // One bad order must not cancel the whole maintenance run: cart cleanup, the
+  // outbox drain and the scheduler freshness marker all ran after a single
+  // expiry failure before, flipping readiness.scheduler off for an unrelated
+  // reason. Log per-order failures and keep draining the rest.
+  let expiryFailures=0;
+  for(const row of old) {
+    try {
+      const response=await expire(row.id);
+      if(!response.ok && response.status!==409) throw new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      expiryFailures++;
+      console.warn('[mall-maintenance] unpaid order expiry failed:', row.id, error instanceof Error ? error.message : String(error));
+    }
+  }
+  if (expiryFailures) console.warn(`[mall-maintenance] ${expiryFailures} unpaid order(s) failed to expire and stay queued for the next run.`);
   await exec.runBatch([
     {sql:"DELETE FROM mall_carts WHERE id IN (SELECT c.id FROM mall_carts c WHERE c.updated_at<? LIMIT 100)",params:[now-30*86400_000]},
     {sql:'DELETE FROM mall_cart_items WHERE NOT EXISTS(SELECT 1 FROM mall_carts c WHERE c.id=mall_cart_items.cart_id)'},

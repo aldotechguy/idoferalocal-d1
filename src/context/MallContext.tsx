@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { useToast } from '../context/ToastContext';
 import { mallClient, type MallHealth, type MallProductsResponse, type MallCart, type MallOrder, type MallCheckoutBody } from '../services/mallClient';
 
@@ -114,36 +114,30 @@ export const MallProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [toast]);
 
   useEffect(() => {
+    let active = true;
     mallClient.ensureSession();
     setLoading(true);
     Promise.all([mallClient.health(), refreshProducts(), refreshCart()])
       .then(([healthData]) => {
+        if (!active) return;
         setHealth(healthData);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
-  }, []);
+      .catch(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [refreshProducts, refreshCart]);
+
+  // Stable context value: it used to be rebuilt on every provider render, so
+  // every Mall consumer re-rendered whenever anything in the tree re-rendered.
+  const value = useMemo<MallContextValue>(() => ({
+    health, products, cart, order, loading, view, setView,
+    refreshProducts, refreshCart, addToCart, setCartQty, removeFromCart,
+    checkout, newSession, error, clearError,
+  }), [health, products, cart, order, loading, view, refreshProducts, refreshCart, addToCart, setCartQty, removeFromCart, checkout, newSession, error, clearError]);
 
   return (
     <MallContext.Provider
-      value={{
-        health,
-        products,
-        cart,
-        order,
-        loading,
-        view,
-        setView,
-        refreshProducts,
-        refreshCart,
-        addToCart,
-        setCartQty,
-        removeFromCart,
-        checkout,
-        newSession,
-        error,
-        clearError,
-      }}
+      value={value}
     >
       {children}
     </MallContext.Provider>

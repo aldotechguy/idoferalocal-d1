@@ -403,6 +403,27 @@ const sortRecordsLifo = <T extends { id?: unknown; createdAt?: string; date?: st
     return String(b.id || '').localeCompare(String(a.id || ''), undefined, { numeric: true });
   });
 
+/**
+ * Legacy localStorage boot read. These keys are duplicated into IndexedDB and
+ * deleted after the first successful boot, but they are still read during the
+ * very first render — where an unparsable value used to throw inside the
+ * useState initializer and take the whole app shell down before the
+ * ErrorBoundary could recover. A corrupt key now degrades to the fallback.
+ */
+const readLegacyCollection = <T,>(key: string, fallback: T[]): T[] => {
+  if (typeof localStorage === 'undefined') return fallback;
+  try {
+    const saved = localStorage.getItem(key);
+    if (!saved) return fallback;
+    const parsed = JSON.parse(saved);
+    return Array.isArray(parsed) ? (parsed as T[]) : fallback;
+  } catch (e) {
+    console.warn(`Ignoring unreadable legacy storage for ${key}:`, e);
+    return fallback;
+  }
+};
+
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { currentUser, loading: authLoading } = useAuth();
   const isClearedBoot = typeof window !== 'undefined' && localStorage.getItem('idofera_cleared_empty') === 'true';
@@ -411,67 +432,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isD1Ready, setIsD1Ready] = useState(false);
   const d1InitializedForUserRef = useRef<string | null>(null);
   const isApplyingD1Ref = useRef(false);
+  /**
+   * IndexedDB mirror gate. Every business collection has an effect that rewrites
+   * the WHOLE store whenever the collection changes. On launch the collections
+   * are read back OUT of IndexedDB (and a D1 restore already wrote them through
+   * writeD1SnapshotToIndexedDB), so those effects rewrote every store with the
+   * data that was just read — pure write amplification on every start. The gate
+   * arms only after the boot commit lands and lets a D1 apply through untouched;
+   * ordinary edits still mirror, and they also write their own record via
+   * saveDocument/putItem.
+   */
+  const mirrorArmedRef = useRef(false);
+  const mirrorReady = () => isStorageReady && mirrorArmedRef.current && !isApplyingD1Ref.current;
 
-  const [products, setProducts] = useState<Product[]>(() => {
-    const saved = localStorage.getItem('idofera_products');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_PRODUCTS);
-    return sanitizeUniqueIds(items, 'prod');
-  });
+  const [products, setProducts] = useState<Product[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<Product>('idofera_products', isClearedBoot ? [] : INITIAL_PRODUCTS), 'prod'));
 
-  const [customers, setCustomers] = useState<Customer[]>(() => {
-    const saved = localStorage.getItem('idofera_customers');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_CUSTOMERS);
-    return sanitizeUniqueIds(items, 'cust');
-  });
+  const [customers, setCustomers] = useState<Customer[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<Customer>('idofera_customers', isClearedBoot ? [] : INITIAL_CUSTOMERS), 'cust'));
 
-  const [suppliers, setSuppliers] = useState<Supplier[]>(() => {
-    const saved = localStorage.getItem('idofera_suppliers');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_SUPPLIERS);
-    return sanitizeUniqueIds(items, 'sup');
-  });
+  const [suppliers, setSuppliers] = useState<Supplier[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<Supplier>('idofera_suppliers', isClearedBoot ? [] : INITIAL_SUPPLIERS), 'sup'));
 
-  const [sales, setSales] = useState<Sale[]>(() => {
-    const saved = localStorage.getItem('idofera_sales');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_SALES);
-    return sanitizeUniqueIds(items, 'sale');
-  });
+  const [sales, setSales] = useState<Sale[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<Sale>('idofera_sales', isClearedBoot ? [] : INITIAL_SALES), 'sale'));
 
-  const [purchases, setPurchases] = useState<PurchaseOrder[]>(() => {
-    const saved = localStorage.getItem('idofera_purchases');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_PURCHASES);
-    return sanitizeUniqueIds(items, 'po');
-  });
+  const [purchases, setPurchases] = useState<PurchaseOrder[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<PurchaseOrder>('idofera_purchases', isClearedBoot ? [] : INITIAL_PURCHASES), 'po'));
 
-  const [expenses, setExpenses] = useState<Expense[]>(() => {
-    const saved = localStorage.getItem('idofera_expenses');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_EXPENSES);
-    return sanitizeUniqueIds(items, 'exp');
-  });
+  const [expenses, setExpenses] = useState<Expense[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<Expense>('idofera_expenses', isClearedBoot ? [] : INITIAL_EXPENSES), 'exp'));
 
-  const [notifications, setNotifications] = useState<NotificationItem[]>(() => {
-    const saved = localStorage.getItem('idofera_notifications');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_NOTIFICATIONS);
-    return sanitizeUniqueIds(items, 'notif');
-  });
+  const [notifications, setNotifications] = useState<NotificationItem[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<NotificationItem>('idofera_notifications', isClearedBoot ? [] : INITIAL_NOTIFICATIONS), 'notif'));
 
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => {
-    const saved = localStorage.getItem('idofera_auditLogs');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_AUDIT_LOGS);
-    const sanitized = sanitizeUniqueIds(items, 'audit');
-    return sanitized.filter((log) => !isAutoSyncLog(log));
-  });
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<AuditLog>('idofera_auditLogs', isClearedBoot ? [] : INITIAL_AUDIT_LOGS), 'audit')
+      .filter((log) => !isAutoSyncLog(log)));
 
-  const [stockMovements, setStockMovements] = useState<StockMovement[]>(() => {
-    const saved = localStorage.getItem('idofera_stockMovements');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_STOCK_MOVEMENTS);
-    return sanitizeUniqueIds(items, 'mv');
-  });
+  const [stockMovements, setStockMovements] = useState<StockMovement[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<StockMovement>('idofera_stockMovements', isClearedBoot ? [] : INITIAL_STOCK_MOVEMENTS), 'mv'));
 
-  const [pricingHistory, setPricingHistory] = useState<PricingHistory[]>(() => {
-    const saved = localStorage.getItem('idofera_pricingHistory');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_PRICING_HISTORY);
-    return sanitizeUniqueIds(items, 'ph');
-  });
+  const [pricingHistory, setPricingHistory] = useState<PricingHistory[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<PricingHistory>('idofera_pricingHistory', isClearedBoot ? [] : INITIAL_PRICING_HISTORY), 'ph'));
 
   const [settings, setSettings] = useState<StoreSettings>(() => {
     const saved = localStorage.getItem('idofera_settings');
@@ -485,26 +488,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return sanitizeStoreSettings(INITIAL_SETTINGS);
   });
 
-  const [heldOrders, setHeldOrders] = useState<{ id: string; name: string; items: SaleItem[]; customerId?: string; date: string }[]>(() => {
-    const saved = localStorage.getItem('idofera_heldOrders');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [heldOrders, setHeldOrders] = useState<{ id: string; name: string; items: SaleItem[]; customerId?: string; date: string }[]>(() =>
+    readLegacyCollection<{ id: string; name: string; items: SaleItem[]; customerId?: string; date: string }>('idofera_heldOrders', []));
 
-  const [whatsAppPreOrders, setWhatsAppPreOrders] = useState<WhatsAppPreOrder[]>(() => {
-    const saved = localStorage.getItem('idofera_whatsAppPreOrders');
-    return saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_WHATSAPP_PREORDERS);
-  });
+  const [whatsAppPreOrders, setWhatsAppPreOrders] = useState<WhatsAppPreOrder[]>(() =>
+    readLegacyCollection<WhatsAppPreOrder>('idofera_whatsAppPreOrders', isClearedBoot ? [] : INITIAL_WHATSAPP_PREORDERS));
 
-  const [deliveryOrders, setDeliveryOrders] = useState<DeliveryOrder[]>(() => {
-    const saved = localStorage.getItem('idofera_deliveryOrders');
-    return saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_DELIVERY_ORDERS);
-  });
+  const [deliveryOrders, setDeliveryOrders] = useState<DeliveryOrder[]>(() =>
+    readLegacyCollection<DeliveryOrder>('idofera_deliveryOrders', isClearedBoot ? [] : INITIAL_DELIVERY_ORDERS));
 
-  const [moneyMovements, setMoneyMovements] = useState<MoneyMovement[]>(() => {
-    const saved = localStorage.getItem('idofera_moneyMovements');
-    const raw = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_MONEY_MOVEMENTS);
-    return sanitizeMoneyMovements(raw);
-  });
+  const [moneyMovements, setMoneyMovements] = useState<MoneyMovement[]>(() =>
+    sanitizeMoneyMovements(readLegacyCollection<MoneyMovement>('idofera_moneyMovements', isClearedBoot ? [] : INITIAL_MONEY_MOVEMENTS)));
 
   const treasuryBalances = useMemo<TreasuryBalances>(() => {
     let biz = 0;
@@ -765,57 +759,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Keep business collections in IndexedDB instead of duplicating them in the
   // much smaller localStorage quota.
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('products', products).catch((e) => console.warn('IndexedDB products sync error:', e));
   }, [isStorageReady, products]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('customers', customers).catch((e) => console.warn('IndexedDB customers sync error:', e));
   }, [isStorageReady, customers]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('suppliers', suppliers).catch((e) => console.warn('IndexedDB suppliers sync error:', e));
   }, [isStorageReady, suppliers]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('sales', sales).catch((e) => console.warn('IndexedDB sales sync error:', e));
   }, [isStorageReady, sales]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('purchases', purchases).catch((e) => console.warn('IndexedDB purchases sync error:', e));
   }, [isStorageReady, purchases]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('expenses', expenses).catch((e) => console.warn('IndexedDB expenses sync error:', e));
   }, [isStorageReady, expenses]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('notifications', notifications).catch((e) => console.warn('IndexedDB notifications sync error:', e));
   }, [isStorageReady, notifications]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('auditLogs', auditLogs).catch((e) => console.warn('IndexedDB auditLogs sync error:', e));
   }, [isStorageReady, auditLogs]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('stockMovements', stockMovements).catch((e) => console.warn('IndexedDB stockMovements sync error:', e));
   }, [isStorageReady, stockMovements]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('pricingHistory', pricingHistory).catch((e) => console.warn('IndexedDB pricingHistory sync error:', e));
   }, [isStorageReady, pricingHistory]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     safeSetLocalStorage('idofera_settings', JSON.stringify(settings));
     putItem('settings', { ...settings, id: 'store_settings' }).catch((e) => console.warn('IndexedDB settings sync error:', e));
     if (isInitialBootRef.current && !isApplyingD1Ref.current) {
@@ -824,17 +818,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [isStorageReady, settings]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('heldOrders', heldOrders).catch((e) => console.warn('IndexedDB heldOrders sync error:', e));
   }, [isStorageReady, heldOrders]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('deliveryOrders', deliveryOrders).catch((e) => console.warn('IndexedDB deliveryOrders sync error:', e));
   }, [isStorageReady, deliveryOrders]);
 
-  // Auto deduplicate any existing duplicate SKUs on initial app load
+  // Auto deduplicate any existing duplicate SKUs once, on the real catalog.
+  // The old empty-deps effect ran at mount against the useState initializer
+  // (legacy localStorage or seed rows) and never again, so duplicates that
+  // arrived with the IndexedDB/D1 data were never cleaned at all.
+  const hasDedupedSkusRef = useRef(false);
   useEffect(() => {
+    if (!isStorageReady || hasDedupedSkusRef.current) return;
     const skuCounts = new Map<string, number>();
     let hasDupes = false;
     products.forEach((p) => {
@@ -848,20 +847,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
+    hasDedupedSkusRef.current = true;
     if (hasDupes) {
       deduplicateProductsBySku();
     }
-  }, []);
+  }, [isStorageReady, products]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('whatsAppPreOrders', whatsAppPreOrders).catch((e) => console.warn('IndexedDB preorders sync error:', e));
   }, [isStorageReady, whatsAppPreOrders]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('moneyMovements', moneyMovements).catch((e) => console.warn('IndexedDB moneyMovements sync error:', e));
   }, [isStorageReady, moneyMovements]);
+
+  // Declared AFTER the mirror effects so it runs after them in the commit that
+  // flips isStorageReady: that commit's mirror pass is skipped, and every later
+  // collection change mirrors normally.
+  useEffect(() => {
+    if (isStorageReady) mirrorArmedRef.current = true;
+  }, [isStorageReady]);
+
+  /** Product writes collected by updateProduct and flushed once per commit. */
+  const pendingProductWritesRef = useRef<Map<string, Product>>(new Map());
+  useEffect(() => {
+    if (pendingProductWritesRef.current.size === 0) return;
+    const records = [...pendingProductWritesRef.current.values()];
+    pendingProductWritesRef.current.clear();
+    for (const record of records) saveDocument('products', record);
+  });
 
   const currentD1Snapshot = (): D1Snapshot => ({
     products,
@@ -1007,16 +1023,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateProduct = (id: string, updates: Partial<Product>, reason?: string) => {
-    let targetName = 'Product';
+    const targetName = products.find((p) => p.id === id)?.name || 'Product';
     setProducts((prev) =>
       prev.map((prod) => {
         if (prod.id !== id) return prod;
-        targetName = prod.name;
         const updated = { ...prod, ...updates, updatedAt: new Date().toISOString() };
-
         updated.status = catalogStatus(updates.status ?? prod.status);
-
-        saveDocument('products', updated);
+        // Persisting straight from the updater doubled every write under
+        // StrictMode; computing the record from component state outside the
+        // updater drops a second update to the SAME product in one tick (the
+        // PO-receiving path updates cost price and then retail price). The
+        // composed record is collected here and flushed once per commit below.
+        pendingProductWritesRef.current.set(updated.id, updated);
         return updated;
       })
     );
@@ -1030,13 +1048,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     removeDocument('products', id);
     deleteItem('products', id).catch((e) => console.warn('IndexedDB product delete error:', e));
 
-    // Clean up low stock notifications for this product
+    // Clean up low stock notifications for this product. Removals run outside
+    // the updater so a StrictMode double-invoke cannot delete twice.
     if (target) {
-      setNotifications((prev) => {
-        const removed = prev.filter((n) => n.message.includes(target.name));
-        removed.forEach((n) => removeDocument('notifications', n.id));
-        return prev.filter((n) => !n.message.includes(target.name));
-      });
+      const removed = notifications.filter((n) => n.message.includes(target.name));
+      removed.forEach((n) => removeDocument('notifications', n.id));
+      setNotifications((prev) => prev.filter((n) => !n.message.includes(target.name)));
     }
 
     logAudit('DELETE_PRODUCT', 'Product', id, 'User', target ? `Deleted product "${target.name}" (SKU: ${target.sku}).` : `Deleted product ${id}.`);
@@ -2795,45 +2812,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const histSaleIds = new Set(sales.filter(isHistoricalSaleRecord).map((s) => s.id));
     let purgedCount = 0;
 
-    setMoneyMovements((prev) => {
-      const toRemove: MoneyMovement[] = [];
-      const kept: MoneyMovement[] = [];
+    // Classification runs on the current state and the storage deletes run once
+    // — never inside the updater, where StrictMode's double-invoke deleted each
+    // historical record twice.
+    const isPurgeable = (m: MoneyMovement) => {
+      const isHistDeliveryExpenseMM =
+        (typeof m.id === 'string' && m.id.startsWith('mm-hist-')) ||
+        (m.subtype === 'Logistics' && (
+          (typeof m.referenceNo === 'string' && m.referenceNo.includes('Historical')) ||
+          (typeof m.notes === 'string' && (m.notes.includes('Historical') || m.notes.includes('Historical delivery fee')))
+        ));
 
-      prev.forEach((m) => {
-        const isHistDeliveryExpenseMM =
-          (typeof m.id === 'string' && m.id.startsWith('mm-hist-')) ||
-          (m.subtype === 'Logistics' && (
-            (typeof m.referenceNo === 'string' && m.referenceNo.includes('Historical')) ||
-            (typeof m.notes === 'string' && (m.notes.includes('Historical') || m.notes.includes('Historical delivery fee')))
-          ));
+      const isHistSaleInflow =
+        m.type === 'Sale Inflow' && (
+          (m.referenceId && histSaleIds.has(m.referenceId)) ||
+          (typeof m.notes === 'string' && (m.notes.includes('Historical') || m.notes.includes('Import Wizard')))
+        );
 
-        const isHistSaleInflow =
-          m.type === 'Sale Inflow' && (
-            (m.referenceId && histSaleIds.has(m.referenceId)) ||
-            (typeof m.notes === 'string' && (m.notes.includes('Historical') || m.notes.includes('Import Wizard')))
-          );
+      return isHistDeliveryExpenseMM || isHistSaleInflow;
+    };
 
-        if (isHistDeliveryExpenseMM || isHistSaleInflow) {
-          toRemove.push(m);
-        } else {
-          kept.push(m);
-        }
+    const toRemove = moneyMovements.filter(isPurgeable);
+    const kept = moneyMovements.filter((m) => !isPurgeable(m));
+    purgedCount = toRemove.length;
+
+    if (toRemove.length > 0) {
+      toRemove.forEach((m) => {
+        removeDocument('moneyMovements', m.id);
+        deleteItem('moneyMovements', m.id).catch(() => {});
       });
-
-      if (toRemove.length > 0) {
-        purgedCount = toRemove.length;
-        toRemove.forEach((m) => {
-          removeDocument('moneyMovements', m.id);
-          deleteItem('moneyMovements', m.id).catch(() => {});
-        });
-        console.log(`[Treasury] Purged ${toRemove.length} historical money movement records to preserve live Bank and Till balances.`);
-      }
-
-      return kept;
-    });
+      console.log(`[Treasury] Purged ${toRemove.length} historical money movement records to preserve live Bank and Till balances.`);
+      setMoneyMovements(kept);
+    }
 
     return { purgedCount };
-  }, [sales, isHistoricalSaleRecord]);
+  }, [sales, isHistoricalSaleRecord, moneyMovements]);
 
   // Automatically reconcile historical delivery fee expenses and purge historical movements when storage is ready
   const hasAutoReconciledRef = useRef(false);
@@ -4755,32 +4768,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Settings
   const updateSettings = (newSettings: Partial<StoreSettings>) => {
-    setSettings((prev) => {
-      const updated = sanitizeStoreSettings({ ...prev, ...newSettings });
-      saveDocument('settings', { ...updated, id: 'store_settings' });
-      return updated;
-    });
+    // Persist outside the updater: a StrictMode double-invoke used to fire two
+    // settings saves (and two D1 dirty marks) per change.
+    const updated = sanitizeStoreSettings({ ...settings, ...newSettings });
+    saveDocument('settings', { ...updated, id: 'store_settings' });
+    setSettings(updated);
     showToast({ title: 'Settings Saved', message: 'Store preferences updated successfully.', type: 'success' });
   };
 
   const orderedLists = useMemo(() => {
+    // Index suppliers once instead of filtering the whole purchase/product lists
+    // per supplier: the old shape was O(suppliers x (purchases + products)) and
+    // re-ran on ANY collection change (even reading one notification).
+    const supplierKey = (name?: string) => (name ? name.trim().toLowerCase() : '');
+    const posBySupplier = new Map<string, Map<string, PurchaseOrder>>();
+    const addPo = (key: string, po: PurchaseOrder) => {
+      if (!key) return;
+      let bucket = posBySupplier.get(key);
+      if (!bucket) posBySupplier.set(key, bucket = new Map());
+      bucket.set(po.id, po);
+    };
+    for (const po of purchases) {
+      if (po.isDraft || po.deliveryStatus === 'Cancelled') continue;
+      addPo(po.supplierId, po);
+      addPo(supplierKey(po.supplierName), po);
+    }
+    const productsBySupplier = new Map<string, Map<string, Product>>();
+    const addProduct = (key: string, prod: Product) => {
+      if (!key) return;
+      let bucket = productsBySupplier.get(key);
+      if (!bucket) productsBySupplier.set(key, bucket = new Map());
+      bucket.set(prod.id, prod);
+    };
+    for (const prod of products) {
+      addProduct(prod.supplierId, prod);
+      addProduct(supplierKey(prod.supplierName), prod);
+    }
+    const collect = <T,>(map: Map<string, Map<string, T>>, ...keys: string[]) => {
+      const merged = new Map<string, T>();
+      for (const key of keys) {
+        const bucket = map.get(key);
+        if (bucket) bucket.forEach((value, id) => merged.set(id, value));
+      }
+      return [...merged.values()];
+    };
     const augmentedSuppliers = suppliers.map((sup) => {
-      // Find all official (non-draft, non-cancelled) purchase orders for this supplier
-      const supplierPOs = purchases.filter(
-        (p) =>
-          (p.supplierId === sup.id || (p.supplierName && sup.name && p.supplierName.trim().toLowerCase() === sup.name.trim().toLowerCase())) &&
-          !p.isDraft &&
-          p.deliveryStatus !== 'Cancelled'
-      );
+      const supplierPOs = collect(posBySupplier, sup.id, supplierKey(sup.name));
       const calculatedPayable = supplierPOs.reduce(
         (sum, po) => sum + Math.max(0, (Number(po.totalAmount) || 0) - (Number(po.paidAmount) || 0)),
         0
       );
-      const linkedProducts = products.filter(
-        (prod) =>
-          prod.supplierId === sup.id ||
-          (prod.supplierName && sup.name && prod.supplierName.trim().toLowerCase() === sup.name.trim().toLowerCase())
-      );
+      const linkedProducts = collect(productsBySupplier, sup.id, supplierKey(sup.name));
       const hasPOs = supplierPOs.length > 0;
       const outstandingBalance = hasPOs ? calculatedPayable : (Number(sup.outstandingBalance) || 0);
 

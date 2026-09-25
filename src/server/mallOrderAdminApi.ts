@@ -114,8 +114,12 @@ async function listOrders(exec: MallExecutor, url: URL) {
   const params: any[] = [];
   if (status && status !== 'all') { filters.push('o.status = ?'); params.push(status); }
   if (q) {
-    filters.push('(o.order_no LIKE ? OR o.customer_name LIKE ? OR o.customer_phone LIKE ? OR EXISTS(SELECT 1 FROM payments search_payment WHERE search_payment.order_id=o.id AND search_payment.reference LIKE ?))');
-    const like = `%${q}%`; params.push(like, like, like, like);
+    // Escape LIKE wildcards the same way mallListingApi does, so a customer
+    // whose name contains % or _ cannot widen the staff search beyond the typed
+    // text.
+    const like = `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+    filters.push(`(o.order_no LIKE ? ESCAPE '\\' OR o.customer_name LIKE ? ESCAPE '\\' OR o.customer_phone LIKE ? ESCAPE '\\' OR EXISTS(SELECT 1 FROM payments search_payment WHERE search_payment.order_id=o.id AND search_payment.reference LIKE ? ESCAPE '\\'))`);
+    params.push(like, like, like, like);
   }
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   // Windowed page query: the page AND its filtered total come from one pass over

@@ -46,6 +46,15 @@ import {
 } from 'recharts';
 import { localIsoDate } from '../../shared/localDate';
 
+/** Local calendar month key (YYYY-MM) for a UTC ISO timestamp or date string. */
+const localMonthKey = (timestamp?: string): string => {
+  if (!timestamp) return '';
+  const parsed = new Date(timestamp);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const month = String(parsed.getMonth() + 1).padStart(2, '0');
+  return `${parsed.getFullYear()}-${month}`;
+};
+
 interface DashboardViewProps {
   onNavigate: (page: string) => void;
 }
@@ -60,7 +69,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const [activeModal, setActiveModal] = useState<'product' | 'expense' | 'customer' | 'supplier' | null>(null);
 
   // Metrics Calculations
-  const validSales = sales.filter((s) => s.status !== 'Refunded' && s.status !== 'Held' && s.status !== 'Draft');
+  const validSales = useMemo(
+    () => sales.filter((s) => s.status !== 'Refunded' && s.status !== 'Held' && s.status !== 'Draft'),
+    [sales],
+  );
 
   const now = new Date();
   const currentYear = now.getFullYear();
@@ -82,16 +94,20 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
     .filter((s) => s.createdAt && s.createdAt.startsWith(todayStr))
     .reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
 
-  // Scoped strictly to current calendar month (resets when month flips)
-  const currentMonthSales = validSales.filter((s) => {
-    return Boolean(s.createdAt && s.createdAt.startsWith(currentMonthStr));
-  });
+  // Scoped strictly to the current LOCAL calendar month (resets when the month
+  // flips). Comparing a UTC timestamp prefix to a local month key dropped sales
+  // taken in the first hour of the 1st.
+  const currentMonthSales = useMemo(
+    () => validSales.filter((s) => localMonthKey(s.createdAt) === currentMonthStr),
+    [validSales, currentMonthStr],
+  );
   const monthlyRevenue = currentMonthSales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
 
   // Prior month sales for comparison
-  const priorMonthSales = validSales.filter((s) => {
-    return Boolean(s.createdAt && s.createdAt.startsWith(priorMonthStr));
-  });
+  const priorMonthSales = useMemo(
+    () => validSales.filter((s) => localMonthKey(s.createdAt) === priorMonthStr),
+    [validSales, priorMonthStr],
+  );
   const priorMonthRevenue = priorMonthSales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
 
   let monthlyChangeStr = `${currentMonthShort} active`;
@@ -116,12 +132,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   }, 0);
 
   // Monthly Expenses (only expenses logged in the current month)
-  const monthlyExpenses = expenses
-    .filter((e) => {
-      const d = e.date || e.createdAt;
-      return Boolean(d && d.startsWith(currentMonthStr));
-    })
-    .reduce((acc, e) => acc + (Number(e.amount) || 0), 0);
+  const monthlyExpenses = useMemo(
+    () => expenses
+      .filter((e) => localMonthKey(e.date || e.createdAt) === currentMonthStr)
+      .reduce((acc, e) => acc + (Number(e.amount) || 0), 0),
+    [expenses, currentMonthStr],
+  );
 
   const monthlyGrossProfit = Math.max(0, monthlyRevenue - monthlyCostOfGoodsSold);
   const monthlyNetProfit = monthlyGrossProfit - monthlyExpenses;
@@ -160,45 +176,55 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
 
   const profitMarginPct = monthlyRevenue > 0 ? ((monthlyNetProfit / monthlyRevenue) * 100).toFixed(1) : '0.0';
 
-  // Dynamic 7-day Real-Time Sales Trend Data
-  const last7Days = Array.from({ length: 7 }, (_, i) => {
+  // Dynamic 7-day Real-Time Sales Trend Data. Memoized on the local day key so
+  // the trend memo below actually caches within a day (it was a fresh array on
+  // every render, which defeated that memo).
+  const last7Days = useMemo(() => Array.from({ length: 7 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - (6 - i));
     const isoDate = localIsoDate(d);
     const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
     return { isoDate, name: dayName };
-  });
+  }), [todayStr]);
 
-  const salesTrendData = last7Days.map(({ isoDate, name }) => {
-    const daySales = validSales.filter((s) => s.createdAt && s.createdAt.startsWith(isoDate));
-    const revenue = daySales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
-    const unitsSold = daySales.reduce(
-      (acc, s) => acc + (s.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 1), 0),
-      0
-    );
-    return {
-      name,
-      sales: unitsSold || daySales.length,
-      revenue,
-    };
-  });
+  // The 7-day trend scanned validSales 7 times on EVERY render (the whole
+  // metrics block was unmemoized); it now recomputes only when sales or the
+  // local day change. A single bucketing pass replaces the 7 scans.
+  const salesTrendData = useMemo(() => {
+    const byDay = new Map<string, { revenue: number; units: number; sales: number }>();
+    for (const { isoDate } of last7Days) byDay.set(isoDate, { revenue: 0, units: 0, sales: 0 });
+    for (const sale of validSales) {
+      const bucket = sale.createdAt ? byDay.get(localIsoDate(new Date(sale.createdAt))) : undefined;
+      if (!bucket) continue;
+      bucket.revenue += Number(sale.totalAmount) || 0;
+      bucket.sales += 1;
+      bucket.units += (sale.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 1), 0);
+    }
+    return last7Days.map(({ isoDate, name }) => {
+      const bucket = byDay.get(isoDate)!;
+      return { name, sales: bucket.units || bucket.sales, revenue: bucket.revenue };
+    });
+  }, [last7Days, validSales]);
 
   // Dynamic Category Distribution Data from Real-time Products & Inventory
-  const categoryTotals: Record<string, number> = {};
-  products.forEach((p) => {
-    const cat = p.category || 'General';
-    const val = p.currentStock * p.costPrice;
-    categoryTotals[cat] = (categoryTotals[cat] || 0) + (val > 0 ? val : p.retailPrice);
-  });
+  const categoryTotals = useMemo<Record<string, number>>(() => {
+    const totals: Record<string, number> = {};
+    products.forEach((p) => {
+      const cat = p.category || 'General';
+      const val = p.currentStock * p.costPrice;
+      totals[cat] = (totals[cat] || 0) + (val > 0 ? val : p.retailPrice);
+    });
+    return totals;
+  }, [products]);
 
-  const totalCatVal = Object.values(categoryTotals).reduce((a, b) => a + b, 0);
+  const totalCatVal = Object.keys(categoryTotals).reduce((sum, key) => sum + Number(categoryTotals[key] || 0), 0);
   const palette = ['#2563eb', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#6366f1'];
 
   const categoryData =
     Object.keys(categoryTotals).length > 0
-      ? Object.entries(categoryTotals).map(([name, val], index) => ({
+      ? Object.entries(categoryTotals).map(([name, raw], index) => ({
           name,
-          value: totalCatVal > 0 ? Math.round((val / totalCatVal) * 100) : 0,
+          value: totalCatVal > 0 ? Math.round((Number(raw) / totalCatVal) * 100) : 0,
           color: palette[index % palette.length],
         }))
       : [{ name: 'No Categories', value: 100, color: '#94a3b8' }];
@@ -206,7 +232,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const maxRecentSaleTotal = useMemo(() => {
     const topSlice = sales.slice(0, 4);
     if (topSlice.length === 0) return 1;
-    return Math.max(...topSlice.map((s) => s.totalAmount), 1);
+    // Number() guard: a legacy record with a string/NaN total used to poison
+    // Math.max into NaN, which blanked the bar chart scaling.
+    return topSlice.reduce((max, s) => Math.max(max, Number(s.totalAmount) || 0), 1);
   }, [sales]);
 
   return (

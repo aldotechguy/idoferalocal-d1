@@ -112,8 +112,9 @@ export const DeliveriesView: React.FC<{ onNavigate?: (page: string) => void }> =
     setEditPickupModalOrder(null);
   };
 
-  // Filter Delivery Orders
-  const filteredOrders = deliveryOrders.filter((order) => {
+  // Filter Delivery Orders. Memoized: it was a new array every render, so the
+  // pagination memo below never hit and every keystroke re-scanned the list.
+  const filteredOrders = React.useMemo(() => deliveryOrders.filter((order) => {
     if (!order) return false;
     const q = (searchQuery || '').toLowerCase();
     const matchesSearch =
@@ -125,7 +126,7 @@ export const DeliveriesView: React.FC<{ onNavigate?: (page: string) => void }> =
 
     const matchesStatus = selectedStatus === 'All' || order.status === selectedStatus;
     return matchesSearch && matchesStatus;
-  });
+  }), [deliveryOrders, searchQuery, selectedStatus]);
 
   // Pagination State
   const [currentPage, setCurrentPage] = useState(1);
@@ -144,10 +145,22 @@ export const DeliveriesView: React.FC<{ onNavigate?: (page: string) => void }> =
 
   // Calculate KPI summaries
   const totalOrders = deliveryOrders.length;
-  const pendingPickupCount = deliveryOrders.filter((o) => !o.isPickupConfirmed && o.status !== 'Cancelled').length;
-  const inTransitCount = deliveryOrders.filter((o) => o.status === 'Picked Up' || o.status === 'Out for Delivery').length;
-  const deliveredCount = deliveryOrders.filter((o) => o.status === 'Delivered').length;
-  const totalDeliveryFees = deliveryOrders.reduce((sum, o) => sum + (o.deliveryFee || 0), 0);
+  const pendingPickupCount = React.useMemo(
+    () => deliveryOrders.filter((o) => !o.isPickupConfirmed && o.status !== 'Cancelled').length,
+    [deliveryOrders],
+  );
+  const inTransitCount = React.useMemo(
+    () => deliveryOrders.filter((o) => o.status === 'Picked Up' || o.status === 'Out for Delivery').length,
+    [deliveryOrders],
+  );
+  const deliveredCount = React.useMemo(
+    () => deliveryOrders.filter((o) => o.status === 'Delivered').length,
+    [deliveryOrders],
+  );
+  const totalDeliveryFees = React.useMemo(
+    () => deliveryOrders.reduce((sum, o) => sum + (o.deliveryFee || 0), 0),
+    [deliveryOrders],
+  );
 
   const handleConfirmPickupSubmit = (e: React.FormEvent) => {
     e.preventDefault();

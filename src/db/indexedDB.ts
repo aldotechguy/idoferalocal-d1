@@ -233,11 +233,13 @@ export async function getStoreRecordCounts(): Promise<Record<string, number>> {
 }
 
 export async function exportDatabaseJSON(): Promise<string> {
-  const exportData: Record<string, any[]> = {};
-  for (const storeName of ALL_STORES) {
+  // One transaction per store, all in flight together: the sequential loop
+  // serialized 15 round-trips before the export could start.
+  const entries = await Promise.all(ALL_STORES.map(async (storeName) => {
     const items = await getAllItems(storeName);
-    exportData[storeName] = items;
-  }
+    return [storeName, items] as const;
+  }));
+  const exportData: Record<string, any[]> = Object.fromEntries(entries);
   return JSON.stringify(
     {
       app: 'IdoferaLabs POS',

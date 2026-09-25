@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Settings,
   Shield,
@@ -57,7 +57,7 @@ import { useToast } from '../../context/ToastContext';
 import { UserModal } from '../modals/UserModal';
 import { ConfirmModal } from '../common/ConfirmModal';
 import { ResetPasswordModal } from '../modals/ResetPasswordModal';
-import { UserProfile, UserRole } from '../../types';
+import { StoreSettings, UserProfile, UserRole } from '../../types';
 import {
   getStoreRecordCounts,
   getStorageEstimate,
@@ -112,9 +112,25 @@ export const SettingsView: React.FC = () => {
     isAdmin ? 'users' : 'security'
   );
   const [formData, setFormData] = useState({ ...settings });
+  /** Marks the form dirty so a background settings update cannot wipe unsaved edits. */
+  const updateFormField = (patch: Partial<StoreSettings>) => {
+    isSettingsDirtyRef.current = true;
+    setFormData((prev) => ({ ...prev, ...patch }));
+  };
   const [savedToast, setSavedToast] = useState(false);
+  // The form resynced from `settings` on every change of that object's
+  // identity — including background D1 syncs and cross-tab updates — silently
+  // discarding unsaved edits. Resync only while the form is untouched.
+  const isSettingsDirtyRef = useRef(false);
+  const settingsSignatureRef = useRef('');
 
   useEffect(() => {
+    const signature = JSON.stringify(settings);
+    // A response to this form's own save (same values) must not clear the dirty
+    // flag before the user's next edit; it simply matches.
+    if (signature === settingsSignatureRef.current) return;
+    settingsSignatureRef.current = signature;
+    if (isSettingsDirtyRef.current) return;
     setFormData({ ...settings });
   }, [settings]);
 
@@ -141,12 +157,18 @@ export const SettingsView: React.FC = () => {
   const [showDesktopInstallModal, setShowDesktopInstallModal] = useState(false);
 
   // Refresh local record counts and probe the D1 health endpoint.
+  // Monotonic request id: a slow earlier refresh must not overwrite a newer one
+  // (and must not set state after the user navigated away).
+  const dbCountsRequestRef = useRef(0);
   const refreshDBCounts = async (isManualClick: boolean = false) => {
+    const requestId = ++dbCountsRequestRef.current;
     setIsRefreshingCounts(true);
     try {
       const counts = await getStoreRecordCounts();
+      if (requestId !== dbCountsRequestRef.current) return;
       setDbCounts(counts);
       const est = await getStorageEstimate();
+      if (requestId !== dbCountsRequestRef.current) return;
       setStorageEstimate(est);
 
       if (isManualClick) {
@@ -175,7 +197,7 @@ export const SettingsView: React.FC = () => {
         });
       }
     } finally {
-      setIsRefreshingCounts(false);
+      if (requestId === dbCountsRequestRef.current) setIsRefreshingCounts(false);
     }
   };
 
@@ -332,6 +354,8 @@ export const SettingsView: React.FC = () => {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    isSettingsDirtyRef.current = false;
+    settingsSignatureRef.current = JSON.stringify(formData);
     updateSettings(formData);
     setSavedToast(true);
     setTimeout(() => setSavedToast(false), 3000);
@@ -987,7 +1011,7 @@ export const SettingsView: React.FC = () => {
                   <input
                     type="text"
                     value={formData.storeName}
-                    onChange={(e) => setFormData({ ...formData, storeName: e.target.value })}
+                    onChange={(e) => updateFormField({ storeName: e.target.value })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl"
                   />
                 </div>
@@ -997,7 +1021,7 @@ export const SettingsView: React.FC = () => {
                   <input
                     type="text"
                     value={formData.phone}
-                    onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
+                    onChange={(e) => updateFormField({ phone: e.target.value })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl"
                   />
                 </div>
@@ -1007,7 +1031,7 @@ export const SettingsView: React.FC = () => {
                   <input
                     type="email"
                     value={formData.email}
-                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                    onChange={(e) => updateFormField({ email: e.target.value })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl"
                   />
                 </div>
@@ -1017,7 +1041,7 @@ export const SettingsView: React.FC = () => {
                   <input
                     type="text"
                     value={formData.address}
-                    onChange={(e) => setFormData({ ...formData, address: e.target.value })}
+                    onChange={(e) => updateFormField({ address: e.target.value })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl"
                   />
                 </div>
@@ -1028,7 +1052,7 @@ export const SettingsView: React.FC = () => {
                     type="number"
                     step="0.1"
                     value={formData.taxRatePct}
-                    onChange={(e) => setFormData({ ...formData, taxRatePct: parseFloat(e.target.value) || 0 })}
+                    onChange={(e) => updateFormField({ taxRatePct: parseFloat(e.target.value) || 0 })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl font-bold"
                   />
                 </div>
@@ -1038,7 +1062,7 @@ export const SettingsView: React.FC = () => {
                   <input
                     type="text"
                     value={formData.currencySymbol}
-                    onChange={(e) => setFormData({ ...formData, currencySymbol: e.target.value })}
+                    onChange={(e) => updateFormField({ currencySymbol: e.target.value })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl font-bold"
                   />
                 </div>
@@ -1048,7 +1072,7 @@ export const SettingsView: React.FC = () => {
                   <input
                     type="number"
                     value={formData.defaultMinWholesaleQty}
-                    onChange={(e) => setFormData({ ...formData, defaultMinWholesaleQty: parseInt(e.target.value) || 1 })}
+                    onChange={(e) => updateFormField({ defaultMinWholesaleQty: parseInt(e.target.value) || 1 })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl font-bold"
                   />
                 </div>
@@ -1059,7 +1083,7 @@ export const SettingsView: React.FC = () => {
                 <input
                   type="text"
                   value={formData.receiptHeader}
-                  onChange={(e) => setFormData({ ...formData, receiptHeader: e.target.value })}
+                  onChange={(e) => updateFormField({ receiptHeader: e.target.value })}
                   className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl"
                 />
               </div>
@@ -1069,7 +1093,7 @@ export const SettingsView: React.FC = () => {
                 <input
                   type="text"
                   value={formData.receiptFooter}
-                  onChange={(e) => setFormData({ ...formData, receiptFooter: e.target.value })}
+                  onChange={(e) => updateFormField({ receiptFooter: e.target.value })}
                   className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl"
                 />
               </div>
@@ -1084,10 +1108,7 @@ export const SettingsView: React.FC = () => {
                 <select
                   value={formData.whatsAppSalesAttributionRule || 'converter'}
                   onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      whatsAppSalesAttributionRule: e.target.value as 'converter' | 'creator' | 'custom',
-                    })
+                    updateFormField({ whatsAppSalesAttributionRule: e.target.value as 'converter' | 'creator' | 'custom', })
                   }
                   className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-semibold dark:text-white"
                 >

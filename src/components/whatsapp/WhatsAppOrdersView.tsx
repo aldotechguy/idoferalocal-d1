@@ -201,7 +201,7 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
   }, [searchQuery, selectedStatus]);
 
   // Filter Pre-Orders
-  const filteredOrders = whatsAppPreOrders.filter((order) => {
+  const filteredOrders = React.useMemo(() => whatsAppPreOrders.filter((order) => {
     if (!order) return false;
     const q = (searchQuery || '').toLowerCase();
     const matchesSearch =
@@ -212,7 +212,7 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
 
     const matchesStatus = selectedStatus === 'All' || order.status === selectedStatus;
     return matchesSearch && matchesStatus;
-  });
+  }), [whatsAppPreOrders, searchQuery, selectedStatus]);
 
   const totalPages = Math.ceil(filteredOrders.length / pageSize) || 1;
   const paginatedOrders = React.useMemo(() => {
@@ -222,10 +222,16 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
 
   // Calculate Summary KPIs
   const totalOrders = whatsAppPreOrders.length;
-  const pendingOrders = whatsAppPreOrders.filter((o) => o.status !== 'Completed' && o.status !== 'Cancelled');
-  const completedOrders = whatsAppPreOrders.filter((o) => o.status === 'Completed');
-  const totalPendingValue = pendingOrders.reduce((sum, o) => sum + o.totalAmount, 0);
-  const totalDepositsCollected = pendingOrders.reduce((sum, o) => sum + o.depositAmount, 0);
+  const pendingOrders = React.useMemo(
+    () => whatsAppPreOrders.filter((o) => o.status !== 'Completed' && o.status !== 'Cancelled'),
+    [whatsAppPreOrders],
+  );
+  const completedOrders = React.useMemo(
+    () => whatsAppPreOrders.filter((o) => o.status === 'Completed'),
+    [whatsAppPreOrders],
+  );
+  const totalPendingValue = React.useMemo(() => pendingOrders.reduce((sum, o) => sum + o.totalAmount, 0), [pendingOrders]);
+  const totalDepositsCollected = React.useMemo(() => pendingOrders.reduce((sum, o) => sum + o.depositAmount, 0), [pendingOrders]);
 
   // Customer Selection Handlers
   const handleSelectCustomer = (customerId: string) => {
@@ -259,6 +265,7 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
     const lines = rawText.split('\n').map((l) => l.trim()).filter(Boolean);
 
     let hasStockCapped = false;
+    const unmatchedNames: string[] = [];
 
     lines.forEach((line) => {
       // Check customer / contact fields
@@ -269,6 +276,10 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
       } else if (/address|deliver|location:/i.test(line)) {
         extractedAddress = line.replace(/address|deliver|location:/i, '').trim();
       } else {
+        // A digit-led line with no letters is a phone number or an address
+        // fragment, not an order line: "0803 123 4567" used to parse as
+        // quantity 803 of the product "123 4567" and inflate the pre-order.
+        if (!/[a-z]/i.test(line)) return;
         // Try to match line items like: 2x Product Name ($45.00) or 1 - Product Name
         const qtyMatch = line.match(/^(\d+)[\s*x\-]+(.+)$/i);
         if (qtyMatch) {
@@ -299,7 +310,11 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
           }
 
           const isWholesale = matchedProd ? qty >= matchedProd.minWholesaleQty : false;
-          const calculatedUnitPrice = price || (matchedProd ? (isWholesale ? matchedProd.wholesalePrice : matchedProd.retailPrice) : 10.0);
+          if (!matchedProd) unmatchedNames.push(prodNameCandidate || qtyMatch[2].trim());
+          // No catalog match and no explicit price must NOT invent a price. The
+          // old hardcoded 10.00 silently mis-stated the pre-order total; the
+          // item is left at 0 and flagged so staff set the price before saving.
+          const calculatedUnitPrice = price || (matchedProd ? (isWholesale ? matchedProd.wholesalePrice : matchedProd.retailPrice) : 0);
 
           parsedItems.push({
             productId: matchedProd?.id,
@@ -320,8 +335,9 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
       products.forEach((p) => {
         if (p.name && rawText && rawText.toLowerCase().includes(p.name.toLowerCase())) {
           const availStock = Math.max(0, p.currentStock);
+          // An out-of-stock product must not become a zero-quantity line item.
+          if (availStock < 1) { hasStockCapped = true; return; }
           const initialQty = Math.min(1, availStock);
-          if (availStock < 1) hasStockCapped = true;
 
           const isWholesale = initialQty >= p.minWholesaleQty;
           const unitPrice = isWholesale ? p.wholesalePrice : p.retailPrice;
@@ -336,6 +352,14 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
             useRetailPrice: false,
           });
         }
+      });
+    }
+
+    if (unmatchedNames.length) {
+      showToast({
+        title: 'Some items need a price',
+        message: 'Could not match ' + [...new Set(unmatchedNames)].join(', ') + ' to the catalog. Set the unit price before converting this pre-order.',
+        type: 'warning',
       });
     }
 

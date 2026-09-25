@@ -631,9 +631,12 @@ export async function checkD1Health(detail = false): Promise<D1HealthStatus> {
     if (isTimeout) {
       try {
         const retryStart = performance.now();
+        // Same 12s bound as the first attempt: without a signal this retry could
+        // hang on the browser default timeout and keep isCheckingHealth stuck.
         const retryRes = await fetch(healthUrl, {
           headers: { 'cache-control': 'no-cache' },
           credentials: 'include',
+          signal: AbortSignal.timeout(12000),
         });
         if (retryRes.ok) {
           const data = (await retryRes.json()) as any;

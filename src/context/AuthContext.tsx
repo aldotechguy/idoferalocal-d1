@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { UserProfile, UserRole } from '../types';
 import { useToast } from './ToastContext';
 import { getAllItems, putItem, putManyItems, replaceStoreItems, deleteItem } from '../db/indexedDB';
@@ -10,25 +10,21 @@ import { subscribeTabSync } from '../firebase/syncManager';
 
 export const isSuperUser = (user: UserProfile | null | undefined): boolean => {
   if (!user) return false;
-  const dn = (user.displayName || '').toLowerCase();
-  // Standard Admin ("Administrator") is explicitly NOT a Super-User
-  if (
-    user.id === 'usr-admin-1' ||
-    user.username === 'admin' ||
-    (user.displayName === 'Administrator' && !dn.includes('idofera') && !dn.includes('michael') && !dn.includes('aidy'))
-  ) {
+  // Standard Admin ("Administrator") is explicitly NOT a Super-User.
+  if (user.id === 'usr-admin-1' || user.username === 'admin') {
     return false;
   }
+  // Identity only. The old displayName substring test ('michael'/'aidy'/
+  // 'idofera') meant any account named accordingly was silently promoted to
+  // Super-User client-side, which unlocked the local switch-user and user
+  // management flows for people the server had never made a super admin.
   return Boolean(
     user.isSuperAdmin ||
     user.id === 'usr-superadmin-idofera' ||
     user.username === 'idofera' ||
     user.username === 'michaelidongesit5' ||
     user.email === 'michaelidongesit5@gmail.com' ||
-    user.email === 'idofera@idoferapackaging.com' ||
-    dn.includes('idofera') ||
-    dn.includes('michael') ||
-    dn.includes('aidy')
+    user.email === 'idofera@idoferapackaging.com'
   );
 };
 
@@ -70,7 +66,6 @@ export const SUPER_ADMIN_USER: UserProfile = {
   status: 'Active',
   createdAt: new Date('2026-01-01').toISOString(),
   lastLogin: new Date().toISOString(),
-  password: 'aidy2800',
   passwordLastChanged: new Date('2026-01-01').toISOString(),
   isProtected: true,
   isSuperAdmin: true,
@@ -86,7 +81,6 @@ export const STANDARD_ADMIN_USER: UserProfile = {
   status: 'Active',
   createdAt: new Date('2026-01-01').toISOString(),
   lastLogin: new Date().toISOString(),
-  password: 'admin123',
   passwordLastChanged: new Date('2026-01-01').toISOString(),
   isProtected: false,
   isSuperAdmin: false,
@@ -109,8 +103,7 @@ const DUMMY_USER_IDS = new Set(['usr-sales-1', 'usr-accountant-1']);
 const sanitizeUsersList = (rawUsers: UserProfile[]): UserProfile[] => {
   const cleaned = rawUsers.filter((u) => u && !DUMMY_USER_IDS.has(u.id));
   const sanitized = cleaned.map((u) => {
-    const dn = (u.displayName || '').toLowerCase();
-    if (u.id === 'usr-admin-1' || u.username === 'admin' || (u.displayName === 'Administrator' && !dn.includes('idofera') && !dn.includes('michael') && !dn.includes('aidy'))) {
+    if (u.id === 'usr-admin-1' || u.username === 'admin') {
       return {
         ...u,
         isSuperAdmin: false,
@@ -122,10 +115,7 @@ const sanitizeUsersList = (rawUsers: UserProfile[]): UserProfile[] => {
       u.username === 'idofera' ||
       u.username === 'michaelidongesit5' ||
       u.email === 'michaelidongesit5@gmail.com' ||
-      u.email === 'idofera@idoferapackaging.com' ||
-      dn.includes('idofera') ||
-      dn.includes('michael') ||
-      dn.includes('aidy')
+      u.email === 'idofera@idoferapackaging.com'
     ) {
       return {
         ...SUPER_ADMIN_USER,
@@ -279,14 +269,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, []);
 
+  const currentUserRef = useRef(currentUser);
+  useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
+
   useEffect(() => {
     const handleUserSync = (userList: UserProfile[]) => {
       if (userList && userList.length > 0) {
         const sanitized = sanitizeUsersList(userList);
         if (sanitized.length > 0) {
           setUsers(sanitized);
-          if (currentUser) {
-            const match = sanitized.find((u) => u.id === currentUser.id);
+          const liveUser = currentUserRef.current;
+          if (liveUser) {
+            const match = sanitized.find((u) => u.id === liveUser.id);
             if (match) {
               setCurrentUser(match);
             }
@@ -318,13 +312,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       window.removeEventListener('idofera_db_restored', handleDbRestored);
       unsubTab();
     };
-  }, [currentUser]);
+    // Empty deps on purpose: the handlers read currentUserRef, so a login or
+    // switch-user no longer tears down and re-adds the window listener and the
+    // BroadcastChannel subscription (which briefly dropped events).
+  }, []);
 
   // Sync users to localStorage and IndexedDB
   useEffect(() => {
     try {
-      localStorage.setItem('idofera_users', JSON.stringify(users));
-      replaceStoreItems('users', users).catch((e) => console.warn('IndexedDB users sync warning:', e));
+      // Passwords stay in memory for the one request that needs them; they are
+      // never written to localStorage/IndexedDB, where any script could read
+      // them. The server keeps the only credential copy (hashed).
+      const persistable = users.map(({ password, ...profile }) => profile);
+      localStorage.setItem('idofera_users', JSON.stringify(persistable));
+      replaceStoreItems('users', persistable).catch((e) => console.warn('IndexedDB users sync warning:', e));
     } catch (e) {
       console.error('Failed to save users:', e);
     }
@@ -438,22 +439,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         throw new Error('The Administrator role of this Super-User account cannot be altered.');
       }
     }
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === id) {
-          targetName = u.displayName;
-          const updated = { ...u, ...updates };
-          fetch('/api/auth/users', {method: 'PUT', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({user: updated, password: updates.password})})
-            .catch((error) => console.warn('Server user update warning:', error));
-          saveDocument('users', updated);
-          if (currentUser?.id === id) {
-            setCurrentUser(updated);
-          }
-          return updated;
-        }
-        return u;
-      })
-    );
+    // Side effects (the server PUT and the IndexedDB save) run OUTSIDE the
+    // updater: StrictMode double-invoked the updater, which sent two PUTs and
+    // two saves for every profile edit.
+    const target = users.find((u) => u.id === id);
+    if (!target) return;
+    targetName = target.displayName;
+    const updated = { ...target, ...updates };
+    fetch('/api/auth/users', {method: 'PUT', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({user: updated, password: updates.password})})
+      .catch((error) => console.warn('Server user update warning:', error));
+    saveDocument('users', updated);
+    setUsers((prev) => prev.map((u) => (u.id === id ? updated : u)));
+    if (currentUser?.id === id) {
+      setCurrentUser(updated);
+    }
     showToast({
       title: 'User Profile Updated',
       message: `Account details for "${targetName}" updated.`,
@@ -566,8 +565,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       setCurrentUser(data.user);
       if (isSuperUser(data.user)) {
-        const localUsers = sanitizeUsersList(users);
-        await Promise.all(localUsers.map((user) => fetch('/api/auth/users', {method: 'PUT', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({user, password: user.password})})));
+        // Provision only the profiles this device created and that therefore
+        // carry a password. The old form re-PUT EVERY cached profile on each
+        // super-admin login, which re-sent the bundled demo password for
+        // usr-superadmin-idofera and silently reset the real super-admin
+        // password back to that known value.
+        const pendingProvision = sanitizeUsersList(users).filter((user) => user.password);
+        await Promise.all(pendingProvision.map((user) => fetch('/api/auth/users', {method: 'PUT', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({user, password: user.password})})));
       }
       await refreshServerUsers();
       showToast({ title: 'Signed In', message: `Welcome back, ${data.user.displayName}!`, type: 'success' });
@@ -665,16 +669,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       headers['authorization'] = `Bearer ${token}`;
       headers['x-session-token'] = token;
     }
-    const response = await fetch('/api/auth/logout', {method: 'POST', credentials: 'include', headers});
-    if (!response.ok) throw new Error('Sign out failed. Please try again.');
+    // Best effort: if the server cannot confirm the sign-out, this device is
+    // still signed out locally (the old code threw and left the session token
+    // and the signed-in UI in place, with no way to retry cleanly).
+    let serverConfirmed = true;
+    try {
+      const response = await fetch('/api/auth/logout', {method: 'POST', credentials: 'include', headers});
+      serverConfirmed = response.ok;
+    } catch {
+      serverConfirmed = false;
+    }
     localStorage.removeItem('idofera_current_user_id');
     localStorage.removeItem('idofera_session_token');
     sessionStorage.removeItem('idofera_session_token');
     setCurrentUser(null);
     showToast({
       title: 'Signed Out',
-      message: 'You have been safely signed out of your local workspace.',
-      type: 'info',
+      message: serverConfirmed
+        ? 'You have been safely signed out of your local workspace.'
+        : 'Signed out on this device. The server could not confirm sign-out; it will be revoked when the session expires.',
+      type: serverConfirmed ? 'info' : 'warning',
     });
     window.location.replace('/');
   };
