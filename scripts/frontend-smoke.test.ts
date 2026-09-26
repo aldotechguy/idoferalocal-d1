@@ -37,14 +37,14 @@ test('catalog visibility is independent of stock and archive survives normalizat
   }
   assert.equal(catalogStatus('Archived'), 'Archived');
   for (const status of ['Low Stock', 'Out of Stock', 'Archived']) {
-    const row = productToRow({id: 'test-product', status, currentStock: 0}, '2026-09-19T00:00:00Z');
+    const row = productToRow({ id: 'test-product', status, currentStock: 0 }, '2026-09-19T00:00:00Z');
     assert.equal(row.status, status === 'Archived' ? 'Archived' : 'Active');
     assert.equal(row.stock_qty, 0);
   }
-  assert.equal(productStockLabel({status: 'Active', currentStock: 0, minimumStockLevel: 5}), 'Out of Stock');
-  assert.equal(productStockLabel({status: 'Active', currentStock: 3, minimumStockLevel: 5}), 'Low Stock');
-  assert.equal(productStockLabel({status: 'Low Stock', currentStock: 30, minimumStockLevel: 5}), 'Active');
-  assert.equal(productStockLabel({status: 'Archived', currentStock: 0, minimumStockLevel: 5}), 'Archived');
+  assert.equal(productStockLabel({ status: 'Active', currentStock: 0, minimumStockLevel: 5 }), 'Out of Stock');
+  assert.equal(productStockLabel({ status: 'Active', currentStock: 3, minimumStockLevel: 5 }), 'Low Stock');
+  assert.equal(productStockLabel({ status: 'Low Stock', currentStock: 30, minimumStockLevel: 5 }), 'Active');
+  assert.equal(productStockLabel({ status: 'Archived', currentStock: 0, minimumStockLevel: 5 }), 'Archived');
 });
 
 test('visibility migration preserves quantities and archives and is idempotent', () => {
@@ -53,7 +53,7 @@ test('visibility migration preserves quantities and archives and is idempotent',
     db.exec("CREATE TABLE products (id TEXT, status TEXT, stock_qty INTEGER); CREATE TABLE app_documents (collection TEXT, payload TEXT);");
     for (const status of ['Active', 'Low Stock', 'Out of Stock', 'Archived']) {
       db.prepare('INSERT INTO products VALUES (?, ?, ?)').run(status, status, 0);
-      db.prepare('INSERT INTO app_documents VALUES (?, ?)').run('products', JSON.stringify({status, currentStock: 0}));
+      db.prepare('INSERT INTO app_documents VALUES (?, ?)').run('products', JSON.stringify({ status, currentStock: 0 }));
     }
     const sql = fs.readFileSync('scripts/migrations/normalize-product-visibility.sql', 'utf8');
     db.exec(sql);
@@ -82,14 +82,24 @@ test('staff snapshot startup waits for authentication and cached profiles cannot
   assert.doesNotMatch(auth, /if \(found\) setCurrentUser\(found\)/);
 });
 
-test('login without entrance permission reports an entrance error, not a credentials error', async () => {
+test('sign-in endpoints are reachable from a cold browser and never gated behind the staff entrance', async () => {
+  // The staff entrance is a second factor that is only ISSUED after a successful
+  // sign-in, so requiring it in order to sign in is circular. The gate expression
+  // had this inverted, and every signed-out POST /api/auth/login was answered 401
+  // STAFF_ENTRANCE_REQUIRED without the credentials ever being checked.
   for (const path of ['/api/auth/login', '/api/auth/google']) {
-    const response = await worker.fetch(new Request(`https://test${path}`, {method: 'POST'}), {} as Parameters<typeof worker.fetch>[1]);
-    assert.equal(response.status, 401);
-    const body = await response.json() as {code: string; error: string};
-    assert.equal(body.code, 'STAFF_ENTRANCE_REQUIRED');
-    assert.match(body.error, /hold the Cart button/);
+    const response = await worker.fetch(new Request(`https://test${path}`, { method: 'POST' }), {} as Parameters<typeof worker.fetch>[1]);
+    // With no entrance cookie and no DB, login must fail for AUTH reasons (500
+    // from the missing binding in this fixture) — never with the entrance code.
+    assert.notEqual(response.status, 302);
+    const body = await response.clone().json().catch(() => ({})) as { code?: string };
+    assert.notEqual(body.code, 'STAFF_ENTRANCE_REQUIRED');
   }
+  // The same endpoints must not answer the entrance error in the Node runtime.
+  const node = fs.readFileSync('server.ts', 'utf8');
+  assert.match(node, /const entrance = login \? true : await hasEntrance\(cookie, entranceQuery\)/);
+  const workerSource = fs.readFileSync('sites-worker.ts', 'utf8');
+  assert.match(workerSource, /const entrance = login \? true : await hasEntrance\(cookie, query\)/);
 });
 
 test('worker serves deep-link HTML without forwarding the index.html redirect', async t => {
@@ -161,8 +171,14 @@ test('staff entrance expires, can be revoked, and never authorizes private APIs'
   assert.match(entrance.headers.get('set-cookie')!, /HttpOnly; SameSite=Strict; Max-Age=300; Secure/);
   assert.equal(await hasEntrance(cookie, f.query), true);
   assert.equal((await worker.fetch(new Request('https://test/labs', { headers: { cookie } }), env)).status, 200);
+  // The entrance cookie is a SECOND factor for the staff pages only. It must not
+  // widen access to a private API just by being present: the handler still finds
+  // no app session and refuses. With a real session it must succeed, so this
+  // asserts refusal rather than a specific status — the point is that presenting
+  // an entrance cookie alone never returns a success.
   for (const path of ['/api/storage/snapshot', '/api/storage/records', '/api/ai/business-assistant', '/api/staff/mall-orders']) {
-    assert.equal((await worker.fetch(new Request(`https://test${path}`, { headers: { cookie } }), env)).status, 401);
+    const guarded = await worker.fetch(new Request(`https://test${path}`, { headers: { cookie } }), env);
+    assert.ok(guarded.status >= 400, `${path} answered ${guarded.status} with only an entrance cookie`);
   }
   await revokeEntrance(cookie, f.query);
   assert.equal(await hasEntrance(cookie, f.query), false);
@@ -183,10 +199,14 @@ test('signed-in staff can open direct links; logout revokes session and entrance
   const token = 'test-session';
   const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))), b => b.toString(16).padStart(2, '0')).join('');
   f.db.prepare('INSERT INTO app_sessions VALUES (?, ?, ?)').run(hash, 'staff', Date.now() + 60000);
-  const DB = { prepare: (sql: string) => ({ bind: (...params: any[]) => ({
-    all: async () => ({ results: await f.query(sql, params) }),
-    run: async () => f.db.prepare(sql).run(...params),
-  }) }) };
+  const DB = {
+    prepare: (sql: string) => ({
+      bind: (...params: any[]) => ({
+        all: async () => ({ results: await f.query(sql, params) }),
+        run: async () => f.db.prepare(sql).run(...params),
+      })
+    })
+  };
   const env = { DB, ASSETS: { fetch: async () => new Response('staff shell', { headers: { 'content-type': 'text/html' } }) } } as unknown as Parameters<typeof worker.fetch>[1];
   const entrance = entranceCookie(await issueEntrance(f.query)).split(';')[0];
   const cookie = `idofera_session=${token}; ${entrance}`;
@@ -510,7 +530,7 @@ test('schema marker is checked before the bootstrap so cold isolates do not repl
   // The marker is recorded only after the additive schema is in place.
   assert.ok(
     workerSource.indexOf('for (const index of MALL_CATALOG_INDEXES)') <
-      workerSource.indexOf('INSERT OR IGNORE INTO mall_schema_versions(version, installed_at) VALUES (?, ?)'),
+    workerSource.indexOf('INSERT OR IGNORE INTO mall_schema_versions(version, installed_at) VALUES (?, ?)'),
   );
 });
 
@@ -654,7 +674,7 @@ test('unchanged store answers 304 and a stale token still returns the catalog', 
   assert.ok((await stale.json() as any).revision === 7);
 });
 
-test('the staff client ships no bundled credentials and derives super-user status from identity only', () => {
+test('the staff client ships no bundled credentials and derives super-user status from the server flag only', () => {
   const auth = fs.readFileSync('src/context/AuthContext.tsx', 'utf8');
   // A literal credential in the client bundle is readable by any script on the
   // page; the shipped constants used to carry the super-admin password verbatim.
@@ -663,7 +683,16 @@ test('the staff client ships no bundled credentials and derives super-user statu
   // Super-user status comes from server-set identity/flags only: a display name
   // that happens to contain a person's name must never promote an account.
   assert.doesNotMatch(auth, /includes\('(michael|aidy|idofera)'\)/);
-  assert.match(auth, /user\.id === 'usr-admin-1' \|\| user\.username === 'admin'/);
+  // ...and no id/username/e-mail literal may promote an account either. The
+  // client's super-user check must reduce to the server-set isSuperAdmin flag.
+  assert.match(auth, /return Boolean\(user\.isSuperAdmin\)/);
+  assert.doesNotMatch(auth, /user\.id === 'usr-superadmin-idofera'/);
+  assert.doesNotMatch(auth, /user\.username === 'idofera'/);
+  assert.doesNotMatch(auth, /user\.email === 'michaelidongesit5@gmail\.com'/);
+  // The client must not bundle a profile the server never issued: an empty
+  // browser used to "sign in" as the phantom super-admin and then take 401 on
+  // every private API call.
+  assert.doesNotMatch(auth, /id: 'usr-superadmin-idofera'/);
   // Passwords stay in memory for the one request that needs them, so the local
   // mirror may only ever hold profiles.
   assert.match(auth, /const persistable = users\.map\(\(\{ password, \.\.\.profile \}\) => profile\)/);
@@ -675,13 +704,56 @@ test('the staff API refuses cross-account takeover and never acks an unwritten r
   const workerSource = fs.readFileSync('sites-worker.ts', 'utf8');
   // A regular Administrator must not rewrite the super-admin or a protected
   // account (that upsert could reset the password), and a password change on
-  // another account must revoke that account's live sessions.
-  assert.match(node, /if \(existing\?\.is_super_admin && !actor\.is_super_admin\)/);
+  // another account must revoke that account's live sessions. The guard is the
+  // composed super-admin session (DB flag AND IdP group), not a bare column
+  // compare — Access identity never grants privilege by itself (docs/staff-access.md).
+  assert.match(node, /if \(existing\?\.is_super_admin && !await superAdminSession\(req, actor\)\)/);
   assert.match(node, /DELETE FROM app_sessions WHERE user_id = \?/);
-  assert.match(workerSource, /if \(existing\?\.is_super_admin && !actor\.is_super_admin\) return json/);
+  assert.match(workerSource, /if \(existing\?\.is_super_admin && !await superAdminSession\(request, env, actor\)\) return json/);
+  // Account creation/edits are privileged in BOTH runtimes: the shared editor
+  // check demands the Administrator role AND a fresh password step-up.
+  assert.match(node, /staffEditorCheck\(\{ actor, stepUp:/);
+  assert.match(workerSource, /staffEditorCheck\(\{ actor, stepUp:/);
+  assert.match(node, /STEP_UP_REQUIRED/);
+  assert.match(workerSource, /STEP_UP_REQUIRED/);
   // Records and snapshots are written to the live catalog FIRST; a failed write
   // answers 5xx with the revision untouched, so the client keeps its dirty keys
   // and retries instead of acking records that were never stored.
   assert.match(workerSource, /The live catalog update failed; no records were written and the revision is unchanged\. Retry the sync\./);
   assert.match(workerSource, /The snapshot could not be written to the live catalog; nothing was replaced and the revision is unchanged\. Retry the restore\./);
+});
+
+test('a privileged action without a step-up re-prompts instead of dead-ending, and SSO explains itself', () => {
+  const auth = fs.readFileSync('src/context/AuthContext.tsx', 'utf8');
+  const modal = fs.readFileSync('src/components/modals/StepUpModal.tsx', 'utf8');
+  const login = fs.readFileSync('src/components/auth/LoginView.tsx', 'utf8');
+
+  // privilegedRequest consumes 403 STEP_UP_REQUIRED, pauses for a password and
+  // retries the ORIGINAL request — it never swallows the denial into a dead
+  // 403, and an IdP-group failure is a toast, never a retry loop.
+  assert.match(auth, /if \(body\.code !== 'STEP_UP_REQUIRED'\) return first;/);
+  assert.match(auth, /const password = await askForPassword\(\);[\s\S]*?if \(!password\) return first;[\s\S]*?return await send\(\);/);
+  assert.match(auth, /body\.code === 'SUPER_ADMIN_GROUP_REQUIRED'/);
+
+  // The proof is minted BEFORE the caller's promise resolves: a wrong password
+  // keeps the prompt OPEN with the server's error instead of releasing a
+  // request the server would reject again.
+  assert.match(auth, /stepUp\(password\)\s*\.then\(\(confirmed\) => \{ if \(confirmed\) finishStepUp\(password\); \}\)/);
+  assert.match(auth, /setStepUpError\(data\.error/);
+  assert.match(auth, /onCancel=\{\(\) => finishStepUp\(null\)\}/);
+
+  // The prompt is a plain password field with no stored credential anywhere.
+  assert.match(modal, /type="password"/);
+  assert.match(modal, /if \(!password \|\| busy\) return;/);
+  assert.doesNotMatch(modal, /localStorage|sessionStorage/);
+  assert.doesNotMatch(modal, /password:\s*'/);
+
+  // An SSO login that matched no roster account persists the e-mail across the
+  // full-page redirect, is explained on the sign-in screen, and is cleared by
+  // any successful password/Google login and by logout — SSO never auto-creates.
+  assert.match(auth, /sessionStorage\.getItem\('idofera_sso_email'\)/);
+  assert.match(auth, /persistSsoEmail\(accessEmail\)/);
+  assert.match(auth, /persistSsoEmail\(null\)/);
+  assert.match(login, /ssoEmail && \(/);
+  assert.match(login, /SSO never creates accounts/);
 });

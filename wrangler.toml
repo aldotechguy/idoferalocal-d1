@@ -61,6 +61,17 @@ D1_DATABASE_ID = "3a3eb157-5aa5-419a-a8ce-2eade2afc436"
 # Default OFF: review what would change via posPromoPriceKobo in Mall Listings
 # (staff dashboard), then set to "true" and redeploy to enable catalog-wide.
 MALL_HONOR_POS_PROMOS = "false"
+# Cloudflare Access staff gate (docs/staff-access.md). Additive and OFF by
+# default: the storefront and the password login keep working unchanged until
+# these are filled in. The JWT is only verified once BOTH the team domain and
+# the application AUD are set; CF_ACCESS_SSO additionally mints the session
+# from that verified identity. Empty CF_ACCESS_SUPER_ADMIN_GROUP = the group
+# leg is disabled (fail-open on that one requirement, by design).
+CF_ACCESS_SSO = "false"
+CF_ACCESS_TEAM_DOMAIN = ""
+CF_ACCESS_AUD = ""
+CF_ACCESS_SUPER_ADMIN_GROUP = ""
+CF_ACCESS_STEP_UP_SECONDS = "600"
 # Non-sensitive Mall config. Update MALL_PICKUP_ADDRESS and MALL_PICKUP_HOURS
 # to your real pickup location and hours before accepting orders.
 MALL_CHECKOUT_ENABLED = "true"
@@ -113,6 +124,14 @@ bucket_name = "idomall-preview"
 D1_DATABASE_ID = "647becf9-e665-4a85-9fa5-dbb5dedbcefa"
 MALL_HONOR_POS_PROMOS = "false"
 MALL_CHECKOUT_ENABLED = "true"
+# Cloudflare Access staff gate (docs/staff-access.md). The preview is covered by
+# the same Access applications as the live Worker, so a preview deployment is
+# never an unguarded copy of the staff workspace. Empty = gate disabled here too.
+CF_ACCESS_SSO = "false"
+CF_ACCESS_TEAM_DOMAIN = ""
+CF_ACCESS_AUD = ""
+CF_ACCESS_SUPER_ADMIN_GROUP = ""
+CF_ACCESS_STEP_UP_SECONDS = "600"
 MALL_PICKUP_ADDRESS = "Preview pickup (disposable)"
 MALL_PICKUP_HOURS = "9AM - 5PM"
 MALL_BANK_NAME = "PREVIEW BANK"

@@ -19,6 +19,16 @@ interface Env extends MallConfig {
   RESEND_API_KEY?: string;
   MALL_NOTIFY_EMAIL?: string;
   MALL_EMAIL_FROM?: string;
+  /** Cloudflare Access staff gate. 'true' enables the SSO session bootstrap. */
+  CF_ACCESS_SSO?: string;
+  /** https://<team-name>.cloudflareaccess.com — the JWKS URL and `iss` check. */
+  CF_ACCESS_TEAM_DOMAIN?: string;
+  /** The Access application's Audience (AUD) tag. */
+  CF_ACCESS_AUD?: string;
+  /** Optional IdP group that must also be present for a super-admin session. */
+  CF_ACCESS_SUPER_ADMIN_GROUP?: string;
+  /** Optional step-up lifetime in seconds (default 600). */
+  CF_ACCESS_STEP_UP_SECONDS?: string;
   /** Bound D1 database ID, set per environment in wrangler.toml (display-only). */
   D1_DATABASE_ID?: string;
 }
@@ -57,6 +67,9 @@ import { bootstrapAdmin } from './src/server/adminBootstrap.js';
 import { handleMallWebhook } from './src/server/mallWebhook.js';
 import type { QueryAll } from './src/server/relationalMapper.js';
 import { isStaffPage, isPrivateApi, issueEntrance, hasEntrance, revokeEntrance, entranceCookie } from './src/server/staffEntrance.js';
+import { readAccessIdentity, type AccessIdentity } from './src/server/accessJwt.js';
+import { staffSuperAdminSession, staffPrivilegeCheck, staffEditorCheck } from './src/server/staffPrivileges.js';
+import { STEP_UP_SECONDS, issueStepUp, hasStepUp, revokeStepUp, revokeStepUpForUser, stepUpCookie } from './src/server/stepUp.js';
 
 /** Rows out of D1 -> the QueryAll shape the shared mapper expects. */
 function makeD1QueryAll(env: Env): QueryAll {
@@ -374,6 +387,75 @@ async function createSession(userId: string, env: Env) {
   return { token, maxAge: Math.floor((expiresAt - now) / 1000) };
 }
 
+/* ------------------------------------------------------------------ *
+ * Cloudflare Access staff gate (docs/staff-access.md)
+ *
+ * Access authenticates a person and injects a signed JWT on every request to
+ * a covered path. It grants no privileges: the roster below decides who the
+ * email is, `app_users.is_super_admin` decides what they may do, and a fresh
+ * step-up is required before any privileged change.
+ * ------------------------------------------------------------------ */
+
+function stepUpLifetimeSeconds(env: Env) {
+  const parsed = Number(env.CF_ACCESS_STEP_UP_SECONDS);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : STEP_UP_SECONDS;
+}
+
+/** Verifies the Access JWT when the gate is configured. Raw headers are never trusted. */
+async function accessIdentityFor(request: Request, env: Env): Promise<AccessIdentity | null> {
+  if (!env.CF_ACCESS_TEAM_DOMAIN || !env.CF_ACCESS_AUD) return null;
+  return await readAccessIdentity(request, { teamDomain: env.CF_ACCESS_TEAM_DOMAIN, audience: env.CF_ACCESS_AUD });
+}
+
+const stepUpRequired = () => json({ error: 'Confirm your password to continue.', code: 'STEP_UP_REQUIRED' }, 403);
+
+async function stepUpVerified(request: Request, env: Env, userId: string) {
+  return await hasStepUp(request.headers.get('cookie') || '', userId, makeD1QueryAll(env));
+}
+
+/**
+ * A super-admin session is the DB column AND, when `CF_ACCESS_SUPER_ADMIN_GROUP`
+ * is configured, the IdP group. Both are re-evaluated on every request, so
+ * removing somebody from the IdP group downgrades their next call without any
+ * database write.
+ */
+async function superAdminSession(request: Request, env: Env, actor: Pick<AppUserRow, 'id' | 'is_super_admin'>) {
+  return staffSuperAdminSession(actor, await accessIdentityFor(request, env), env.CF_ACCESS_SUPER_ADMIN_GROUP);
+}
+
+const privilegeResponse = (decision: { status: 401 | 403; error: string; code?: string }) =>
+  json({ error: decision.error, ...(decision.code ? { code: decision.code } : {}) }, decision.status);
+
+/** Super-admin action: DB flag + IdP group + a fresh password step-up. */
+async function requireSuperAdmin(request: Request, env: Env): Promise<{ actor: AppUserRow } | { error: Response }> {
+  const actor = await requireAppUser(request, env);
+  const decision = staffPrivilegeCheck({
+    actor,
+    identity: await accessIdentityFor(request, env),
+    requiredGroup: env.CF_ACCESS_SUPER_ADMIN_GROUP,
+    stepUp: actor ? await stepUpVerified(request, env, actor.id) : false,
+  });
+  // `.ok === false` (not `!decision.ok`): without strictNullChecks a truthiness
+  // check doesn't narrow this union, a literal comparison does.
+  if (decision.ok === false) return { error: privilegeResponse(decision) };
+  return { actor: actor as AppUserRow };
+}
+
+/**
+ * Mints a session and writes the cookies. Shared by the password login, the
+ * Google login and the Access SSO bootstrap so all three answer the same shape.
+ */
+async function establishSession(user: AppUserRow, request: Request, env: Env, payload: Record<string, unknown>) {
+  const session = await createSession(user.id, env);
+  await ensureBusinessDataOwner(env);
+  const response = json({ ...payload, canSuperAdmin: await superAdminSession(request, env, user) });
+  response.headers.set('cache-control', 'no-store');
+  response.headers.set('set-cookie', sessionCookie(session.token, session.maxAge));
+  await revokeEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
+  response.headers.append('set-cookie', entranceCookie());
+  return response;
+}
+
 async function authLogin(request: Request, env: Env) {
   await ensureAuthSeed(env);
   const body = await readJson(request);
@@ -392,13 +474,7 @@ async function authLogin(request: Request, env: Env) {
   if (!safeEqual(candidate, user.password_hash)) return json({ error: 'Invalid credentials or inactive account.' }, 401);
   const lastLogin = new Date().toISOString();
   await env.DB.prepare('UPDATE app_users SET last_login = ? WHERE id = ?').bind(lastLogin, user.id).run();
-  const session = await createSession(user.id, env);
-  await ensureBusinessDataOwner(env);
-  const response = json({ user: publicUser({ ...user, last_login: lastLogin }) });
-  response.headers.set('set-cookie', sessionCookie(session.token, session.maxAge));
-  await revokeEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
-  response.headers.append('set-cookie', entranceCookie());
-  return response;
+  return await establishSession({ ...user, last_login: lastLogin }, request, env, { user: publicUser({ ...user, last_login: lastLogin }) });
 }
 
 async function authGoogle(request: Request, env: Env) {
@@ -415,26 +491,75 @@ async function authGoogle(request: Request, env: Env) {
   if (!user || user.status !== 'Active') return json({ error: 'This Google account is not registered or is inactive.' }, 403);
   const lastLogin = new Date().toISOString();
   await env.DB.prepare('UPDATE app_users SET last_login = ? WHERE id = ?').bind(lastLogin, user.id).run();
-  const session = await createSession(user.id, env);
-  await ensureBusinessDataOwner(env);
-  const response = json({ user: publicUser({ ...user, last_login: lastLogin }) });
-  response.headers.set('set-cookie', sessionCookie(session.token, session.maxAge));
-  await revokeEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
-  response.headers.append('set-cookie', entranceCookie());
-  return response;
+  return await establishSession({ ...user, last_login: lastLogin }, request, env, { user: publicUser({ ...user, last_login: lastLogin }) });
 }
 
 async function authSession(request: Request, env: Env) {
   await ensureAuthSeed(env);
+  const cookie = request.headers.get('cookie') || '';
   const user = await requireAppUser(request, env);
-  const entranceAllowed = !user && await hasEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
-  const response = json({ user: user ? publicUser(user) : null, authenticated: Boolean(user), entranceAllowed });
+  if (user) {
+    const response = json({
+      user: publicUser(user),
+      authenticated: true,
+      entranceAllowed: false,
+      canSuperAdmin: await superAdminSession(request, env, user),
+    });
+    response.headers.set('cache-control', 'no-store');
+    return response;
+  }
+  // Cloudflare Access SSO bootstrap. This is the ONLY place a session is minted
+  // without a password, so it must never create or upgrade an account: Access
+  // proves the email, the roster decides whether that email has an active
+  // account, and the database flag still decides what that account may do.
+  const identity = env.CF_ACCESS_SSO === 'true' ? await accessIdentityFor(request, env) : null;
+  if (identity) {
+    const rows = await env.DB.prepare('SELECT * FROM app_users WHERE lower(email) = ? LIMIT 1').bind(identity.email).all<AppUserRow>();
+    const matched = rows.results?.[0];
+    if (matched && matched.status === 'Active') {
+      const lastLogin = new Date().toISOString();
+      await env.DB.prepare('UPDATE app_users SET last_login = ? WHERE id = ?').bind(lastLogin, matched.id).run();
+      return await establishSession({ ...matched, last_login: lastLogin }, request, env, {
+        user: publicUser({ ...matched, last_login: lastLogin }),
+        authenticated: true,
+        entranceAllowed: false,
+        accessEmail: identity.email,
+      });
+    }
+    const unregistered = json({ user: null, authenticated: false, entranceAllowed: false, accessEmail: identity.email, registered: false });
+    unregistered.headers.set('cache-control', 'no-store');
+    return unregistered;
+  }
+  const entranceAllowed = await hasEntrance(cookie, makeD1QueryAll(env));
+  const response = json({ user: null, authenticated: false, entranceAllowed });
   response.headers.set('cache-control', 'no-store');
+  return response;
+}
+
+/**
+ * Step-up: re-prove possession of the caller's own password before a privileged
+ * change. The token is bound to the account that confirmed it and expires, so a
+ * stolen cookie cannot be replayed by a different staff member.
+ */
+async function authStepUp(request: Request, env: Env) {
+  const actor = await requireAppUser(request, env);
+  if (!actor) return json({ error: 'Authentication required.' }, 401);
+  const body = await readJson(request);
+  const password = String(body?.password || '');
+  if (!password) return json({ error: 'Enter your current password to continue.' }, 400);
+  const candidate = await hashPassword(password, actor.password_salt, actor.password_iterations);
+  if (!safeEqual(candidate, actor.password_hash)) return json({ error: 'That password is not correct.' }, 401);
+  const seconds = stepUpLifetimeSeconds(env);
+  const token = await issueStepUp(makeD1QueryAll(env), actor.id, seconds);
+  const response = json({ ok: true, expiresInSeconds: seconds, canSuperAdmin: await superAdminSession(request, env, actor) });
+  response.headers.set('cache-control', 'no-store');
+  response.headers.set('set-cookie', stepUpCookie(token, true, seconds));
   return response;
 }
 
 async function authLogout(request: Request, env: Env) {
   await revokeEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
+  await revokeStepUp(request.headers.get('cookie') || '', makeD1QueryAll(env));
   const token = readCookie(request, SESSION_COOKIE);
   if (token) await env.DB.prepare('DELETE FROM app_sessions WHERE token_hash = ?').bind(await sha256(token)).run();
   const response = json({ ok: true });
@@ -452,7 +577,10 @@ async function authUsers(request: Request, env: Env) {
 
 async function upsertAuthUser(request: Request, env: Env) {
   const actor = await requireAppUser(request, env);
-  if (!actor || actor.role !== 'Administrator') return json({ error: 'Administrator access required.' }, 403);
+  // Creating an account, changing a role or setting a password is privileged:
+  // the Administrator role and a fresh step-up are both required (docs/staff-access.md).
+  const editorCheck = staffEditorCheck({ actor, stepUp: actor ? await stepUpVerified(request, env, actor.id) : false });
+  if (editorCheck.ok === false) return privilegeResponse(editorCheck);
   const body = await readJson(request);
   const input = body?.user || {};
   const id = String(input.id || '');
@@ -463,8 +591,8 @@ async function upsertAuthUser(request: Request, env: Env) {
   // to rewrite the super administrator's profile — the upsert would otherwise
   // let them reset the super-admin password (and with it take over the account)
   // or point the protected identity at their own email.
-  if (existing?.is_super_admin && !actor.is_super_admin) return json({ error: 'Only the super administrator can modify this account.' }, 403);
-  if (existing?.is_protected && !actor.is_super_admin) return json({ error: 'Only the super administrator can modify this protected account.' }, 403);
+  if (existing?.is_super_admin && !await superAdminSession(request, env, actor)) return json({ error: 'Only the super administrator can modify this account.' }, 403);
+  if (existing?.is_protected && !await superAdminSession(request, env, actor)) return json({ error: 'Only the super administrator can modify this protected account.' }, 403);
   const password = String(body?.password || input.password || '');
   if (!existing && password.length < 8) return json({ error: 'A password of at least 8 characters is required.' }, 400);
   let salt = existing?.password_salt || randomHex(16);
@@ -482,15 +610,24 @@ async function upsertAuthUser(request: Request, env: Env) {
   // the reset and the takeover is never fully revoked.
   if (password && existing && id !== actor.id) {
     await env.DB.prepare('DELETE FROM app_sessions WHERE user_id = ?').bind(id).run();
+    await revokeStepUpForUser(makeD1QueryAll(env), id);
   }
   return json({ ok: true });
 }
 
 async function deleteAuthUser(request: Request, env: Env, id: string) {
-  const actor = await requireAppUser(request, env);
-  if (!actor || !actor.is_super_admin) return json({ error: 'Super administrator access required.' }, 403);
-  if (id === actor.id || id === 'usr-superadmin-idofera') return json({ error: 'Protected account cannot be deleted.' }, 400);
+  // Deleting an account is the most destructive staff action: DB flag, IdP
+  // group (when configured) and a fresh password step-up are all required.
+  const privileged = await requireSuperAdmin(request, env);
+  if ('error' in privileged) return privileged.error;
+  const { actor } = privileged;
+  // Self-deletion is always blocked; otherwise honour the stored is_protected
+  // flag. The previous hardcoded legacy id protected nothing the flag does not
+  // already cover, and only made an old default-seeded account un-deletable.
+  const target = await d1Get(env, 'SELECT is_protected FROM app_users WHERE id = ?', [id]);
+  if (id === actor.id || Number(target?.is_protected) === 1) return json({ error: 'Protected account cannot be deleted.' }, 400);
   await env.DB.prepare('DELETE FROM app_users WHERE id = ?').bind(id).run();
+  await revokeStepUpForUser(makeD1QueryAll(env), id);
   return json({ ok: true });
 }
 
@@ -510,13 +647,18 @@ async function changeAuthPassword(request: Request, env: Env) {
     if (!oldPassword || !safeEqual(candidate, actor.password_hash)) return json({ error: 'Current password is incorrect.' }, 401);
   } else {
     if (actor.role !== 'Administrator') return json({ error: 'Administrator access required.' }, 403);
-    if (target.is_super_admin && !actor.is_super_admin) return json({ error: 'Only the super administrator can reset this password.' }, 403);
+    // Resetting somebody else's password is privileged: the caller must confirm
+    // their own password, and a super-admin target also needs the IdP group.
+    if (!await stepUpVerified(request, env, actor.id)) return stepUpRequired();
+    if (target.is_super_admin && !await superAdminSession(request, env, actor)) return json({ error: 'Only the super administrator can reset this password.' }, 403);
   }
   const salt = randomHex(16);
   const changedAt = new Date().toISOString();
   await env.DB.prepare('UPDATE app_users SET password_hash = ?, password_salt = ?, password_iterations = ?, password_last_changed = ? WHERE id = ?')
     .bind(await hashPassword(newPassword, salt), salt, PASSWORD_ITERATIONS, changedAt, targetId).run();
   if (targetId !== actor.id) await env.DB.prepare('DELETE FROM app_sessions WHERE user_id = ?').bind(targetId).run();
+  // A password change invalidates every step-up proof that account was given.
+  await revokeStepUpForUser(makeD1QueryAll(env), targetId);
   return json({ ok: true, passwordLastChanged: changedAt });
 }
 
@@ -929,7 +1071,13 @@ export default {
       }
       const login = ['/api/auth/login', '/api/auth/google'].includes(url.pathname);
       if (isStaffPage(url.pathname) || isPrivateApi(url.pathname) || login) {
-        const entrance = !isPrivateApi(url.pathname) && await hasEntrance(cookie, query);
+        // The staff entrance gates the staff pages and the private APIs, NOT the
+        // sign-in endpoints: the entrance cookie is only issued after a
+        // successful sign-in, so requiring it in order to sign in is circular.
+        // This term was inverted (it applied the entrance to private APIs and
+        // skipped it for login), so a signed-out POST /api/auth/login was
+        // rejected 401 STAFF_ENTRANCE_REQUIRED before any credential check.
+        const entrance = login ? true : await hasEntrance(cookie, query);
         if (!entrance && !await requireAppUser(request, env)) {
           if (isStaffPage(url.pathname)) return new Response(null, { status: 302, headers: { location: '/', 'cache-control': 'no-store' } });
           if (login) return json({ error: 'Staff entrance expired. Return to the Mall and hold the Cart button for 3 seconds to reopen Staff Login.', code: 'STAFF_ENTRANCE_REQUIRED' }, 401);
@@ -984,6 +1132,7 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/auth/login') return await authLogin(request, env);
       if (request.method === 'POST' && url.pathname === '/api/auth/google') return await authGoogle(request, env);
       if (request.method === 'GET' && url.pathname === '/api/auth/session') return await authSession(request, env);
+      if (request.method === 'POST' && url.pathname === '/api/auth/step-up') return await authStepUp(request, env);
       if (request.method === 'POST' && url.pathname === '/api/auth/logout') return await authLogout(request, env);
       if (request.method === 'GET' && url.pathname === '/api/auth/users') return await authUsers(request, env);
       if (request.method === 'PUT' && url.pathname === '/api/auth/users') return await upsertAuthUser(request, env);

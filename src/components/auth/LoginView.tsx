@@ -15,7 +15,7 @@ import { useTheme } from '../../context/ThemeContext';
 import { useApp } from '../../context/AppContext';
 
 export const LoginView: React.FC = () => {
-  const { loginWithEmail, loginWithGoogle } = useAuth();
+  const { loginWithEmail, loginWithGoogle, ssoEmail } = useAuth();
   const { mode, toggleTheme } = useTheme();
   const { settings } = useApp();
 
@@ -99,6 +99,18 @@ export const LoginView: React.FC = () => {
             Authorized Personnel Portal — {settings.storeName}
           </p>
         </div>
+
+        {/* Cloudflare Access identified the person, but no roster account matched */}
+        {ssoEmail && (
+          <div className="p-4 bg-amber-950/70 border border-amber-700/70 rounded-2xl text-amber-200 text-xs flex items-start gap-2.5">
+            <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <span>
+              Your organization confirmed <strong className="font-bold">{ssoEmail}</strong>, but no active Idofera
+              account matches that address. SSO never creates accounts — ask an Administrator to add you, then
+              return here.
+            </span>
+          </div>
+        )}
 
         {/* Main Card */}
         <div className="bg-slate-900/90 border border-slate-800 backdrop-blur-xl rounded-3xl p-6 sm:p-8 shadow-2xl space-y-6">

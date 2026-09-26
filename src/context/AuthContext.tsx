@@ -7,25 +7,19 @@ import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
 import { auth, googleProvider } from '../firebase/config';
 import { setGoogleDriveAccessToken } from '../services/googleDriveService';
 import { subscribeTabSync } from '../firebase/syncManager';
+import { StepUpModal } from '../components/modals/StepUpModal';
 
 export const isSuperUser = (user: UserProfile | null | undefined): boolean => {
   if (!user) return false;
-  // Standard Admin ("Administrator") is explicitly NOT a Super-User.
-  if (user.id === 'usr-admin-1' || user.username === 'admin') {
-    return false;
-  }
-  // Identity only. The old displayName substring test ('michael'/'aidy'/
-  // 'idofera') meant any account named accordingly was silently promoted to
-  // Super-User client-side, which unlocked the local switch-user and user
-  // management flows for people the server had never made a super admin.
-  return Boolean(
-    user.isSuperAdmin ||
-    user.id === 'usr-superadmin-idofera' ||
-    user.username === 'idofera' ||
-    user.username === 'michaelidongesit5' ||
-    user.email === 'michaelidongesit5@gmail.com' ||
-    user.email === 'idofera@idoferapackaging.com'
-  );
+  // Server-set flag ONLY. The previous version also matched a hardcoded id,
+  // username and two e-mail literals. Those matched the LOCAL phantom profile
+  // this module used to inject into its own user list (see INITIAL_USERS), so an
+  // unauthenticated browser rendered a full Super-Admin workspace while every
+  // private API call still failed with 401. /api/auth/users on the server was
+  // already corrected to derive this from is_super_admin with no id/username/
+  // e-mail backdoor; this restores the client to the same rule, per
+  // docs/mall-launch-safety.md.
+  return Boolean(user.isSuperAdmin);
 };
 
 interface AuthContextType {
@@ -33,6 +27,19 @@ interface AuthContextType {
   users: UserProfile[];
   loading: boolean;
   isSuperAdmin: boolean;
+  /**
+   * Effective privilege for this session: the `app_users.is_super_admin` column
+   * AND, when the server is configured with an IdP group, that group. The UI
+   * gates on this, never on the raw column.
+   */
+  canSuperAdmin: boolean;
+  /**
+   * Email proven by Cloudflare Access when SSO authenticated the person but no
+   * active roster account matched, so the sign-in screen can explain why.
+   */
+  ssoEmail: string;
+  /** Re-prove the account password. Privileged changes require it (docs/staff-access.md). */
+  stepUp: (password: string) => Promise<boolean>;
   switchUser: (userId: string) => void;
   switchDemoRole: (role: UserRole) => void;
   addUser: (userData: Omit<UserProfile, 'id' | 'createdAt'>) => UserProfile;
@@ -56,21 +63,6 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
  */
 const SESSION_RECHECK_MS = 120000;
 
-export const SUPER_ADMIN_USER: UserProfile = {
-  id: 'usr-superadmin-idofera',
-  email: 'michaelidongesit5@gmail.com',
-  username: 'idofera',
-  displayName: 'Aidy Mike',
-  role: 'Administrator',
-  avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop',
-  status: 'Active',
-  createdAt: new Date('2026-01-01').toISOString(),
-  lastLogin: new Date().toISOString(),
-  passwordLastChanged: new Date('2026-01-01').toISOString(),
-  isProtected: true,
-  isSuperAdmin: true,
-};
-
 export const STANDARD_ADMIN_USER: UserProfile = {
   id: 'usr-admin-1',
   email: 'admin@idoferapackaging.com',
@@ -86,9 +78,20 @@ export const STANDARD_ADMIN_USER: UserProfile = {
   isSuperAdmin: false,
 };
 
+/**
+ * Client-side starting list. This must NOT contain an account the server has
+ * never issued: the staff client used to bundle both a Super-Admin and an
+ * Administrator profile, so an empty browser showed a signed-in user and every
+ * request to a private API answered 401.
+ *
+ * Only a plain, non-super, password-less placeholder is kept so local UI
+ * selection still has a role to render before the first server sync. It grants
+ * no privileges (super-user status is `isSuperAdmin === true`, server-set only)
+ * and cannot authenticate. If no account is provisioned server-side, the staff
+ * workspace now shows the sign-in screen instead of a phantom session.
+ */
 export const INITIAL_USERS: UserProfile[] = [
-  SUPER_ADMIN_USER,
-  STANDARD_ADMIN_USER,
+  {...STANDARD_ADMIN_USER, id: 'usr-placeholder-admin', isProtected: false},
 ];
 
 export const DEMO_USERS: Record<UserRole, UserProfile> = {
@@ -110,24 +113,11 @@ const sanitizeUsersList = (rawUsers: UserProfile[]): UserProfile[] => {
         isProtected: false,
       };
     }
-    if (
-      u.id === 'usr-superadmin-idofera' ||
-      u.username === 'idofera' ||
-      u.username === 'michaelidongesit5' ||
-      u.email === 'michaelidongesit5@gmail.com' ||
-      u.email === 'idofera@idoferapackaging.com'
-    ) {
-      return {
-        ...SUPER_ADMIN_USER,
-        ...u,
-        id: 'usr-superadmin-idofera',
-        email: 'michaelidongesit5@gmail.com',
-        username: 'idofera',
-        displayName: 'Aidy Mike',
-        isSuperAdmin: true,
-        isProtected: true,
-      };
-    }
+    // The usr-admin-1 normalization that used to live here was dead code: the
+    // force-super branch above matched usr-admin-1 first (nothing excluded it),
+    // so the standard admin profile was promoted to Super-Admin plus
+    // isProtected. Derived flags are now trusted as received; privilege comes
+    // from the server's is_super_admin column and nowhere else.
     return u;
   });
 
@@ -144,12 +134,12 @@ const sanitizeUsersList = (rawUsers: UserProfile[]): UserProfile[] => {
     uniqueUsers.set(user.id, candidateChangedAt > existingChangedAt ? user : existing);
   }
 
-  if (!uniqueUsers.has('usr-superadmin-idofera')) {
-    uniqueUsers.set(SUPER_ADMIN_USER.id, SUPER_ADMIN_USER);
-  }
-  if (!uniqueUsers.has('usr-admin-1')) {
-    uniqueUsers.set(STANDARD_ADMIN_USER.id, STANDARD_ADMIN_USER);
-  }
+  // This function must never INVENT a user. It used to re-add the bundled
+  // super-admin and administrator here whenever a stored list did not contain
+  // them, which is what made the phantom account self-healing: deleting it from
+  // localStorage only brought it back on the next load with a freshly minted
+  // "last login" and `isProtected: true`. Super-user grants are server-set
+  // identity only, so the client cannot be the source of that privilege.
   return [...uniqueUsers.values()];
 };
 
@@ -174,6 +164,103 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
   const { showToast } = useToast();
 
+  // Effective privilege: server-says-so (DB flag + IdP group), never the raw
+  // column. True only while the server keeps confirming it.
+  const [canSuperAdmin, setCanSuperAdmin] = useState(false);
+  // Set when Cloudflare Access authenticated a person with no matching account,
+  // so the sign-in screen can explain why SSO did not open the workspace.
+  // Survives the full-page redirect to '/' that carries the explanation.
+  const [ssoEmail, setSsoEmail] = useState(() => {
+    try { return sessionStorage.getItem('idofera_sso_email') || ''; } catch { return ''; }
+  });
+  const persistSsoEmail = (email: string | null) => {
+    try {
+      if (email) sessionStorage.setItem('idofera_sso_email', email);
+      else sessionStorage.removeItem('idofera_sso_email');
+    } catch { /* storage may be unavailable; the state below still applies */ }
+    setSsoEmail(email || '');
+  };
+  // The privileged request pauses here while the operator types their password.
+  // The resolver lives in a REF: React may double-invoke state updaters in
+  // StrictMode, and resolving a promise from inside an updater would resolve it
+  // twice (the exact bug that used to double-send profile PUTs).
+  const stepUpResolver = useRef<((password: string | null) => void) | null>(null);
+  const [stepUpOpen, setStepUpOpen] = useState(false);
+  const [stepUpBusy, setStepUpBusy] = useState(false);
+  const [stepUpError, setStepUpError] = useState('');
+
+  /** Ask the operator for their account password. Resolves null when cancelled. */
+  const askForPassword = () =>
+    new Promise<string | null>((resolve) => {
+      stepUpResolver.current = resolve;
+      setStepUpError('');
+      setStepUpOpen(true);
+    });
+
+  const finishStepUp = (password: string | null) => {
+    const resolve = stepUpResolver.current;
+    stepUpResolver.current = null;
+    setStepUpOpen(false);
+    setStepUpError('');
+    resolve?.(password);
+  };
+
+  /**
+   * Mint the short-lived step-up proof the server requires for privileged
+   * changes (docs/staff-access.md). Resolves true only once the server has
+   * hashed and stored it for this account.
+   */
+  const stepUp = async (password: string): Promise<boolean> => {
+    try {
+      const response = await fetch('/api/auth/step-up', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({password}),
+      });
+      const data = await response.json() as {ok?: boolean; canSuperAdmin?: boolean; error?: string};
+      if (!response.ok || !data.ok) {
+        setStepUpError(data.error || 'That password could not be confirmed.');
+        return false;
+      }
+      if (typeof data.canSuperAdmin === 'boolean') setCanSuperAdmin(data.canSuperAdmin);
+      return true;
+    } catch {
+      setStepUpError('Could not confirm your password. Check your connection and try again.');
+      return false;
+    }
+  };
+
+  /**
+   * Runs a request that the server may treat as privileged.
+   *  - `STEP_UP_REQUIRED` (403): open the password prompt; once the proof is
+   *    minted, retry the ORIGINAL request transparently.
+   *  - `SUPER_ADMIN_GROUP_REQUIRED` (403): only the identity provider can fix
+   *    this, so it is reported as a toast instead of being retried.
+   */
+  const privilegedRequest = async (url: string, init: RequestInit): Promise<Response> => {
+    const send = () => fetch(url, {
+      ...init,
+      credentials: 'include',
+      headers: {'content-type': 'application/json', ...(init.headers || {})},
+    });
+    const first = await send();
+    if (first.status !== 403) return first;
+    const body = await first.clone().json().catch(() => ({})) as {code?: string; error?: string};
+    if (body.code === 'SUPER_ADMIN_GROUP_REQUIRED') {
+      showToast({
+        title: 'Identity Provider Check Required',
+        message: body.error || 'Your identity provider has not confirmed the super-administrator group.',
+        type: 'error',
+      });
+      return first;
+    }
+    if (body.code !== 'STEP_UP_REQUIRED') return first;
+    const password = await askForPassword();
+    if (!password) return first;
+    return await send();
+  };
+
   const refreshServerUsers = async () => {
     const token = localStorage.getItem('idofera_session_token') || sessionStorage.getItem('idofera_session_token');
     const headers: Record<string, string> = {};
@@ -196,13 +283,44 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       headers['x-session-token'] = token;
     }
     fetch('/api/auth/session', {credentials: 'include', headers, cache: 'no-store'})
-      .then(async (response) => response.ok ? response.json() : {user: null})
-      .then(async ({user, entranceAllowed}) => {
-        if (!active) return;
+      .then(async (response) => {
+        // An expired Cloudflare Access cookie sends the request off to the IdP;
+        // the redirected cross-origin answer cannot be read as JSON. One
+        // full-page navigation to /labs lets Access re-authenticate, bounded by
+        // sessionStorage so a dead API cannot trap the tab in a reload loop.
+        if (response.redirected && !response.url.startsWith(window.location.origin)) {
+          const last = Number(sessionStorage.getItem('idofera_access_reload_at') || 0);
+          if (active && Date.now() - last > 60000) {
+            sessionStorage.setItem('idofera_access_reload_at', String(Date.now()));
+            window.location.replace('/labs');
+          }
+          return null;
+        }
+        return response.ok ? response.json() : {user: null};
+      })
+      .then(async (payload) => {
+        if (!active || !payload) return;
+        const {user, entranceAllowed, accessEmail, registered, canSuperAdmin: canAct} = payload as {
+          user: UserProfile | null;
+          entranceAllowed?: boolean;
+          accessEmail?: string;
+          registered?: boolean;
+          canSuperAdmin?: boolean;
+        };
+        if (typeof canAct === 'boolean') setCanSuperAdmin(canAct);
+        if (registered === false && accessEmail) {
+          // Access proved the person, but no ACTIVE roster account matches.
+          // SSO never creates one (docs/staff-access.md): explain on the
+          // sign-in screen instead of opening a workspace.
+          persistSsoEmail(accessEmail);
+          window.location.replace('/');
+          return;
+        }
         if (!user && !entranceAllowed) {
           window.location.replace('/');
           return;
         }
+        persistSsoEmail(null);
         setCurrentUser(user || null);
         if (user) await refreshServerUsers();
       })
@@ -258,7 +376,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           await putManyItems('users', INITIAL_USERS);
         }
 
-        // Cached profiles are not proof of a valid server session.
+        // Cached profiles are not proof of a valid server session. The real
+        // roster (and the real super-admin flag) arrives from /api/auth/session
+        // and /api/auth/users; nothing here may grant privilege.
+        void activeUsers;
       } catch (err) {
         console.warn('Users load warning:', err);
       }
@@ -403,7 +524,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       lastLogin: new Date().toISOString(),
     };
     setUsers((prev) => [newUser, ...prev]);
-    fetch('/api/auth/users', {method: 'PUT', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({user: newUser, password: newUser.password})})
+    // Creating the account is privileged: the prompt/retry keeps this local
+    // creation in sync with what the server actually accepts.
+    privilegedRequest('/api/auth/users', {method: 'PUT', body: JSON.stringify({user: newUser, password: newUser.password})})
       .then((response) => { if (!response.ok) throw new Error('Server rejected the new user.'); })
       .catch((error) => showToast({title: 'Server Account Error', message: error.message, type: 'error'}));
     saveDocument('users', newUser);
@@ -446,7 +569,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!target) return;
     targetName = target.displayName;
     const updated = { ...target, ...updates };
-    fetch('/api/auth/users', {method: 'PUT', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({user: updated, password: updates.password})})
+    privilegedRequest('/api/auth/users', {method: 'PUT', body: JSON.stringify({user: updated, password: updates.password})})
       .catch((error) => console.warn('Server user update warning:', error));
     saveDocument('users', updated);
     setUsers((prev) => prev.map((u) => (u.id === id ? updated : u)));
@@ -484,7 +607,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Cannot delete the only remaining Administrator.');
     }
     setUsers((prev) => prev.filter((u) => u.id !== id));
-    fetch(`/api/auth/users/${encodeURIComponent(id)}`, {method: 'DELETE', credentials: 'include'})
+    // Deleting an account is privileged: the server demands a fresh password
+    // confirmation (403 STEP_UP_REQUIRED), which privilegedRequest prompts for.
+    privilegedRequest(`/api/auth/users/${encodeURIComponent(id)}`, {method: 'DELETE'})
+      .then((response) => { if (!response.ok) console.warn('Server user deletion rejected:', response.status); })
       .catch((error) => console.warn('Server user deletion warning:', error));
     removeDocument('users', id);
     showToast({
@@ -541,7 +667,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Regular Administrators cannot reset the Super-User password.');
     }
 
-    const response = await fetch('/api/auth/password', {method: 'POST', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({targetUserId, newPassword})});
+    // Resetting ANOTHER account's password is the most sensitive staff action;
+    // the server re-checks privilege and the fresh step-up on this call.
+    const response = await privilegedRequest('/api/auth/password', {method: 'POST', body: JSON.stringify({targetUserId, newPassword})});
     const result = await response.json() as {error?: string; passwordLastChanged?: string};
     if (!response.ok) throw new Error(result.error || 'Password reset failed.');
     const now = result.passwordLastChanged || new Date().toISOString();
@@ -558,20 +686,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setLoading(true);
     try {
       const response = await fetch('/api/auth/login', {method: 'POST', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({identifier, password: p})});
-      const data = await response.json() as {user?: UserProfile; sessionToken?: string; token?: string; error?: string};
+      const data = await response.json() as {user?: UserProfile; sessionToken?: string; token?: string; error?: string; canSuperAdmin?: boolean};
       if (!response.ok || !data.user) throw new Error(data.error || 'Authentication failed.');
       if (data.sessionToken || data.token) {
         localStorage.setItem('idofera_session_token', data.sessionToken || data.token || '');
       }
+      if (typeof data.canSuperAdmin === 'boolean') setCanSuperAdmin(data.canSuperAdmin);
+      persistSsoEmail(null);
       setCurrentUser(data.user);
       if (isSuperUser(data.user)) {
         // Provision only the profiles this device created and that therefore
         // carry a password. The old form re-PUT EVERY cached profile on each
-        // super-admin login, which re-sent the bundled demo password for
-        // usr-superadmin-idofera and silently reset the real super-admin
+        // super-admin login, which re-sent the bundled demo password for the
+        // former bundled super-admin id and silently reset the real super-admin
         // password back to that known value.
         const pendingProvision = sanitizeUsersList(users).filter((user) => user.password);
-        await Promise.all(pendingProvision.map((user) => fetch('/api/auth/users', {method: 'PUT', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({user, password: user.password})})));
+        if (pendingProvision.length) {
+          // The password that just signed us in is a valid step-up proof too;
+          // mint it now so provisioning never opens a second prompt.
+          await stepUp(p);
+          await Promise.all(pendingProvision.map((user) => privilegedRequest('/api/auth/users', {method: 'PUT', body: JSON.stringify({user, password: user.password})})));
+        }
       }
       await refreshServerUsers();
       showToast({ title: 'Signed In', message: `Welcome back, ${data.user.displayName}!`, type: 'success' });
@@ -620,8 +755,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       if (!credential?.accessToken) throw new Error('Google did not provide a verifiable access token.');
       const response = await fetch('/api/auth/google', {method: 'POST', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({accessToken: credential.accessToken})});
-      const data = await response.json() as {user?: UserProfile; sessionToken?: string; token?: string; error?: string};
+      const data = await response.json() as {user?: UserProfile; sessionToken?: string; token?: string; error?: string; canSuperAdmin?: boolean};
       if (!response.ok || !data.user) throw new Error(data.error || 'Google authentication failed.');
+      if (typeof data.canSuperAdmin === 'boolean') setCanSuperAdmin(data.canSuperAdmin);
+      persistSsoEmail(null);
       if (data.sessionToken || data.token) {
         localStorage.setItem('idofera_session_token', data.sessionToken || data.token || '');
       }
@@ -683,6 +820,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem('idofera_session_token');
     sessionStorage.removeItem('idofera_session_token');
     setCurrentUser(null);
+    setCanSuperAdmin(false);
+    persistSsoEmail(null);
     showToast({
       title: 'Signed Out',
       message: serverConfirmed
@@ -706,6 +845,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         users,
         loading,
         isSuperAdmin,
+        canSuperAdmin,
+        ssoEmail,
+        stepUp,
         switchUser,
         switchDemoRole,
         addUser,
@@ -721,6 +863,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }}
     >
       {children}
+      {/* Privileged staff actions pause here for a fresh password proof. */}
+      <StepUpModal
+        isOpen={stepUpOpen}
+        busy={stepUpBusy}
+        error={stepUpError}
+        onConfirm={(password) => {
+          // Mint the proof BEFORE resolving: the caller retries only after the
+          // server has accepted the password, and a wrong password keeps this
+          // prompt OPEN with the server's message instead of failing silently.
+          setStepUpBusy(true);
+          stepUp(password)
+            .then((confirmed) => { if (confirmed) finishStepUp(password); })
+            .finally(() => setStepUpBusy(false));
+        }}
+        onCancel={() => finishStepUp(null)}
+      />
     </AuthContext.Provider>
   );
 };

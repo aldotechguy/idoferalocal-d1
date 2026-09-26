@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Idofera — Staff Access Runbook</title>
+<style>
+  @page { size: A4; margin: 16mm 14mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #1e293b; font-size: 11.5px; line-height: 1.55; margin: 0;
+  }
+  h1 { font-size: 24px; font-weight: 800; color: #0f172a; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h2 {
+    font-size: 16px; font-weight: 800; color: #0f172a;
+    margin: 22px 0 8px; padding-bottom: 4px; border-bottom: 2px solid #e2e8f0;
+    page-break-after: avoid;
+  }
+  h3 { font-size: 13px; font-weight: 800; color: #1e293b; margin: 16px 0 6px; page-break-after: avoid; }
+  p { margin: 0 0 8px; }
+  ul, ol { margin: 0 0 10px; padding-left: 20px; }
+  li { margin: 0 0 4px; }
+  li > ul { margin-top: 4px; }
+  a { color: #2563eb; text-decoration: none; word-break: break-word; }
+  strong { color: #0f172a; }
+  code {
+    background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 4px;
+    padding: 0 4px; font-family: "Cascadia Code", Consolas, monospace; font: 10.5px;
+  }
+  hr { border: 0; border-top: 1px solid #e2e8f0; margin: 16px 0; }
+  blockquote {
+    margin: 0 0 12px; padding: 10px 14px; background: #fffbeb;
+    border-left: 4px solid #f59e0b; border-radius: 0 6px 6px 0; color: #78350f;
+  }
+  blockquote p { margin: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 4px 0 14px; page-break-inside: avoid; }
+  th, td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #f8fafc; font-weight: 700; color: #0f172a; }
+  figure { margin: 10px 0 16px; page-break-inside: avoid; text-align: center; }
+  figure img {
+    max-width: 62%; max-height: 300px; height: auto; border: 1px solid #e2e8f0;
+    border-radius: 10px; box-shadow: 0 1px 4px rgba(15,23,42,0.08);
+  }
+  figcaption { font-size: 10px; color: #64748b; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>Staff access — Cloudflare Access in front of the staff surfaces</h1>
+<p>This document is the runbook for the zero-trust gate that sits in front of the staff workspace. It is written to be executed by hand in the Cloudflare dashboard; the only machinery in this repository is the JWT verification (<code>src/server/accessJwt.ts</code>), the step-up confirmation (<code>src/server/stepUp.ts</code>) and the drift guard that keeps this document, the code and the dashboard in agreement (<code>src/server/staffAccess.ts</code>, <code>scripts/staff-access.test.ts</code>).</p>
+<blockquote><p><strong>Scope:</strong> no step here reads or writes <code>idofera-d1</code>. That database belongs to the default environment and is in active use elsewhere. Access/SSO work applies to <code>idofera</code> (<code>--env mall</code>) and <code>idofera-preview</code> (<code>--env preview</code>) only, and only additively.</p></blockquote>
+<h2>What the gate does and does not do</h2>
+<p>``<code> shopper ─▶ </code>/<code>, </code>/category/<em><code>, </code>/search<code>, </code>/checkout<code>, </code>/orders<code>, </code>/api/mall</em><code>, </code>/api/mall-webhook<code>, </code>/mall-images/*<code>, </code>/api/health<code>, </code>/api/auth/entrance` ─────────────▶ Worker (unchanged) no Access involved</p>
+<p>staff ──▶ Access application (IdP login, MFA, audit) │  verified <code>Cf-Access-Jwt-Assertion</code> ▼ Worker ─▶ staff entrance cookie ─▶ app session (<code>app_users</code>) └─ super-admin = DB flag AND IdP group AND step-up ```</p>
+<ul><li>Access authenticates a <strong>person</strong>; it never grants a role. <code>app_users</code> remains the only source of privilege.</li><li>The storefront is deliberately outside the gate, so a missed Access rule can never stop a customer from paying. A <em>new</em> staff or private route without a rule is caught by <code>npm run test:frontend</code>, not by an outage.</li><li>Nothing in the Worker requires Access to be enabled: with <code>CF_ACCESS_SSO</code> unset the previous password login keeps working unchanged.</li></ul>
+<h2>1. Prerequisites</h2>
+<ol><li>Zero Trust enabled on the account (free plan covers up to 50 users).</li><li>An IdP connected in <strong>Zero Trust → Settings → Authentication</strong> (Google Workspace, Microsoft Entra ID or Okta).</li><li>An IdP group (for example <code>mall-staff</code>) that contains every member of staff, and — if group claims are available — a second group for the owners, for example <code>idofera-super-admins</code>.</li></ol>
+<h2>2. The Access applications</h2>
+<p>Create one <strong>self-hosted</strong> application per host name below, <code>Action: Allow</code>, <code>Include: &lt;your staff group&gt;</code> (or an email-domain rule), <code>Session duration</code> <strong>8 hours or longer</strong> (the app revalidates <code>/api/auth/session</code> every two minutes while a workspace is open).</p>
+<table><thead><tr><th>Protected path pattern</th><th>Covers</th></tr></thead><tbody><tr><td><code>/labs*</code></td><td><code>/labs</code>, <code>/labs/dashboard</code>, <code>/labs/mall-orders</code>, …</td></tr><tr><td><code>/app*</code></td><td>the legacy staff routes</td></tr><tr><td><code>/api/storage*</code></td><td><code>/api/storage/snapshot</code>, <code>/api/storage/records</code>, <code>/api/storage/d1/health</code></td></tr><tr><td><code>/api/ai*</code></td><td>the AI assistant endpoints</td></tr><tr><td><code>/api/staff*</code></td><td>Mall Orders, Mall Listings, product images</td></tr><tr><td><code>/api/auth/session</code></td><td>the SSO bootstrap (Access must inject the JWT here)</td></tr><tr><td><code>/api/auth/users*</code></td><td>the staff roster</td></tr><tr><td><code>/api/auth/password</code></td><td>password changes and admin resets</td></tr></tbody></table>
+<p>Hosts to cover: the live Worker (<code>idomall.olz.workers.dev</code>, or its custom domain) <strong>and</strong> <code>idomall-preview.olz.workers.dev</code>, so a preview deployment is never an unguarded copy of the staff workspace.</p>
+<h3>Must stay anonymous — do not add these to any Access application</h3>
+<p><code>/</code> and every storefront route (<code>/category/*</code>, <code>/product/*</code>, <code>/search</code>, <code>/checkout</code>, <code>/orders</code>, <code>/order-success</code>), <code>/assets/*</code>, <code>/mall-images/*</code>, <code>/api/health</code>, <code>/api/mall</code>, <code>/api/mall/*</code>, <code>/api/mall-webhook</code>, <code>/api/auth/entrance</code>, <code>/api/auth/login</code>, <code>/api/auth/google</code>, <code>/api/auth/logout</code>, and <code>/api/auth/session</code>'s sibling sign-in endpoints listed here: <code>/api/auth/entrance</code>, <code>/api/auth/login</code>, <code>/api/auth/google</code>, <code>/api/auth/logout</code>.</p>
+<p><code>/api/auth/entrance</code> is the cart-hold second factor: it is issued <strong>from the public storefront</strong>, so covering it breaks the staff sign-in entirely.</p>
+<p>Path syntax notes: no query strings, no ports, no <code>#</code>; <code>/labs/*</code> does not cover <code>/labs</code> itself, which is why the code list uses <code>/labs*</code>; at most one wildcard per path segment.</p>
+<h2>3. Configuration</h2>
+<p>Non-sensitive values live in <code>wrangler.toml</code>; the Audience tag is not a secret either, but the service-token secret is.</p>
+<table><thead><tr><th>Variable</th><th>Purpose</th></tr></thead><tbody><tr><td><code>CF_ACCESS_SSO</code></td><td><code>"true"</code> enables the SSO session bootstrap. Anything else keeps the password login only.</td></tr><tr><td><code>CF_ACCESS_TEAM_DOMAIN</code></td><td><code>https://&lt;team-name&gt;.cloudflareaccess.com</code>. Used for the JWKS URL and the <code>iss</code>/<code>aud</code> checks.</td></tr><tr><td><code>CF_ACCESS_AUD</code></td><td>The Access application's Audience (AUD) tag (Zero Trust → Access → Applications → your app → Overview).</td></tr><tr><td><code>CF_ACCESS_SUPER_ADMIN_GROUP</code></td><td>Optional. When set, the IdP must also assert this group before a super-admin session exists. Leave unset to disable the group requirement.</td></tr><tr><td><code>CF_ACCESS_STEP_UP_SECONDS</code></td><td>Optional. Step-up lifetime, default 600 seconds.</td></tr></tbody></table>
+<p>Local <code>.env</code> mirrors the same names for <code>npm run dev</code>. Cloudflare secrets are still set with <code>npx wrangler secret put --env mall &lt;NAME&gt;</code>; never pass them on the command line (see <code>docs/mall-operations.md</code>).</p>
+<h3>Service tokens for the deployment checks</h3>
+<p><code>npm run verify:mall-preview</code> and <code>npm run verify:mall-contract</code> probe the deployed origin anonymously. Create one Access service token (Zero Trust → Access → Service credentials → Service tokens) with a <code>Service Auth</code> policy on the same applications and export <code>CF_ACCESS_CLIENT_ID</code> / <code>CF_ACCESS_CLIENT_SECRET</code> before running them; the scripts attach the <code>CF-Access-Client-Id</code> / <code>CF-Access-Client-Secret</code> headers when those variables are present and treat an Access rejection (403, or a redirect to <code>cloudflareaccess.com</code>) as "anonymous staff access denied" just like a 401.</p>
+<h2>4. Who is a Super Admin</h2>
+<p>Access proves an email address. <strong>Privilege is still decided by the database:</strong></p>
+<ol><li><code>app_users.is_super_admin</code> must be <code>1</code> (unchanged column, unchanged enforcement points, changed only through the audited <code>scripts/set-super-admin.ts</code>).</li><li>When <code>CF_ACCESS_SUPER_ADMIN_GROUP</code> is configured, the verified Access JWT must also carry that group (<code>accessGroupAllowed</code>).</li><li>Every privileged action additionally requires a <strong>step-up</strong>: a fresh proof of the caller's own password (<code>POST /api/auth/step-up</code>, 10-minute HttpOnly cookie, bound to the account that confirmed it).</li></ol>
+<p>The three gates are ANDed, so losing any one of them downgrades the session rather than allowing the action. When a privileged request arrives without a step-up it is answered <code>403 {"error":"Confirm your password to continue.","code":"STEP_UP_REQUIRED"}</code> and the client prompts instead of dead-ending.</p>
+<p>Privileged actions gated this way:</p>
+<table><thead><tr><th>Action</th><th>Endpoint</th></tr></thead><tbody><tr><td>Create or edit a staff account</td><td><code>PUT /api/auth/users</code></td></tr><tr><td>Delete a staff account</td><td><code>DELETE /api/auth/users/:id</code></td></tr><tr><td>Reset somebody else's password</td><td><code>POST /api/auth/password</code> with <code>targetUserId</code></td></tr><tr><td>Any change to a super-admin or protected account</td><td>the same endpoints, stricter check</td></tr></tbody></table>
+<p>A staff member changing <strong>their own</strong> password keeps the existing <code>oldPassword</code> verification and needs no step-up. The local password login remains as break-glass and also requires a step-up before privileged actions, so an operator can always recover administration without the IdP.</p>
+<h2>5. What staff see</h2>
+<p>With <code>CF_ACCESS_SSO="true"</code>, <code>GET /api/auth/session</code> verifies the Access JWT, matches the email against <code>app_users</code>, and mints the normal app session. The workspace opens directly — no second login screen, no separate password.</p>
+<ul><li><strong>Email not registered</strong> — the response is <code>{"user":null,"accessEmail":"…"}</code> and the sign-in screen explains that the account is not provisioned. Staff accounts are created by a super-admin; SSO never auto-creates a user.</li><li><strong>Access session expired</strong> — the session probe fails and the client performs a full-page navigation to <code>/labs</code>, which sends the browser back through the IdP. Keep the Access session duration well above the app's two-minute revalidation cadence.</li><li>The cart-hold entrance and the password form stay available as the fallback path.</li></ul>
+<h2>6. Auditing</h2>
+<ul><li><strong>Zero Trust → Insights → Logs → Access authentication logs</strong> — per-login allow/deny with the user email, timestamp and application; the per-request log shows each protected path a user touched. Filter by application, user or decision; export with Logpush if you need retention.</li><li><strong><code>data/admin-flag-changes.log</code></strong> — super-admin flag changes made with <code>scripts/set-super-admin.ts</code>.</li><li>Application-side events (staff actions on orders, listings) keep the <code>app_users.id</code> as the actor, so the audit trail is unchanged by SSO.</li></ul>
+<h2>7. Joining, leaving and reconciliation</h2>
+<p><strong>Joining a new staff member</strong></p>
+<ol><li>Create the account in the workspace (super-admin, step-up required).</li><li>Add their email to <code>app_users</code> (the roster) and to the IdP staff group.</li></ol>
+<p><strong>Leaving</strong></p>
+<ol><li>Remove them from the IdP/Access group (removes the edge login).</li><li><code>npx tsx scripts/set-super-admin.ts --id &lt;userId&gt; --value 0 --apply</code> when the account held the flag.</li><li><code>npx tsx scripts/provision-admin.ts --revoke-sessions &lt;userId&gt;</code> — or set the account <code>status</code> to <code>Inactive</code>, which invalidates the app session even if a cookie survives.</li></ol>
+<p><strong>Reconcile before enabling SSO</strong> — <code>docs/mall-launch-safety.md</code> records that <code>usr-admin-1</code> still carries <code>is_super_admin = 1</code> in <code>idofera</code> while the client displays that identity as a non-super-admin. Decide and apply the intended value with the audited script before the flag becomes reachable through SSO.</p>
+<h2>8. Rollback</h2>
+<ul><li><strong>Fastest:</strong> disable or delete the Access application. No deployment is needed; the app's own entrance + password login continue to work.</li><li><strong>Keep Access, drop SSO:</strong> set <code>CF_ACCESS_SSO = "false"</code> in <code>wrangler.toml</code> and redeploy <code>--env mall</code>. The JWT is still verified for identity logging, but no session is minted from it.</li><li><strong>Drop the group / step-up requirement:</strong> clear <code>CF_ACCESS_SUPER_ADMIN_GROUP</code> (the step-up requirement itself is deliberate and should stay).</li></ul>
+<h2>9. Verification checklist</h2>
+<ol><li><code>npm run lint &amp;&amp; npm run test:frontend &amp;&amp; npm run test:mall-backend &amp;&amp; npm run test:access</code>.</li><li>Local: <code>npx wrangler dev --env mall</code> — storefront browse/cart/checkout, the cart-hold entrance, and the password login all unchanged.</li><li>Decode a real Access token for a test staff account and confirm the group claim is present; if the IdP cannot assert groups, either enable group claims on the IdP application or leave <code>CF_ACCESS_SUPER_ADMIN_GROUP</code> unset (the step-up gate then carries the whole requirement).</li><li>Deploy <code>--env preview</code>, then <code>npm run verify:mall-preview</code> and <code>npm run verify:mall-contract</code> with the service-token variables exported.</li><li>Live checks after <code>npx wrangler deploy --env mall</code>: password prompt. * Access logs show the allow decision with the staff email.<ul><li><code>/labs</code> anonymously → IdP login, never the workspace.</li><li>SSO staff account → workspace without a password prompt.</li><li><code>curl -i https://idomall&lt;…&gt;.workers.dev/api/staff/mall-orders</code> → 302/403.</li><li>Delete-a-user attempt → <code>STEP_UP_REQUIRED</code>, then succeeds after the</li></ul></li></ol>
+<h2>10. Known gaps</h2>
+<ul><li>Network access to the Worker is unchanged: Access is an authentication gate, not a network control (there is no exposed origin port to protect — the Worker is the origin, so no Cloudflare Tunnel is involved).</li><li>Access authenticates, it does not authorize: role checks, refund/dispatch permissions and the super-admin rules above all stay in the application.</li><li>The Access applications themselves are dashboard state. <code>STAFF_ACCESS_PATHS</code> and <code>scripts/staff-access.test.ts</code> catch drift in this repository, but nobody can detect a dashboard-only change without the optional <code>npm run verify:access-apps</code> check (<code>scripts/verify-access-apps.ts</code>, needs a read-only API token with <code>Access: Apps and Policies Read</code>; it skips cleanly when <code>CLOUDFLARE_ACCOUNT_ID</code> / <code>CLOUDFLARE_API_TOKEN</code> are not exported).</li></ul>
+</body>
+</html>
