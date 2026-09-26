@@ -18,9 +18,11 @@ $stderr = "$PSScriptRoot\tmp_server_stderr.txt"
 if (Test-Path $stdout) { Remove-Item $stdout -Force -ErrorAction SilentlyContinue }
 if (Test-Path $stderr) { Remove-Item $stderr -Force -ErrorAction SilentlyContinue }
 
+# `npx` is npx.cmd: CreateProcess (UseShellExecute=false) cannot resolve a
+# .cmd through PATH, so launch it through cmd.exe instead.
 $psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = 'npx'
-$psi.Arguments = 'tsx server.ts'
+$psi.FileName = 'cmd.exe'
+$psi.Arguments = '/c npx tsx server.ts'
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.UseShellExecute = $false
