@@ -29,6 +29,7 @@ import { randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { accessHeaders } from './access-probe.ts';
 
 const LIVE_HOST = 'idomall.olz.workers.dev';
 const LIVE_DB = 'idofera';
@@ -76,7 +77,7 @@ function runSql(config: { database: string; env: string }, sql: string) {
 
 function makeApi(base: URL) {
   return async function api(path: string, session: string, init: RequestInit = {}) {
-    const headers = { 'content-type': 'application/json', 'x-mall-session': session, ...((init.headers as Record<string, string>) || {}) };
+    const headers = { 'content-type': 'application/json', 'x-mall-session': session, ...accessHeaders(), ...((init.headers as Record<string, string>) || {}) };
     const response = await fetch(new URL(path, base), {
       ...init,
       headers,
