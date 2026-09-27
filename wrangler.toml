@@ -65,12 +65,15 @@ MALL_HONOR_POS_PROMOS = "false"
 # default: the storefront and the password login keep working unchanged until
 # these are filled in. The JWT is only verified once BOTH the team domain and
 # the application AUD are set; CF_ACCESS_SSO additionally mints the session
-# from that verified identity. Empty CF_ACCESS_SUPER_ADMIN_GROUP = the group
-# leg is disabled (fail-open on that one requirement, by design).
-CF_ACCESS_SSO = "false"
-CF_ACCESS_TEAM_DOMAIN = ""
-CF_ACCESS_AUD = ""
-CF_ACCESS_SUPER_ADMIN_GROUP = ""
+# from that verified identity. CF_ACCESS_AUD accepts comma-separated tags —
+# one per Access application covering the staff paths (each mints its own,
+# and the /api/auth/session app's tag must be in the list for SSO to work).
+# Empty CF_ACCESS_SUPER_ADMIN_GROUP = the group leg is disabled (fail-open
+# on that one requirement, by design).
+CF_ACCESS_SSO = "true"
+CF_ACCESS_TEAM_DOMAIN = "https://long-scene-5c20.cloudflareaccess.com"
+CF_ACCESS_AUD = "7b38e6e9-f2e2-4881-9435-72e048d14733"
+CF_ACCESS_SUPER_ADMIN_GROUP = "5ca9257d32c94d8eb600e1e7677131ab"
 CF_ACCESS_STEP_UP_SECONDS = "600"
 # Non-sensitive Mall config. Update MALL_PICKUP_ADDRESS and MALL_PICKUP_HOURS
 # to your real pickup location and hours before accepting orders.
@@ -80,7 +83,7 @@ MALL_PICKUP_HOURS = "10AM - 6PM"
   MALL_BANK_NAME = "MONIEPOINT"
   MALL_BANK_ACCOUNT_NAME = "IDOFERA ENTERPRISE"
   MALL_BANK_ACCOUNT_NUMBER = "8063766861"
-  MALL_WEBHOOK_URL = "https://idomall.olz.workers.dev/api/mall-webhook"
+  MALL_WEBHOOK_URL = "https://idofera.de5.net/api/mall-webhook"
   # Sender for order emails. Must be an address on a domain verified in Resend.
   # `idofera.de5.net` (apex) is verified, so this delivers to any recipient;
   # the sandbox sender `onboarding@resend.dev` would only reach the account owner.
