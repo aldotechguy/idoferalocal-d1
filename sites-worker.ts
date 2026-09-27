@@ -1070,14 +1070,25 @@ export default {
         return response;
       }
       const login = ['/api/auth/login', '/api/auth/google'].includes(url.pathname);
-      if (isStaffPage(url.pathname) || isPrivateApi(url.pathname) || login) {
+      const staffPage = isStaffPage(url.pathname);
+      if (staffPage || isPrivateApi(url.pathname) || login) {
         // The staff entrance gates the staff pages and the private APIs, NOT the
         // sign-in endpoints: the entrance cookie is only issued after a
         // successful sign-in, so requiring it in order to sign in is circular.
         // This term was inverted (it applied the entrance to private APIs and
         // skipped it for login), so a signed-out POST /api/auth/login was
         // rejected 401 STAFF_ENTRANCE_REQUIRED before any credential check.
-        const entrance = login ? true : await hasEntrance(cookie, query);
+        //
+        // Staff PAGES (not private APIs) additionally accept a verified
+        // Cloudflare Access identity: after Access signs the caller in at the
+        // edge, the SPA shell must load so /api/auth/session can mint the app
+        // session the API handlers below require. APIs still need an entrance
+        // or a session — a JWT alone authorizes nothing, exactly like the edge
+        // contract.
+        let entrance = login ? true : await hasEntrance(cookie, query);
+        if (!entrance && staffPage && env.CF_ACCESS_SSO === 'true') {
+          entrance = (await accessIdentityFor(request, env)) !== null;
+        }
         if (!entrance && !await requireAppUser(request, env)) {
           if (isStaffPage(url.pathname)) return new Response(null, { status: 302, headers: { location: '/', 'cache-control': 'no-store' } });
           if (login) return json({ error: 'Staff entrance expired. Return to the Mall and hold the Cart button for 3 seconds to reopen Staff Login.', code: 'STAFF_ENTRANCE_REQUIRED' }, 401);

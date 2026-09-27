@@ -519,7 +519,8 @@ app.use(async (req, res, next) => {
       return res.set('Cache-Control', 'no-store').json({ok: true});
     }
     const login = ['/api/auth/login', '/api/auth/google'].includes(req.path);
-    if (isStaffPage(req.path) || isPrivateApi(req.path) || login) {
+    const staffPage = isStaffPage(req.path);
+    if (staffPage || isPrivateApi(req.path) || login) {
       // The staff entrance is a SECOND factor in front of the staff pages and the
       // private APIs. It must NOT apply to the sign-in endpoints themselves:
       // requiring an entrance cookie to log in is circular, because the entrance
@@ -528,7 +529,16 @@ app.use(async (req, res, next) => {
       // exactly backwards — and every POST /api/auth/login from a signed-out
       // browser was answered 401 STAFF_ENTRANCE_REQUIRED without the credentials
       // ever being checked.
-      const entrance = login ? true : await hasEntrance(cookie, entranceQuery);
+      //
+      // Staff PAGES (not private APIs) additionally accept a verified Cloudflare
+      // Access identity: after Access signs the caller in at the edge, the SPA
+      // shell must load so /api/auth/session can mint the app session that the
+      // API handlers below require. APIs still need an entrance or a session —
+      // a JWT alone authorizes nothing, exactly like the edge contract.
+      let entrance = login ? true : await hasEntrance(cookie, entranceQuery);
+      if (!entrance && staffPage && process.env.CF_ACCESS_SSO === 'true') {
+        entrance = (await accessIdentityFor(req)) !== null;
+      }
       if (!entrance && !await requireAppUser(req)) {
         if (isStaffPage(req.path)) return res.set('Cache-Control', 'no-store').redirect(302, '/');
         if (login) return res.status(401).json({error: 'Staff entrance expired. Return to the Mall and hold the Cart button for 3 seconds to reopen Staff Login.', code: 'STAFF_ENTRANCE_REQUIRED'});

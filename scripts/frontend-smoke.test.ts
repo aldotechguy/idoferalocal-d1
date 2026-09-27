@@ -97,9 +97,13 @@ test('sign-in endpoints are reachable from a cold browser and never gated behind
   }
   // The same endpoints must not answer the entrance error in the Node runtime.
   const node = fs.readFileSync('server.ts', 'utf8');
-  assert.match(node, /const entrance = login \? true : await hasEntrance\(cookie, entranceQuery\)/);
+  assert.match(node, /let entrance = login \? true : await hasEntrance\(cookie, entranceQuery\);/);
   const workerSource = fs.readFileSync('sites-worker.ts', 'utf8');
-  assert.match(workerSource, /const entrance = login \? true : await hasEntrance\(cookie, query\)/);
+  assert.match(workerSource, /let entrance = login \? true : await hasEntrance\(cookie, query\);/);
+  // Staff pages additionally accept a verified Access JWT, so an OTP login
+  // lands on the workspace without an entrance cookie or a session yet.
+  assert.match(node, /if \(!entrance && staffPage && process\.env\.CF_ACCESS_SSO === 'true'\) \{\r?\n\s*entrance = \(await accessIdentityFor\(req\)\) !== null;/);
+  assert.match(workerSource, /if \(!entrance && staffPage && env\.CF_ACCESS_SSO === 'true'\) \{\r?\n\s*entrance = \(await accessIdentityFor\(request, env\)\) !== null;/);
 });
 
 test('worker serves deep-link HTML without forwarding the index.html redirect', async t => {
@@ -748,12 +752,26 @@ test('a privileged action without a step-up re-prompts instead of dead-ending, a
   assert.doesNotMatch(modal, /localStorage|sessionStorage/);
   assert.doesNotMatch(modal, /password:\s*'/);
 
-  // An SSO login that matched no roster account persists the e-mail across the
-  // full-page redirect, is explained on the sign-in screen, and is cleared by
-  // any successful password/Google login and by logout — SSO never auto-creates.
-  assert.match(auth, /sessionStorage\.getItem\('idofera_sso_email'\)/);
+  // An SSO login that matched no roster account now stays on the staff route
+  // with the "confirmed but not provisioned" notice (StaffApp), rather than
+  // being redirected to the storefront (whose surface has no AuthProvider to
+  // explain with). The email is still persisted so the notice survives reloads.
+  assert.match(auth, /ssoUnregistered: boolean;/);
   assert.match(auth, /persistSsoEmail\(accessEmail\)/);
   assert.match(auth, /persistSsoEmail\(null\)/);
+  // The unregistered branch ends right after persisting the email: there is no
+  // redirect to the storefront between the call and the branch's return.
+  assert.match(auth, /persistSsoEmail\(accessEmail\);\r?\n\s*return;\r?\n\s*\}/);
   assert.match(login, /ssoEmail && \(/);
   assert.match(login, /SSO never creates accounts/);
+
+  // The unregistered notice now owns the staff route itself: StaffApp renders
+  // an "Access confirmed" screen whenever the confirmed email has no roster
+  // account, and the Google sign-in path is kept intact for local development
+  // and rollback (Cloudflare Access replaces the form in production only).
+  const staff = fs.readFileSync('src/staff/StaffApp.tsx', 'utf8');
+  assert.match(staff, /if \(!currentUser && ssoUnregistered && ssoEmail\)/);
+  assert.match(staff, /const AccessNotice: React\.FC<\{ email: string \}>/);
+  assert.match(login, /loginWithGoogle/);
+  assert.match(auth, /const loginWithGoogle = async/);
 });

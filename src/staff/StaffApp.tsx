@@ -1,4 +1,5 @@
 import React, { Suspense, useState } from 'react';
+import { ShieldAlert } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { Header } from '../components/common/Header';
 import { Sidebar } from '../components/common/Sidebar';
@@ -18,8 +19,49 @@ const SettingsHubView = React.lazy(() => import('../components/settings/Settings
 
 const PAGE_TITLES: Record<string, string> = { dashboard: 'Dashboard', pos: 'Point of Sale', sales: 'Sales & Orders', 'sales-orders': 'Sales & Orders', 'mall-orders': 'Mall Orders', deliveries: 'Deliveries', products: 'Products & Stock', 'products-stock': 'Products & Stock', inventory: 'Inventory', pricing: 'Pricing', archive: 'Archive', customers: 'Customers', purchases: 'Purchases', 'purchases-suppliers': 'Purchases', suppliers: 'Suppliers', expenses: 'Finance & Expenses', finance: 'Finance', 'money-movement': 'Money Movement', 'investment-planner': 'Investment Planner', reports: 'Reports', settings: 'Settings', 'settings-tools': 'Settings', import: 'Import', ai: 'AI Assistant' };
 
+/**
+ * Shown when Cloudflare Access confirmed the person but no active roster
+ * account matches them. This screen — not the LoginView — owns the moment:
+ * SSO never provisions accounts, so there is no form to show, only the
+ * confirmed email and what to do next.
+ */
+const AccessNotice: React.FC<{ email: string }> = ({ email }) => (
+  <div className="min-h-screen bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-slate-100 flex flex-col justify-center items-center p-4">
+    <div className="w-full max-w-md space-y-6">
+      <div className="text-center space-y-2">
+        <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-amber-500 via-orange-500 to-rose-500 text-white font-extrabold text-2xl shadow-xl shadow-orange-500/30 mb-1 ring-4 ring-orange-500/20">
+          <ShieldAlert className="w-7 h-7" />
+        </div>
+        <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
+          Access <span className="text-amber-400">Confirmed</span>
+        </h1>
+        <p className="text-xs text-slate-400 font-medium">
+          Your organization verified <strong className="font-bold text-amber-200">{email}</strong>, but no
+          active Idofera account matches that address. SSO never creates accounts — ask an Administrator to
+          add you, then return here.
+        </p>
+      </div>
+      <div className="bg-slate-900/90 border border-slate-800 backdrop-blur-xl rounded-3xl p-6 sm:p-8 shadow-2xl space-y-4">
+        <a
+          href="/"
+          className="block w-full py-2.5 text-center bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl transition-colors"
+        >
+          Back to the storefront
+        </a>
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          className="block w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-xl transition-colors"
+        >
+          I was just added — check again
+        </button>
+      </div>
+    </div>
+  </div>
+);
+
 export const StaffApp: React.FC = () => {
-  const { currentUser, hasPermission, loading } = useAuth();
+  const { currentUser, hasPermission, loading, ssoEmail, ssoUnregistered } = useAuth();
   const route = useRoute();
   const activePage = route.surface === 'staff' ? (route.staffPage || 'dashboard') : 'dashboard';
   const setActivePage = React.useCallback((page: string) => navigateStaff(page), []);
@@ -54,6 +96,13 @@ export const StaffApp: React.FC = () => {
   }, [activePage, route]);
 
   if (loading) return <div role="status" className="p-8 text-center">Checking staff access…</div>;
+  // An Access-confirmed person without a roster account gets the notice, never
+  // the sign-in form: there are no credentials to type, only an Administrator
+  // who can provision the account. The password/Google LoginView remains for
+  // local development and rollback (no Access identity there).
+  if (!currentUser && ssoUnregistered && ssoEmail) {
+    return <AccessNotice email={ssoEmail} />;
+  }
   if (!currentUser) {
     return <LoginView />;
   }

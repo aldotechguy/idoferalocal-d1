@@ -30,6 +30,12 @@ staff ──▶ Access application (IdP login, MFA, audit)
 
 * Access authenticates a **person**; it never grants a role. `app_users`
   remains the only source of privilege.
+* The in-app LoginView (password form, Google button) remains the sign-in
+  screen only for local development and rollback, where no Access identity
+  exists. In production the sign-in screen **is** Cloudflare Access: the
+  3-second cart hold opens `/labs`, the edge serves the One-time PIN (staff)
+  or IdP (owners) login, and `/api/auth/session` matches the confirmed email
+  to the roster in D1 — superseding the form, not coexisting with it.
 * The storefront is deliberately outside the gate, so a missed Access rule can
   never stop a customer from paying. A *new* staff or private route without a
   rule is caught by `npm run test:frontend`, not by an outage.
@@ -62,6 +68,23 @@ minutes while a workspace is open).
 | `/api/auth/session` | the SSO bootstrap (Access must inject the JWT here) |
 | `/api/auth/users*` | the staff roster |
 | `/api/auth/password` | password changes and admin resets |
+
+Every application shares the same two login methods, but the methods are NOT
+interchangeable:
+
+* **One-time PIN** (staff method): the application checks the typed email
+  against its policy Include rule and only then sends the code. The resulting
+  JWT carries the email and **no `groups` claim**, so OTP gets staff through
+  the door but can never satisfy the IdP-group leg of the super-admin gate —
+  owners must use the IdP method for gated actions (see §4).
+* **Real IdP login method** (owner method): emits `email` **and** `groups[]`,
+  which is what makes `canSuperAdmin` (and step-up-confirmed privileged
+  actions) possible.
+
+A caller that passes the edge on `/labs` but has no session yet is admitted to
+the staff-page HTML shell, so `GET /api/auth/session` can mint the app session
+it carries. Private APIs are never admitted on the JWT alone — a token
+authorizes nothing at the origin, exactly like the edge contract.
 
 Hosts to cover: the live Worker (`idomall.olz.workers.dev`, or its custom
 domain) **and** `idomall-preview.olz.workers.dev`, so a preview deployment is
@@ -215,7 +238,8 @@ with the audited script before the flag becomes reachable through SSO.
 
 1. `npm run lint && npm run test:frontend && npm run test:mall-backend && npm run test:access`.
 2. Local: `npx wrangler dev --env mall` — storefront browse/cart/checkout, the
-   cart-hold entrance, and the password login all unchanged.
+   cart-hold entrance, and the password **and Google** logins all unchanged
+   (LoginView only exists outside Access).
 3. Decode a real Access token for a test staff account and confirm the group
    claim is present; if the IdP cannot assert groups, either enable group claims
    on the IdP application or leave `CF_ACCESS_SUPER_ADMIN_GROUP` unset (the

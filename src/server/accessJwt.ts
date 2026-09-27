@@ -253,6 +253,7 @@ export async function verifyAccessToken(token: string, config: AccessJwtConfig):
  */
 export function accessGroupAllowed(identity: AccessIdentity | null, requiredGroup?: string) {
   if (!requiredGroup) return true;
-  return Boolean(identity && identity.groups.includes(requiredGroup));
+  const groups = normalizeAccessGroups(identity?.groups);
+  return groups.includes(requiredGroup);
 }
 

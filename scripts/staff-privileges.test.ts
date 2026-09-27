@@ -52,6 +52,24 @@ test('a fresh step-up is required for every privileged action', () => {
   assert.equal((staffPrivilegeCheck({ actor: null, identity: inGroup, stepUp: true }) as { status: number }).status, 401);
 });
 
+test('an OTP-style group-less identity never opens super-admin', () => {
+  // One-time-PIN logins carry an email and no IdP group claims. The OTP path
+  // is how staff reach the backend, but owners must use the real IdP method
+  // for anything gated — the group leg cannot be satisfied without it.
+  const otpIdentity = { email: 'staff@company.com', subject: 'otp-subject-1', groups: [] as string[] };
+  assert.equal(staffSuperAdminSession(superAdmin, otpIdentity, GROUP), false);
+  const denied = staffPrivilegeCheck({ actor: superAdmin, identity: otpIdentity, requiredGroup: GROUP, stepUp: true });
+  assert.equal(denied.ok, false);
+  assert.equal((denied as { code?: string }).code, 'SUPER_ADMIN_GROUP_REQUIRED');
+  // A missing (not merely empty) group list behaves the same way. A token with
+  // no readable groups must never satisfy a configured requirement.
+  const deniedNull = staffPrivilegeCheck({ actor: superAdmin, identity: { email: 'staff@company.com', subject: 'otp-subject-2', groups: undefined as unknown as string[] }, requiredGroup: GROUP, stepUp: true });
+  assert.equal((deniedNull as { code?: string }).code, 'SUPER_ADMIN_GROUP_REQUIRED');
+  // Day-to-day staff work does not read groups at all: OTP staff with a
+  // session and a step-up edit accounts like anyone else.
+  assert.equal(staffEditorCheck({ actor: regularAdmin, stepUp: true }).ok, true);
+});
+
 test('account edits need the Administrator role and a step-up', () => {
   assert.equal((staffEditorCheck({ actor: null, stepUp: true }) as { status: number }).status, 401);
   assert.equal((staffEditorCheck({ actor: salesStaff, stepUp: true }) as { status: number }).status, 403);

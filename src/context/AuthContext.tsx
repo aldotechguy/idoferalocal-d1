@@ -38,6 +38,12 @@ interface AuthContextType {
    * active roster account matched, so the sign-in screen can explain why.
    */
   ssoEmail: string;
+  /**
+   * True when a verified Access identity matched no ACTIVE roster account
+   * (docs/staff-access.md). StaffApp renders the "confirmed but not
+   * provisioned" notice for this state instead of the LoginView.
+   */
+  ssoUnregistered: boolean;
   /** Re-prove the account password. Privileged changes require it (docs/staff-access.md). */
   stepUp: (password: string) => Promise<boolean>;
   switchUser: (userId: string) => void;
@@ -168,10 +174,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // column. True only while the server keeps confirming it.
   const [canSuperAdmin, setCanSuperAdmin] = useState(false);
   // Set when Cloudflare Access authenticated a person with no matching account,
-  // so the sign-in screen can explain why SSO did not open the workspace.
-  // Survives the full-page redirect to '/' that carries the explanation.
+  // so the staff surface can explain why SSO did not open the workspace.
   const [ssoEmail, setSsoEmail] = useState(() => {
     try { return sessionStorage.getItem('idofera_sso_email') || ''; } catch { return ''; }
+  });
+  // Mirrors whether the notice (rather than the sign-in form) owns the screen.
+  // Initialized from the same storage so a reload during the unregistered state
+  // renders consistently instead of flashing the LoginView.
+  const [ssoUnregistered, setSsoUnregistered] = useState(() => {
+    try { return Boolean(sessionStorage.getItem('idofera_sso_email')); } catch { return false; }
   });
   const persistSsoEmail = (email: string | null) => {
     try {
@@ -179,6 +190,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       else sessionStorage.removeItem('idofera_sso_email');
     } catch { /* storage may be unavailable; the state below still applies */ }
     setSsoEmail(email || '');
+    setSsoUnregistered(Boolean(email));
   };
   // The privileged request pauses here while the operator types their password.
   // The resolver lives in a REF: React may double-invoke state updaters in
@@ -310,10 +322,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (typeof canAct === 'boolean') setCanSuperAdmin(canAct);
         if (registered === false && accessEmail) {
           // Access proved the person, but no ACTIVE roster account matches.
-          // SSO never creates one (docs/staff-access.md): explain on the
-          // sign-in screen instead of opening a workspace.
+          // SSO never provisions one (docs/staff-access.md): persist the email
+          // and stay on the staff route — StaffApp renders the "confirmed but
+          // not provisioned" notice instead of the sign-in form.
           persistSsoEmail(accessEmail);
-          window.location.replace('/');
           return;
         }
         if (!user && !entranceAllowed) {
@@ -338,8 +350,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
         const response = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store', headers });
         if (!response.ok) return;
-        const { user, entranceAllowed } = await response.json();
-        if (active && !user && !entranceAllowed) window.location.replace('/');
+        const { user, entranceAllowed, accessEmail } = await response.json();
+        // An Access-confirmed person without a roster account stays on the
+        // staff route (the AccessNotice owns that screen, not the storefront).
+        if (active && !user && !entranceAllowed && !accessEmail) window.location.replace('/');
       } catch { /* A transient network error is not a confirmed expired session. */ }
     };
     // A backgrounded tab must not keep reading the session table on a timer;
@@ -847,6 +861,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isSuperAdmin,
         canSuperAdmin,
         ssoEmail,
+        ssoUnregistered,
         stepUp,
         switchUser,
         switchDemoRole,
