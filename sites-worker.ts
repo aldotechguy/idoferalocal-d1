@@ -23,7 +23,7 @@ interface Env extends MallConfig {
   CF_ACCESS_SSO?: string;
   /** https://<team-name>.cloudflareaccess.com — the JWKS URL and `iss` check. */
   CF_ACCESS_TEAM_DOMAIN?: string;
-  /** The Access application's Audience (AUD) tag. */
+  /** Audience (AUD) tag(s) of the Access applications, comma-separated. */
   CF_ACCESS_AUD?: string;
   /** Optional IdP group that must also be present for a super-admin session. */
   CF_ACCESS_SUPER_ADMIN_GROUP?: string;

@@ -67,6 +67,13 @@ Hosts to cover: the live Worker (`idomall.olz.workers.dev`, or its custom
 domain) **and** `idomall-preview.olz.workers.dev`, so a preview deployment is
 never an unguarded copy of the staff workspace.
 
+Access matches **hostnames**, not Workers: if the Worker also answers on a
+custom domain (for example `idofera.de5.net`), give *that* hostname its own
+copy of the path applications — a rule on the custom domain never protects the
+`workers.dev` URL, and vice versa. Verify with an anonymous
+`curl -i https://<host>/labs`: anything other than a 302 to your
+`*.cloudflareaccess.com` team domain means the host is unguarded.
+
 ### Must stay anonymous — do not add these to any Access application
 
 `/` and every storefront route (`/category/*`, `/product/*`, `/search`,
@@ -93,7 +100,7 @@ either, but the service-token secret is.
 | --- | --- |
 | `CF_ACCESS_SSO` | `"true"` enables the SSO session bootstrap. Anything else keeps the password login only. |
 | `CF_ACCESS_TEAM_DOMAIN` | `https://<team-name>.cloudflareaccess.com`. Used for the JWKS URL and the `iss`/`aud` checks. |
-| `CF_ACCESS_AUD` | The Access application's Audience (AUD) tag (Zero Trust → Access → Applications → your app → Overview). |
+| `CF_ACCESS_AUD` | **Comma-separated** Audience (AUD) tags of *every* Access application covering the staff paths — each application mints its own tag (Zero Trust → Access → Applications → your app → Overview). Must include the tag of the app covering `/api/auth/session`, or SSO falls back to password login. |
 | `CF_ACCESS_SUPER_ADMIN_GROUP` | Optional. When set, the IdP must also assert this group before a super-admin session exists. Leave unset to disable the group requirement. |
 | `CF_ACCESS_STEP_UP_SECONDS` | Optional. Step-up lifetime, default 600 seconds. |
 

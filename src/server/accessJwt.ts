@@ -43,7 +43,7 @@ export interface AccessIdentity {
 export interface AccessJwtConfig {
   /** `https://<team-name>.cloudflareaccess.com`; also the expected `iss`. */
   teamDomain?: string;
-  /** The Access application's Audience (AUD) tag. */
+  /** One or more comma-separated Audience (AUD) tags — every Access application covering the staff paths mints its own (see `audienceMatches`). */
   audience?: string;
   /** Test seam: replaces the network JWKS read (bypasses the cache). */
   jwks?: () => Promise<AccessJwk[]>;
@@ -119,9 +119,17 @@ export function normalizeAccessGroups(raw: unknown): string[] {
   return [...groups];
 }
 
+/**
+ * `CF_ACCESS_AUD` may carry several comma-separated tags: the runbook creates
+ * one Access application per staff path, and EVERY application mints its own
+ * Audience tag — a request's token must therefore match ANY configured tag.
+ * The JWT `aud` claim itself may be a string or an array (standard JWT
+ * semantics), so this is a two-sided intersection.
+ */
 function audienceMatches(claim: unknown, audience: string) {
-  if (typeof claim === 'string') return claim === audience;
-  if (Array.isArray(claim)) return claim.some((entry) => entry === audience);
+  const accepted = audience.split(',').map((tag) => tag.trim()).filter(Boolean);
+  if (typeof claim === 'string') return accepted.includes(claim);
+  if (Array.isArray(claim)) return claim.some((entry) => accepted.includes(entry));
   return false;
 }
 

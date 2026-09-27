@@ -133,3 +133,23 @@ test('the JWKS endpoint is derived from the team domain', () => {
   assert.equal(accessJwksUrl('https://demo.cloudflareaccess.com'), 'https://demo.cloudflareaccess.com/cdn-cgi/access/certs');
 });
 
+test('CF_ACCESS_AUD accepts comma-separated tags, one per Access application', async () => {
+  const { privateKey, keys } = await fixture();
+  const multi = { ...config(keys), audience: ` ${AUD}, aud-tag-456 ` };
+  const signed = (payload: Record<string, unknown>) =>
+    sign(privateKey, { alg: 'RS256', kid: 'test-key-1' }, claims(payload));
+
+  // The runbook creates one application per staff path and each mints its own
+  // AUD; a token from ANY configured application must authenticate, otherwise
+  // identity (and the IdP-group leg of the super-admin gate) would silently
+  // vanish on every path whose app tag is not the single configured one.
+  assert.ok(await readAccessIdentity(request(await signed({})), multi), 'first tag matches');
+  assert.ok(await readAccessIdentity(request(await signed({ aud: 'aud-tag-456' })), multi), 'second tag matches');
+  assert.ok(await readAccessIdentity(request(await signed({ aud: ['other', 'aud-tag-456'] })), multi), 'an array aud claim intersects the list');
+
+  // A tag nobody configured stays rejected: a foreign application's token is
+  // still useless here, and a single tag behaves exactly as before.
+  assert.equal(await readAccessIdentity(request(await signed({ aud: 'foreign-tag' })), multi), null);
+  assert.ok(await readAccessIdentity(request(await signed({})), config(keys)), 'a single tag still works unchanged');
+});
+
