@@ -72,7 +72,10 @@ MALL_HONOR_POS_PROMOS = "false"
 # on that one requirement, by design).
 CF_ACCESS_SSO = "true"
 CF_ACCESS_TEAM_DOMAIN = "https://long-scene-5c20.cloudflareaccess.com"
-CF_ACCESS_AUD = "7b38e6e9-f2e2-4881-9435-72e048d14733"
+# Every audience that may appear in a verified token: the per-host Access
+# applications harvested from their IdP redirects (7a36… = idomall.olz.workers.dev,
+# e4a7… = idofera.de5.net) plus the dashboard tag read during rollout.
+CF_ACCESS_AUD = "7a36c57c088b4fb3b04028c8791f8225ce2503b127fb5d16acdd9e575dfe6d86,e4a7f92125d7ad9f38cd75b407d8454a690df2ee78baa269c52a1015eb5c2eb37,7b38e6e9-f2e2-4881-9435-72e048d14733"
 CF_ACCESS_SUPER_ADMIN_GROUP = "5ca9257d32c94d8eb600e1e7677131ab"
 CF_ACCESS_STEP_UP_SECONDS = "600"
 # Non-sensitive Mall config. Update MALL_PICKUP_ADDRESS and MALL_PICKUP_HOURS
