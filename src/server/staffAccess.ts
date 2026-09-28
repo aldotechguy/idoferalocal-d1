@@ -43,6 +43,11 @@ export const STAFF_ACCESS_EXEMPT_PATHS = [
   '/api/auth/login',
   '/api/auth/google',
   '/api/auth/logout',
+  // Sign-out needs these BEFORE an identity exists: `/lock` revokes the step-up
+  // proof, and `/access-logout-url` exists purely to leave Access. Covering them
+  // would have Access demand a fresh OTP from somebody trying to sign out.
+  '/api/auth/lock',
+  '/api/auth/access-logout-url',
 ] as const;
 
 /** Executable mirror of an Access application's Path matching. */

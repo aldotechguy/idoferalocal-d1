@@ -15,6 +15,7 @@ import worker from '../sites-worker.ts';
 import { createStaffCartHold, STAFF_CART_HOLD_MS } from '../src/hooks/useStaffCartHold.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { issueEntrance, hasEntrance, revokeEntrance, entranceCookie, isStaffPage, isPrivateApi } from '../src/server/staffEntrance.ts';
+import { issueStepUp, hasStepUp, STEP_UP_COOKIE } from '../src/server/stepUp.ts';
 
 function entranceFixture() {
   const db = new DatabaseSync(':memory:');
@@ -198,11 +199,12 @@ test('signed-in staff can open direct links; logout revokes session and entrance
   const f = entranceFixture();
   t.after(() => f.db.close());
   f.db.exec(`CREATE TABLE app_users (id TEXT, status TEXT);
-    CREATE TABLE app_sessions (token_hash TEXT, user_id TEXT, expires_at INTEGER);
+    CREATE TABLE app_sessions (token_hash TEXT, user_id TEXT, created_at INTEGER, expires_at INTEGER, last_seen_at INTEGER);
     INSERT INTO app_users VALUES ('staff', 'Active');`);
   const token = 'test-session';
   const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))), b => b.toString(16).padStart(2, '0')).join('');
-  f.db.prepare('INSERT INTO app_sessions VALUES (?, ?, ?)').run(hash, 'staff', Date.now() + 60000);
+  const now = Date.now();
+  f.db.prepare('INSERT INTO app_sessions VALUES (?, ?, ?, ?, ?)').run(hash, 'staff', now, now + 60000, now);
   const DB = {
     prepare: (sql: string) => ({
       bind: (...params: any[]) => ({
@@ -774,4 +776,162 @@ test('a privileged action without a step-up re-prompts instead of dead-ending, a
   assert.match(staff, /const AccessNotice: React\.FC<\{ email: string \}>/);
   assert.match(login, /loginWithGoogle/);
   assert.match(auth, /const loginWithGoogle = async/);
+});
+
+/**
+ * A session-capable worker fixture. Mirrors the deployed `app_sessions` shape
+ * INCLUDING `last_seen_at`, so a test that exercises the idle window is testing
+ * the real column rather than a simplified stand-in.
+ */
+function sessionFixture() {
+  const f = entranceFixture();
+  f.db.exec(`CREATE TABLE app_users (id TEXT, status TEXT);
+    CREATE TABLE app_sessions (token_hash TEXT, user_id TEXT, created_at INTEGER, expires_at INTEGER, last_seen_at INTEGER);
+    INSERT INTO app_users VALUES ('staff', 'Active');`);
+  const DB = {
+    prepare: (sql: string) => ({
+      bind: (...params: any[]) => ({
+        all: async () => ({ results: await f.query(sql, params) }),
+        run: async () => f.db.prepare(sql).run(...params),
+      })
+    })
+  };
+  const env = (extra: Record<string, unknown> = {}) => ({
+    DB,
+    ASSETS: { fetch: async () => new Response('staff shell', { headers: { 'content-type': 'text/html' } }) },
+    ...extra,
+  } as unknown as Parameters<typeof worker.fetch>[1]);
+  const seed = (tokenHash: string, mintedAt: number, expiresAt: number, lastSeenAt: number) =>
+    f.db.prepare('INSERT INTO app_sessions VALUES (?, ?, ?, ?, ?)').run(tokenHash, 'staff', mintedAt, expiresAt, lastSeenAt);
+  return { f, env, seed };
+}
+
+const hashOf = (token: string) => crypto.subtle
+  .digest('SHA-256', new TextEncoder().encode(token))
+  .then((buffer) => Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, '0')).join(''));
+
+/**
+ * Lock and Sign Out must stay TWO actions in the UI. They were one button
+ * labelled "Sign Out / Lock Workspace" that only ever signed out, which quietly
+ * promised a feature that did not exist and made a shared-terminal lock
+ * impossible. Lock is one-tap; Sign Out is confirmed because it ends the
+ * Cloudflare Access session too.
+ */
+test('Lock and Sign Out are separate, differently-confirmed actions', () => {
+  const header = fs.readFileSync('src/components/common/Header.tsx', 'utf8');
+  assert.match(header, /<span>Lock Workspace<\/span>/);
+  assert.match(header, /<span>Sign Out<\/span>/);
+  // The ambiguous combined label must never come back.
+  assert.doesNotMatch(header, /<span>Sign Out \/ Lock Workspace<\/span>/);
+  // Lock fires immediately; Sign Out opens a confirmation first.
+  assert.match(header, /void lock\(\)/);
+  assert.match(header, /setShowConfirmSignOut\(true\)/);
+  assert.match(header, /isOpen=\{showConfirmSignOut\}/);
+  // The confirmation is honest about what it ends.
+  assert.match(header, /ends your session and your Cloudflare Access login/);
+  // Sign-out must be able to reach the team domain, and the team domain is
+  // never hardcoded in the client.
+  assert.match(header, /isOpen=\{showConfirmSignOut\}[\s\S]*?void logout\(\)/);
+});
+
+/**
+ * The idle lock mirrors the server's 30-minute window. Both halves must agree:
+ * the server is the authority, and the client exists so the lock is visible
+ * rather than surfacing as a mysteriously failed save.
+ */
+test('the client idle lock matches the server idle window and warns first', () => {
+  const auth = fs.readFileSync('src/context/AuthContext.tsx', 'utf8');
+  assert.match(auth, /export const IDLE_LOCK_MS = 30 \* 60 \* 1000;/);
+  assert.match(auth, /export const IDLE_WARNING_MS = 60 \* 1000;/);
+  assert.match(auth, /lockTimer = window\.setTimeout\(\(\) => \{ void lock\(\{ idle: true \}\); \}, IDLE_LOCK_MS\)/);
+  // The warning precedes the lock, so nobody loses a form without notice.
+  assert.ok(auth.indexOf('IDLE_LOCK_MS - IDLE_WARNING_MS') < auth.indexOf('void lock({ idle: true })'));
+  // Activity resets both timers.
+  for (const event of ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart', 'focus']) {
+    assert.ok(auth.includes(`'${event}'`), `idle timers must reset on ${event}`);
+  }
+  // Lock returns to the staff entrance; only sign-out returns to the Mall.
+  assert.match(auth, /window\.location\.replace\('\/labs'\)/);
+  assert.match(auth, /window\.location\.replace\(accessUrl \|\| '\/'\)/);
+  // An idle-expired session must lock rather than dump the operator in the shop.
+  assert.match(auth, /if \(active && !user && !entranceAllowed && !accessEmail\) \{\s*clearLocalSession\(\);\s*window\.location\.replace\('\/labs'\);/);
+});
+
+/**
+ * Lock and sign-out are genuinely DIFFERENT actions, and the UI used to offer one
+ * button labelled "Sign Out / Lock Workspace" that only ever signed out.
+ *
+ * Lock must leave the session usable — that is the whole point, an operator
+ * stepping away should not need a new OTP — while still destroying the step-up
+ * proof, so a terminal left unattended cannot change users, roles or passwords.
+ */
+test('lock keeps the session but revokes the step-up proof; sign-out ends both', async t => {
+  const { f, env, seed } = sessionFixture();
+  t.after(() => f.db.close());
+  const token = 'lock-session';
+  const minted = Date.now();
+  seed(await hashOf(token), minted, minted + 3_600_000, minted);
+
+  const stepUp = await issueStepUp(f.query, 'staff');
+  const stepUpPart = `${STEP_UP_COOKIE}=${stepUp}`;
+  assert.equal(await hasStepUp(stepUpPart, 'staff', f.query), true, 'a step-up exists before the lock');
+
+  const locked = await worker.fetch(new Request('https://test/api/auth/lock', { method: 'POST', headers: { cookie: `idofera_session=${token}; ${stepUpPart}` } }), env());
+  assert.equal(locked.status, 200);
+  assert.equal(await hasStepUp(stepUpPart, 'staff', f.query), false, 'lock revokes the step-up proof');
+  assert.equal((f.db.prepare('SELECT token_hash FROM app_sessions WHERE user_id = ?').all('staff') as unknown as unknown[]).length, 1, 'lock must NOT delete the session');
+  // And the session still opens the workspace, so unlocking is immediate.
+  assert.equal((await worker.fetch(new Request('https://test/labs/reports', { headers: { cookie: `idofera_session=${token}` } }), env())).status, 200);
+
+  // Sign-out, by contrast, ends the session too.
+  const out = await worker.fetch(new Request('https://test/api/auth/logout', { method: 'POST', headers: { cookie: `idofera_session=${token}` } }), env());
+  assert.equal(out.status, 200);
+  assert.equal((f.db.prepare('SELECT token_hash FROM app_sessions WHERE user_id = ?').all('staff') as unknown as unknown[]).length, 0, 'sign-out deletes the session');
+});
+
+/**
+ * The idle window is the automatic version of the same lock: a terminal that is
+ * simply abandoned — nobody pressed "Lock" — must stop authorizing private APIs
+ * even though the absolute seven-day expiry has not passed.
+ */
+test('a session idle past CF_SESSION_IDLE_SECONDS stops authorizing', async t => {
+  const { f, env, seed } = sessionFixture();
+  t.after(() => f.db.close());
+  const token = 'idle-session';
+  // Minted an hour ago and never seen since: well inside the 7-day expiry.
+  const minted = Date.now() - 3_600_000;
+  const hash = await hashOf(token);
+  seed(hash, minted, Date.now() + 7 * 86_400_000, minted);
+  const cookie = `idofera_session=${token}`;
+
+  // The default 30-minute window rejects it and the staff page bounces.
+  assert.equal((await worker.fetch(new Request('https://test/labs/reports', { headers: { cookie } }), env())).status, 302);
+  // A generous window accepts it AND refreshes last_seen_at, so idleness is
+  // measured from this request rather than from the mint.
+  const relaxed = env({ CF_SESSION_IDLE_SECONDS: '86400' });
+  assert.equal((await worker.fetch(new Request('https://test/labs/reports', { headers: { cookie } }), relaxed)).status, 200);
+  const row = f.db.prepare('SELECT last_seen_at FROM app_sessions WHERE token_hash = ?').get(hash) as unknown as { last_seen_at: number };
+  assert.ok(row.last_seen_at > minted, 'an accepted request refreshes last_seen_at');
+});
+
+/**
+ * Sign-out is incomplete while Access still holds its own session — a 3-second
+ * cart hold would walk straight back in with no OTP. The team domain lives only
+ * on the server, so the client asks for the URL; a deployment with the gate off
+ * has no Access session to end and must say so rather than inventing a URL.
+ */
+test('the Access logout URL is offered only when the gate is configured', async t => {
+  const f = entranceFixture();
+  t.after(() => f.db.close());
+  const DB = { prepare: () => ({ bind: () => ({ all: async () => ({ results: [] }), run: async () => ({}) }) }) };
+  const read = async (extra: Record<string, unknown>) => {
+    const env = { DB, CF_ACCESS_TEAM_DOMAIN: '', ASSETS: { fetch: async () => new Response('', { headers: { 'content-type': 'text/html' } }) }, ...extra } as unknown as Parameters<typeof worker.fetch>[1];
+    return await (await worker.fetch(new Request('https://test/api/auth/access-logout-url'), env)).json() as { url: string | null };
+  };
+
+  assert.deepEqual(await read({}), { url: null }, 'gate off (local development) has nothing to end');
+  assert.deepEqual(await read({ CF_ACCESS_SSO: 'false', CF_ACCESS_TEAM_DOMAIN: 'https://team.cloudflareaccess.com' }), { url: null }, 'SSO disabled means no Access session');
+  const live = await read({ CF_ACCESS_SSO: 'true', CF_ACCESS_TEAM_DOMAIN: 'https://team.cloudflareaccess.com/' });
+  assert.match(live.url || '', /^https:\/\/team\.cloudflareaccess\.com\/cdn-cgi\/access\/logout\?returnTo=/);
+  assert.match(decodeURIComponent(live.url || ''), /returnTo=https:\/\/test\/?$/, 'returns the operator to this origin (the Mall)');
 });

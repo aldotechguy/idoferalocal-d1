@@ -57,6 +57,14 @@ interface AuthContextType {
   registerWithEmail: (e: string, p: string, name: string, role: UserRole) => Promise<void>;
   loginWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
+  /**
+   * Lock the workspace without signing out (docs/staff-access.md). Keeps the app
+   * session so unlocking is immediate, revokes the step-up proof so an
+   * unattended terminal cannot perform privileged actions, and returns to the
+   * staff entrance. `idle: true` marks the automatic idle lock, which explains
+   * itself in the toast instead of looking like an operator action.
+   */
+  lock: (options?: { idle?: boolean }) => Promise<void>;
   hasPermission: (requiredRoles: UserRole[]) => boolean;
 }
 
@@ -68,6 +76,19 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
  * every 30 seconds; focus/visibility changes still revalidate immediately.
  */
 const SESSION_RECHECK_MS = 120000;
+
+/**
+ * Idle auto-lock. Mirrors `CF_SESSION_IDLE_SECONDS` on the server (30 minutes,
+ * `src/server/staffSession.ts`): the server is the authority and stops
+ * authorizing private APIs at this boundary regardless, so this timer exists to
+ * make the lock EXPLICIT and VISIBLE rather than letting the next API call fail
+ * mysteriously.
+ *
+ * The warning fires first so nobody loses an in-progress form without notice;
+ * any real activity (pointer, key, focus, scroll) resets both timers.
+ */
+export const IDLE_LOCK_MS = 30 * 60 * 1000;
+export const IDLE_WARNING_MS = 60 * 1000;
 
 export const STANDARD_ADMIN_USER: UserProfile = {
   id: 'usr-admin-1',
@@ -191,6 +212,79 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch { /* storage may be unavailable; the state below still applies */ }
     setSsoEmail(email || '');
     setSsoUnregistered(Boolean(email));
+  };
+
+  // ---------------------------------------------------------------------------
+  // Lock / sign-out primitives.
+  //
+  // Declared here, above every effect that calls them, on purpose. Effects only
+  // run after the render body finishes, so a helper defined further down would
+  // still be initialized in time — but the ordering below is what makes the
+  // dependency obvious and keeps these safe to call from a timer as well.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Where the browser must go to end the CLOUDFLARE ACCESS session. The team
+   * domain lives only on the server; `null` means the gate is off (local
+   * development), where there is no Access session to end.
+   */
+  const accessLogoutUrl = async (): Promise<string | null> => {
+    try {
+      const response = await fetch('/api/auth/access-logout-url', { credentials: 'include', cache: 'no-store' });
+      if (!response.ok) return null;
+      const data = await response.json() as { url?: string | null };
+      return data.url || null;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * Clear this device's copy of the session. Deliberately shared by lock, sign-out
+   * and idle expiry: each must leave nothing behind that would let the next person
+   * at the terminal render a signed-in shell before the server has been asked.
+   */
+  const clearLocalSession = () => {
+    localStorage.removeItem('idofera_current_user_id');
+    localStorage.removeItem('idofera_session_token');
+    sessionStorage.removeItem('idofera_session_token');
+    sessionStorage.removeItem('idofera_access_reload_at');
+    setCurrentUser(null);
+    setCanSuperAdmin(false);
+    persistSsoEmail(null);
+  };
+
+  /**
+   * Lock: an AFK action, NOT a sign-out (docs/staff-access.md).
+   *
+   * The app session is intentionally left alive, so unlocking needs no password
+   * and no second OTP — but the server-side step-up proof is revoked, so the
+   * unattended terminal cannot change users, roles or passwords without a fresh
+   * password. The operator lands on the staff entrance rather than the storefront,
+   * because the Mall is the door and they have not left the building.
+   */
+  const lock = async (options?: { idle?: boolean }) => {
+    const idle = Boolean(options?.idle);
+    const token = localStorage.getItem('idofera_session_token') || sessionStorage.getItem('idofera_session_token');
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers['authorization'] = `Bearer ${token}`;
+      headers['x-session-token'] = token;
+    }
+    try {
+      await fetch('/api/auth/lock', { method: 'POST', credentials: 'include', headers });
+    } catch { /* Locking is best effort: the local state below still applies. */ }
+    clearLocalSession();
+    showToast({
+      title: 'Workspace Locked',
+      message: idle
+        ? `Locked after ${Math.round(IDLE_LOCK_MS / 60000)} minutes of inactivity. Your session is still active — reopen the workspace when you return.`
+        : 'The workspace is locked. Your session is still active; reopen the workspace when you return.',
+      type: idle ? 'warning' : 'info',
+    });
+    // The staff entrance, not the storefront: signing out is what returns to the
+    // Mall, and a lock is not a sign-out.
+    window.location.replace('/labs');
   };
   // The privileged request pauses here while the operator types their password.
   // The resolver lives in a REF: React may double-invoke state updaters in
@@ -353,7 +447,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const { user, entranceAllowed, accessEmail } = await response.json();
         // An Access-confirmed person without a roster account stays on the
         // staff route (the AccessNotice owns that screen, not the storefront).
-        if (active && !user && !entranceAllowed && !accessEmail) window.location.replace('/');
+        // An idle-expired session must LOCK (stay on the staff entrance), not
+        // dump the operator into the storefront: the Mall is the door, and being
+        // sent shopping mid-shift looks like a crash.
+        if (active && !user && !entranceAllowed && !accessEmail) {
+          clearLocalSession();
+          window.location.replace('/labs');
+        }
       } catch { /* A transient network error is not a confirmed expired session. */ }
     };
     // A backgrounded tab must not keep reading the session table on a timer;
@@ -370,6 +470,45 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, []);
+
+  /**
+   * Idle auto-lock with a one-minute warning (docs/staff-access.md).
+   *
+   * Only runs while a workspace is actually open. The server enforces the same
+   * 30-minute window independently, so this is the *visible* half: it warns, then
+   * locks, instead of letting the operator discover the expiry from a failed save.
+   */
+  useEffect(() => {
+    if (!currentUser) return;
+    let warnTimer: number | undefined;
+    let lockTimer: number | undefined;
+    // The warning is a single toast; the lock itself is what changes the screen.
+    const arm = () => {
+      window.clearTimeout(warnTimer);
+      window.clearTimeout(lockTimer);
+      warnTimer = window.setTimeout(() => {
+        showToast({
+          title: 'Still There?',
+          message: 'The workspace will lock in one minute. Move the mouse or press any key to stay signed in.',
+          type: 'warning',
+        });
+      }, Math.max(IDLE_LOCK_MS - IDLE_WARNING_MS, 0));
+      lockTimer = window.setTimeout(() => { void lock({ idle: true }); }, IDLE_LOCK_MS);
+    };
+    // `capture` so a scroll inside a nested panel still counts as activity, and
+    // so the reset happens before any handler can stop propagation.
+    const onActivity = () => arm();
+    const events = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart', 'focus'] as const;
+    for (const event of events) window.addEventListener(event, onActivity, { capture: true, passive: true });
+    arm();
+    return () => {
+      window.clearTimeout(warnTimer);
+      window.clearTimeout(lockTimer);
+      for (const event of events) window.removeEventListener(event, onActivity, { capture: true });
+    };
+    // `lock` is stable for the lifetime of a signed-in session; re-arming only on
+    // the user identity keeps activity from tearing down the timers on every render.
+  }, [currentUser?.id, showToast]);
 
   // Load users from IndexedDB and Central Cloud Firestore on boot
   useEffect(() => {
@@ -820,6 +959,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       headers['authorization'] = `Bearer ${token}`;
       headers['x-session-token'] = token;
     }
+    // Both must be read BEFORE the session is revoked: /api/auth/access-logout-url
+    // is an authenticated-free endpoint, but reading it first keeps the ordering
+    // obvious and lets a failure here still fall back to the Mall.
+    const accessUrl = await accessLogoutUrl();
     // Best effort: if the server cannot confirm the sign-out, this device is
     // still signed out locally (the old code threw and left the session token
     // and the signed-in UI in place, with no way to retry cleanly).
@@ -830,12 +973,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch {
       serverConfirmed = false;
     }
-    localStorage.removeItem('idofera_current_user_id');
-    localStorage.removeItem('idofera_session_token');
-    sessionStorage.removeItem('idofera_session_token');
-    setCurrentUser(null);
-    setCanSuperAdmin(false);
-    persistSsoEmail(null);
+    clearLocalSession();
     showToast({
       title: 'Signed Out',
       message: serverConfirmed
@@ -843,7 +981,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         : 'Signed out on this device. The server could not confirm sign-out; it will be revoked when the session expires.',
       type: serverConfirmed ? 'info' : 'warning',
     });
-    window.location.replace('/');
+    // Sign-out is incomplete while Access still holds its own session: a 3-second
+    // cart hold would walk straight back in with no OTP. Ending the Access
+    // session requires a full-page navigation to the team domain, which also
+    // returns the operator to the Mall entrance. Without a gate (local
+    // development) there is nothing to end, so go to the Mall directly.
+    window.location.replace(accessUrl || '/');
   };
 
   const hasPermission = (requiredRoles: UserRole[]) => {
@@ -874,6 +1017,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         registerWithEmail,
         loginWithGoogle,
         logout,
+        lock,
         hasPermission,
       }}
     >

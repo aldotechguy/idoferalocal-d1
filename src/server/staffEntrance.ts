@@ -24,7 +24,7 @@ export function isPrivateApi(path: string) {
   // /api/mall-webhook with an HMAC signature and no staff cookie, so gating it
   // behind the staff entrance would 401 (then dead-letter) every notification.
   if (path === '/api/mall-webhook') return false;
-  return !['/api/auth/entrance', '/api/auth/login', '/api/auth/google', '/api/auth/session', '/api/auth/logout'].includes(path);
+  return !['/api/auth/entrance', '/api/auth/login', '/api/auth/google', '/api/auth/session', '/api/auth/logout', '/api/auth/lock', '/api/auth/access-logout-url'].includes(path);
 }
 
 function tokenFromCookie(cookie: string) {

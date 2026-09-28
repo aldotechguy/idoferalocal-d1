@@ -11,6 +11,7 @@ import { isStaffPage, isPrivateApi, issueEntrance, hasEntrance, revokeEntrance, 
 import { verifyAccessToken } from './src/server/accessJwt';
 import { staffSuperAdminSession, staffPrivilegeCheck, staffEditorCheck } from './src/server/staffPrivileges';
 import { STEP_UP_SECONDS, issueStepUp, hasStepUp, revokeStepUp, revokeStepUpForUser, stepUpCookie } from './src/server/stepUp';
+import { SESSION_COOKIE, sessionExpiry, sessionIdleSeconds, sessionIdleExpired } from './src/server/staffSession';
 
 dotenv.config();
 
@@ -210,7 +211,8 @@ function initSchema() {
         token_hash TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL
+        expires_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL DEFAULT 0
       );
     `);
   } catch (err) {
@@ -259,7 +261,8 @@ function initSchema() {
           token_hash TEXT PRIMARY KEY,
           user_id TEXT NOT NULL,
           created_at INTEGER NOT NULL,
-          expires_at INTEGER NOT NULL
+          expires_at INTEGER NOT NULL,
+          last_seen_at INTEGER NOT NULL DEFAULT 0
         );
       `);
     } catch (criticalErr) {
@@ -270,7 +273,20 @@ function initSchema() {
 
 initSchema();
 
-const SESSION_COOKIE = "idofera_session";
+/**
+ * Idle tracking on an `app_sessions` table that predates it. `DEFAULT 0` is
+ * deliberate (see the Worker's identical migration): an existing row reads as
+ * "never seen", so its first request refreshes it rather than granting a fresh
+ * full idle window to a session that may have been abandoned.
+ */
+try {
+  db.prepare("ALTER TABLE app_sessions ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0").run();
+} catch (error: any) {
+  if (!/duplicate column/i.test(String(error?.message || error))) {
+    console.warn("app_sessions idle column skipped:", error?.message || error);
+  }
+}
+
 const BUSINESS_OWNER_ID = "idofera-business";
 const PASSWORD_ITERATIONS = 100000;
 const ALLOWED_STORES = new Set([
@@ -405,13 +421,22 @@ async function requireAppUser(req: Request): Promise<any | null> {
   const token = readCookie(req, SESSION_COOKIE);
   if (!token) return null;
   const tokenHash = sha256(token);
+  const now = Date.now();
   const stmt = db.prepare(`
-    SELECT u.* FROM app_sessions s
+    SELECT u.*, s.last_seen_at AS session_last_seen, s.created_at AS session_created FROM app_sessions s
     JOIN app_users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.expires_at > ? AND u.status = ?
   `);
-  const row = stmt.get(tokenHash, Date.now(), "Active") as any;
-  return row || null;
+  const row = stmt.get(tokenHash, now, "Active") as any;
+  if (!row) return null;
+  // Parity with sites-worker.ts: an abandoned terminal stops authorizing private
+  // APIs even before the absolute expiry (docs/staff-access.md). A row whose
+  // `last_seen_at` is 0 predates idle tracking, so its mint time is the baseline.
+  const lastSeen = Number(row.session_last_seen || 0) || Number(row.session_created || 0);
+  if (lastSeen && sessionIdleExpired(lastSeen, now, sessionIdleSeconds(process.env))) return null;
+  // Touch the row so the window measures from THIS request, not the mint.
+  db.prepare("UPDATE app_sessions SET last_seen_at = ? WHERE token_hash = ?").run(now, tokenHash);
+  return row;
 }
 
 async function createSession(userId: string, res: Response) {
@@ -419,10 +444,10 @@ async function createSession(userId: string, res: Response) {
   res.append('Set-Cookie', entranceCookie('', res.req.secure));
   const token = randomHex(32);
   const now = Date.now();
-  const maxAge = 7 * 24 * 60 * 60; // 7 days in seconds
-  const expiresAt = now + maxAge * 1000;
-  const stmt = db.prepare("INSERT INTO app_sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)");
-  stmt.run(sha256(token), userId, now, expiresAt);
+  const expiresAt = sessionExpiry(now);
+  const maxAge = Math.floor((expiresAt - now) / 1000);
+  const stmt = db.prepare("INSERT INTO app_sessions (token_hash, user_id, created_at, expires_at, last_seen_at) VALUES (?, ?, ?, ?, ?)");
+  stmt.run(sha256(token), userId, now, expiresAt, now);
 
   res.cookie(SESSION_COOKIE, token, {
     maxAge: maxAge * 1000,
@@ -749,6 +774,35 @@ app.post("/api/auth/logout", async (req, res) => {
   } catch (error: any) {
     return res.status(500).json({ error: error.message || "Logout error" });
   }
+});
+
+/**
+ * Lock the workspace: an AFK action that is NOT a sign-out (see the Worker's
+ * `authLock` for the full reasoning). The session survives, so unlocking is
+ * immediate; the step-up proof does not, so an unattended terminal cannot change
+ * users, roles or passwords without a fresh password.
+ */
+app.post("/api/auth/lock", async (req, res) => {
+  try {
+    await revokeStepUp(req.headers.cookie || '', stepUpQuery);
+    res.append('Set-Cookie', stepUpCookie('', req.secure));
+    return res.json({ ok: true });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message || "Lock error" });
+  }
+});
+
+/**
+ * The URL that ends the CLOUDFLARE ACCESS session. `url: null` when the gate is
+ * off, which is the normal local-development answer; the caller then falls back
+ * to the Mall instead of travelling to a team domain that is not configured.
+ */
+app.get("/api/auth/access-logout-url", (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const team = String(process.env.CF_ACCESS_TEAM_DOMAIN || '').replace(/\/+$/, '');
+  if (process.env.CF_ACCESS_SSO !== 'true' || !team) return res.json({ url: null });
+  const mallOrigin = `${req.protocol}://${req.get('host')}/`;
+  return res.json({ url: `${team}/cdn-cgi/access/logout?returnTo=${encodeURIComponent(mallOrigin)}` });
 });
 
 app.get("/api/auth/users", async (req, res) => {

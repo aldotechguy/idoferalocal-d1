@@ -47,7 +47,7 @@ export const Header: React.FC<HeaderProps> = ({
   onMobileMenuToggle,
   onNavigate,
 }) => {
-  const { currentUser, users, isSuperAdmin, switchUser, switchDemoRole, logout, hasPermission } = useAuth();
+  const { currentUser, users, isSuperAdmin, switchUser, switchDemoRole, logout, lock, hasPermission } = useAuth();
   const { mode, toggleTheme } = useTheme();
   const { notifications, markNotificationRead, clearNotifications, settings, products, sales, customers, suppliers, expenses } = useApp();
   const {
@@ -64,6 +64,9 @@ export const Header: React.FC<HeaderProps> = ({
   const [showUserDropdown, setShowUserDropdown] = useState(false);
   const [isUserModalOpen, setIsUserModalOpen] = useState(false);
   const [showConfirmClearNotifs, setShowConfirmClearNotifs] = useState(false);
+  // Sign Out ends the Cloudflare Access session too, so it gets a confirmation;
+  // Lock stays one-tap because that is the whole point of it.
+  const [showConfirmSignOut, setShowConfirmSignOut] = useState(false);
   
   // Search States
   const [searchQuery, setSearchQuery] = useState('');
@@ -725,15 +728,34 @@ export const Header: React.FC<HeaderProps> = ({
                       </div>
                     )}
 
+                    {/* Lock and Sign Out are DIFFERENT actions and used to be one
+                        button labelled "Sign Out / Lock Workspace" that only ever
+                        signed out. Lock keeps the session (fast to reopen) and
+                        drops the step-up proof; Sign Out ends both the app AND the
+                        Cloudflare Access session, so the next cart hold needs a
+                        fresh OTP. */}
                     <button
                       onClick={() => {
                         setShowUserDropdown(false);
-                        logout();
+                        void lock();
+                      }}
+                      className="w-full flex items-center justify-center gap-2 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold rounded-xl text-xs transition-colors border border-slate-200/70 dark:border-slate-700"
+                      title="Keep your session active but require a password for privileged actions"
+                    >
+                      <Lock className="w-3.5 h-3.5" />
+                      <span>Lock Workspace</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        setShowUserDropdown(false);
+                        setShowConfirmSignOut(true);
                       }}
                       className="w-full flex items-center justify-center gap-2 py-2 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-600 dark:text-rose-400 font-bold rounded-xl text-xs transition-colors border border-rose-200/50 dark:border-rose-900/50"
+                      title="End this session and require a fresh login (including Cloudflare Access)"
                     >
                       <LogOut className="w-3.5 h-3.5" />
-                      <span>Sign Out / Lock Workspace</span>
+                      <span>Sign Out</span>
                     </button>
                   </div>
                 </div>
@@ -763,6 +785,22 @@ export const Header: React.FC<HeaderProps> = ({
       <ReceiptModal
         sale={selectedSaleForReceipt}
         onClose={() => setSelectedSaleForReceipt(null)}
+      />
+
+      {/* Sign Out Confirmation. Sign-out is the destructive one: it ends the app
+          session AND the Cloudflare Access session, so the next 3-second cart
+          hold demands a fresh OTP. Lock never needs this prompt. */}
+      <ConfirmModal
+        isOpen={showConfirmSignOut}
+        title="Sign Out of the Workspace"
+        message="This ends your session and your Cloudflare Access login. To open the workspace again you will need to hold the Mall's Cart button for 3 seconds and complete a fresh verification. To step away without signing out, use Lock Workspace instead."
+        confirmText="Sign Out"
+        variant="warning"
+        onClose={() => setShowConfirmSignOut(false)}
+        onConfirm={() => {
+          setShowConfirmSignOut(false);
+          void logout();
+        }}
       />
 
       {/* Clear Notifications Confirmation Modal */}

@@ -103,12 +103,15 @@ copy of the path applications — a rule on the custom domain never protects the
 `/checkout`, `/orders`, `/order-success`), `/assets/*`, `/mall-images/*`,
 `/api/health`, `/api/mall`, `/api/mall/*`, `/api/mall-webhook`,
 `/api/auth/entrance`, `/api/auth/login`, `/api/auth/google`,
-`/api/auth/logout`, and `/api/auth/session`'s sibling sign-in endpoints listed
-here: `/api/auth/entrance`, `/api/auth/login`, `/api/auth/google`,
-`/api/auth/logout`.
+`/api/auth/logout`, `/api/auth/lock`, `/api/auth/access-logout-url`.
 
 `/api/auth/entrance` is the cart-hold second factor: it is issued **from the
 public storefront**, so covering it breaks the staff sign-in entirely.
+
+`/api/auth/lock` and `/api/auth/access-logout-url` are sign-OUT paths: they are
+only ever called by somebody who is trying to leave, and they are called BEFORE
+any identity has been re-established. Covering them would make Access demand a
+fresh OTP from somebody who is trying to end their session.
 
 Path syntax notes: no query strings, no ports, no `#`; `/labs/*` does not cover
 `/labs` itself, which is why the code list uses `/labs*`; at most one wildcard
@@ -126,6 +129,7 @@ either, but the service-token secret is.
 | `CF_ACCESS_AUD` | **Comma-separated** Audience (AUD) tags of *every* Access application covering the staff paths — each application mints its own tag (Zero Trust → Access → Applications → your app → Overview). Must include the tag of the app covering `/api/auth/session`, or SSO falls back to password login. |
 | `CF_ACCESS_SUPER_ADMIN_GROUP` | Optional. When set, the IdP must also assert this group before a super-admin session exists. Leave unset to disable the group requirement. |
 | `CF_ACCESS_STEP_UP_SECONDS` | Optional. Step-up lifetime, default 600 seconds. |
+| `CF_SESSION_IDLE_SECONDS` | Optional. App-session idle window in seconds, default `1800` (30 minutes). Also drives the client's warning + auto-lock, so keep the two in step. |
 
 Local `.env` mirrors the same names for `npm run dev`. Cloudflare secrets are
 still set with `npx wrangler secret put --env mall <NAME>`; never pass them on
@@ -227,6 +231,43 @@ workspace opens directly — no second login screen, no separate password.
   revalidation cadence.
 * The cart-hold entrance and the password form stay available as the fallback
   path.
+
+### Lock vs Sign Out
+
+They are separate actions and used to be one button labelled
+"Sign Out / Lock Workspace" that only ever signed out.
+
+| | Lock Workspace | Sign Out |
+| --- | --- | --- |
+| App session (`app_sessions`) | **kept** — reopening is immediate, no password, no second OTP | deleted |
+| Step-up proof | **revoked** — an unattended terminal cannot change users, roles or passwords without a fresh password | revoked |
+| Cloudflare Access session | untouched (you are still you) | **ended** |
+| Next cart hold | straight back in | full OTP again |
+| Where you land | `/labs` (the staff entrance) | the Mall, via the team domain's logout |
+| Prompt | none — one tap, that is the point of it | confirmation |
+
+Sign-out must reach the team domain, because ending only the app session leaves
+Access holding its own `CF_AppSession`: the next 3-second cart hold would walk
+straight back into the workspace with no OTP at all. The client asks the server
+for that URL via `GET /api/auth/access-logout-url` (the team domain is never
+hardcoded in the client); `{"url":null}` means the gate is off — local
+development — and the client falls back to the Mall.
+
+### Idle auto-lock
+
+A shared counter terminal is abandoned, not signed out of, and the old
+seven-day session kept authorizing private APIs the whole time. Two windows now
+apply to every app session (`src/server/staffSession.ts`):
+
+* **Absolute** — seven days from the mint, unchanged.
+* **Idle** — `CF_SESSION_IDLE_SECONDS`, default **30 minutes**. `last_seen_at`
+  is refreshed on each authenticated request; a session that has not been seen
+  within the window stops authorizing anything.
+
+The server is the authority and enforces this regardless. The client mirrors it
+so the lock is *visible*: after a one-minute warning, it calls the same Lock
+path, so an operator is never left guessing why a save failed. Any pointer, key,
+wheel, touch or focus activity resets both timers.
 
 ## 6. Auditing
 

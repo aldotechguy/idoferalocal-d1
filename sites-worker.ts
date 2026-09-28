@@ -29,6 +29,8 @@ interface Env extends MallConfig {
   CF_ACCESS_SUPER_ADMIN_GROUP?: string;
   /** Optional step-up lifetime in seconds (default 600). */
   CF_ACCESS_STEP_UP_SECONDS?: string;
+  /** Optional app-session idle window in seconds (default 1800). */
+  CF_SESSION_IDLE_SECONDS?: string;
   /** Bound D1 database ID, set per environment in wrangler.toml (display-only). */
   D1_DATABASE_ID?: string;
 }
@@ -70,6 +72,7 @@ import { isStaffPage, isPrivateApi, issueEntrance, hasEntrance, revokeEntrance, 
 import { readAccessIdentity, ACCESS_JWT_HEADER, type AccessIdentity } from './src/server/accessJwt.js';
 import { staffSuperAdminSession, staffPrivilegeCheck, staffEditorCheck } from './src/server/staffPrivileges.js';
 import { STEP_UP_SECONDS, issueStepUp, hasStepUp, revokeStepUp, revokeStepUpForUser, stepUpCookie } from './src/server/stepUp.js';
+import { SESSION_COOKIE, sessionExpiry, sessionIdleSeconds, sessionIdleExpired } from './src/server/staffSession.js';
 
 /** Rows out of D1 -> the QueryAll shape the shared mapper expects. */
 function makeD1QueryAll(env: Env): QueryAll {
@@ -117,7 +120,6 @@ const json = (body: unknown, status = 200) =>
 
 const encoder = new TextEncoder();
 const BUSINESS_OWNER_ID = 'idofera-business';
-const SESSION_COOKIE = 'idofera_session';
 const PASSWORD_ITERATIONS = 100000;
 
 const toHex = (bytes: ArrayBuffer | Uint8Array) =>
@@ -248,7 +250,8 @@ async function ensureSchema(env: Env) {
       token_hash TEXT PRIMARY KEY NOT NULL,
       user_id TEXT NOT NULL,
       created_at INTEGER NOT NULL,
-      expires_at INTEGER NOT NULL
+      expires_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL DEFAULT 0
     )`),
     env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_app_sessions_user_expiry ON app_sessions (user_id, expires_at)`),
     // Phase 4: the 30 relational tables + 23 indexes, same DDL as drizzle/0000.
@@ -272,6 +275,12 @@ async function ensureSchema(env: Env) {
     try { await env.DB.prepare(column.ddl).run(); }
     catch (error) { if (!isDuplicateColumnError(error)) throw error; }
   }
+  // Idle tracking on an app_sessions table that predates it. `DEFAULT 0` is
+  // deliberate: an existing row reads as "never seen", so the first request after
+  // this deploy refreshes it rather than granting a fresh full idle window to a
+  // session that may have been abandoned days ago.
+  try { await env.DB.prepare('ALTER TABLE app_sessions ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0').run(); }
+  catch (error) { if (!isDuplicateColumnError(error)) throw error; }
   // Catalog read indexes: the visibility predicate, the merchandising order, and
   // the two facet columns the category/brand lists group by.
   for (const index of MALL_CATALOG_INDEXES) {
@@ -372,18 +381,32 @@ async function requireAppUser(request: Request, env: Env): Promise<AppUserRow | 
   const token = readCookie(request, SESSION_COOKIE);
   if (!token) return null;
   const tokenHash = await sha256(token);
+  const now = Date.now();
+  const idleSeconds = sessionIdleSeconds(env);
   const rows = await env.DB.prepare(
-    'SELECT u.* FROM app_sessions s JOIN app_users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND u.status = ?',
-  ).bind(tokenHash, Date.now(), 'Active').all<AppUserRow>();
-  return rows.results?.[0] || null;
+    'SELECT u.*, s.last_seen_at AS session_last_seen, s.created_at AS session_created FROM app_sessions s JOIN app_users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND u.status = ?',
+  ).bind(tokenHash, now, 'Active').all<AppUserRow & { session_last_seen: number | null; session_created: number | null }>();
+  const user = rows.results?.[0];
+  if (!user) return null;
+  // An abandoned terminal must stop authorizing private APIs even though the
+  // absolute expiry has not passed (docs/staff-access.md). `last_seen_at = 0`
+  // means the row predates idle tracking, which the ALTER migration documents as
+  // "never seen": treat the mint time as the baseline instead of admitting it.
+  const lastSeen = Number(user.session_last_seen || 0) || Number(user.session_created || 0);
+  if (lastSeen && sessionIdleExpired(lastSeen, now, idleSeconds)) return null;
+  // Touch the row so the next request measures idleness from THIS request. Written
+  // on the hot path on purpose: without it every request would compare against the
+  // mint time and a genuinely active seven-day session would expire mid-shift.
+  await env.DB.prepare('UPDATE app_sessions SET last_seen_at = ? WHERE token_hash = ?').bind(now, tokenHash).run();
+  return user;
 }
 
 async function createSession(userId: string, env: Env) {
   const token = randomHex(32);
   const now = Date.now();
-  const expiresAt = now + 7 * 24 * 60 * 60 * 1000;
-  await env.DB.prepare('INSERT INTO app_sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
-    .bind(await sha256(token), userId, now, expiresAt).run();
+  const expiresAt = sessionExpiry(now);
+  await env.DB.prepare('INSERT INTO app_sessions (token_hash, user_id, created_at, expires_at, last_seen_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(await sha256(token), userId, now, expiresAt, now).run();
   return { token, maxAge: Math.floor((expiresAt - now) / 1000) };
 }
 
@@ -636,6 +659,47 @@ async function authLogout(request: Request, env: Env) {
   const response = json({ ok: true });
   response.headers.set('set-cookie', sessionCookie('', 0));
   response.headers.append('set-cookie', entranceCookie());
+  // The step-up cookie is HttpOnly and bound to the account; clearing it here
+  // keeps a sign-out from leaving a live privileged proof in the browser.
+  response.headers.append('set-cookie', stepUpCookie());
+  return response;
+}
+
+/**
+ * Lock the workspace: a deliberate AFK action that is NOT a sign-out.
+ *
+ * The app session stays valid, so unlocking is immediate and needs no password
+ * and no second OTP — but the step-up proof is revoked, so the terminal that was
+ * left unattended cannot be used to change users, roles or passwords without a
+ * fresh password. The caller clears its own client state and returns to the
+ * staff entrance; nothing here needs a new session.
+ *
+ * The idle window in `staffSession.ts` is the automatic version of this same
+ * action, which is why locking early costs the operator nothing.
+ */
+async function authLock(request: Request, env: Env) {
+  await revokeStepUp(request.headers.get('cookie') || '', makeD1QueryAll(env));
+  const response = json({ ok: true });
+  response.headers.set('cache-control', 'no-store');
+  response.headers.set('set-cookie', stepUpCookie());
+  return response;
+}
+
+/**
+ * Where the browser must go to end the CLOUDFLARE ACCESS session, not just the
+ * app session. Sign-out is incomplete without it: Access keeps its own
+ * `CF_AppSession` cookie, so a 3-second cart hold would walk straight back into
+ * the workspace with no OTP at all — which defeats the gate on a shared device.
+ *
+ * The team domain lives only on the server, so the client asks rather than
+ * hardcoding it. `url: null` means the gate is off (local development), where
+ * there is no Access session to end and the caller falls back to the Mall.
+ */
+function accessLogoutUrl(env: Env, mallOrigin: string) {
+  if (env.CF_ACCESS_SSO !== 'true' || !env.CF_ACCESS_TEAM_DOMAIN) return null;
+  const team = env.CF_ACCESS_TEAM_DOMAIN.replace(/\/+$/, '');
+  const response = json({ url: `${team}/cdn-cgi/access/logout?returnTo=${encodeURIComponent(mallOrigin)}` });
+  response.headers.set('cache-control', 'no-store');
   return response;
 }
 
@@ -1225,6 +1289,8 @@ export default {
       if (request.method === 'GET' && url.pathname === '/api/auth/session') return await authSession(request, env);
       if (request.method === 'POST' && url.pathname === '/api/auth/step-up') return await authStepUp(request, env);
       if (request.method === 'POST' && url.pathname === '/api/auth/logout') return await authLogout(request, env);
+      if (request.method === 'POST' && url.pathname === '/api/auth/lock') return await authLock(request, env);
+      if (request.method === 'GET' && url.pathname === '/api/auth/access-logout-url') return accessLogoutUrl(env, url.origin) || json({ url: null });
       if (request.method === 'GET' && url.pathname === '/api/auth/users') return await authUsers(request, env);
       if (request.method === 'PUT' && url.pathname === '/api/auth/users') return await upsertAuthUser(request, env);
       if (request.method === 'DELETE' && url.pathname.startsWith('/api/auth/users/')) return await deleteAuthUser(request, env, decodeURIComponent(url.pathname.slice('/api/auth/users/'.length)));
