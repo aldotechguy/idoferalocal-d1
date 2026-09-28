@@ -73,9 +73,17 @@ MALL_HONOR_POS_PROMOS = "false"
 CF_ACCESS_SSO = "true"
 CF_ACCESS_TEAM_DOMAIN = "https://long-scene-5c20.cloudflareaccess.com"
 # Every audience that may appear in a verified token: the per-host Access
-# applications harvested from their IdP redirects (7a36… = idomall.olz.workers.dev,
-# e4a7… = idofera.de5.net) plus the dashboard tag read during rollout.
-CF_ACCESS_AUD = "7a36c57c088b4fb3b04028c8791f8225ce2503b127fb5d16acdd9e575dfe6d86,e4a7f92125d7ad9f38cd75b407d8454a690df2ee78baa269c52a1015eb5c2eb37,7b38e6e9-f2e2-4881-9435-72e048d14733"
+# applications harvested from their IdP redirects. The `kid` in an
+# `.../cdn-cgi/access/login/<host>?kid=<AUD>` redirect IS that application's
+# Audience tag, so it is the authoritative value for each host — a stale tag
+# here means Access authenticates the person and the Worker then rejects the
+# JWT, bouncing the browser back to the Mall:
+#   7a36c57c… = idomall.olz.workers.dev
+#   10a45885… = idofera.de5.net      (custom domain)
+#   111e3b49… = idomall-preview.olz.workers.dev
+#   7b38e6e9… = dashboard tag read during rollout
+# Re-read them with: npx tsx scripts/verify-access-apps.ts
+CF_ACCESS_AUD = "7a36c57c088b4fb3b04028c8791f8225ce2503b127fb5d16acdd9e575dfe6d86,10a45885f99683e4ae3e9e67fb185dff678dbc60c275f8fee581a0328f4728c7,111e3b4964f8cbaa522e929ad76bbc1aab2559ac81b2237b053b640c5e8025f0,7b38e6e9-f2e2-4881-9435-72e048d14733"
 CF_ACCESS_SUPER_ADMIN_GROUP = "5ca9257d32c94d8eb600e1e7677131ab"
 CF_ACCESS_STEP_UP_SECONDS = "600"
 # Non-sensitive Mall config. Update MALL_PICKUP_ADDRESS and MALL_PICKUP_HOURS
@@ -132,10 +140,17 @@ MALL_HONOR_POS_PROMOS = "false"
 MALL_CHECKOUT_ENABLED = "true"
 # Cloudflare Access staff gate (docs/staff-access.md). The preview is covered by
 # the same Access applications as the live Worker, so a preview deployment is
-# never an unguarded copy of the staff workspace. Empty = gate disabled here too.
-CF_ACCESS_SSO = "false"
-CF_ACCESS_TEAM_DOMAIN = ""
-CF_ACCESS_AUD = ""
+# never an unguarded copy of the staff workspace. Access already sits in front of
+# this host, so the gate must be CONFIGURED here too: leaving CF_ACCESS_SSO
+# "false" (or CF_ACCESS_AUD empty) made /api/auth/session un-mintable, and every
+# completed OTP bounced the browser straight back to the Mall.
+# The host-specific Audience tag for idomall-preview.olz.workers.dev is its
+# Access login redirect's `kid` (see [env.mall.vars] above for the full list).
+CF_ACCESS_SSO = "true"
+CF_ACCESS_TEAM_DOMAIN = "https://long-scene-5c20.cloudflareaccess.com"
+CF_ACCESS_AUD = "7a36c57c088b4fb3b04028c8791f8225ce2503b127fb5d16acdd9e575dfe6d86,10a45885f99683e4ae3e9e67fb185dff678dbc60c275f8fee581a0328f4728c7,111e3b4964f8cbaa522e929ad76bbc1aab2559ac81b2237b053b640c5e8025f0,7b38e6e9-f2e2-4881-9435-72e048d14733"
+# The group leg is intentionally left off in preview: the disposable database has
+# its own roster, and a group mismatch there must not look like a broken gate.
 CF_ACCESS_SUPER_ADMIN_GROUP = ""
 CF_ACCESS_STEP_UP_SECONDS = "600"
 MALL_PICKUP_ADDRESS = "Preview pickup (disposable)"

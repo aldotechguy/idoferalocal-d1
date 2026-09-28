@@ -131,6 +131,43 @@ Local `.env` mirrors the same names for `npm run dev`. Cloudflare secrets are
 still set with `npx wrangler secret put --env mall <NAME>`; never pass them on
 the command line (see `docs/mall-operations.md`).
 
+### The stale-AUD failure mode (read this before adding a hostname)
+
+Access mints **one Audience tag per application**, and a hostname moved to a new
+or recreated application silently gets a **new** tag. The Worker verifies
+`aud` against `CF_ACCESS_AUD`, so a stale tag means Access accepts the OTP, hands
+the Worker a valid signed identity, and the Worker **rejects** it — the browser is
+bounced straight back to the Mall with no error shown. It looks exactly like
+"login is broken", which is what made this expensive to find.
+
+The tag is delivered by the edge itself, so it is always discoverable without the
+dashboard: an unauthenticated request to a covered path answers
+
+```
+302 https://<team>.cloudflareaccess.com/cdn-cgi/access/login/<host>?kid=<AUD>
+```
+
+and that `kid` **is** the application's Audience tag. Compare every host against
+the deployed config with:
+
+```
+npm run verify:access-aud      # prints each host's live tag vs. CF_ACCESS_AUD
+```
+
+Two further rules, both locked by `npm run test:access`:
+
+- **Every environment Access fronts must configure the gate.** `idomall-preview`
+  was covered by Access while its deployment ran with `CF_ACCESS_SSO = "false"`
+  and an empty `CF_ACCESS_AUD`, so `/api/auth/session` could never mint a session
+  and every OTP completed into a bounce. A host behind Access with the gate
+  switched off is never a valid configuration.
+- **Add the new hostname's tag in the same change that adds the hostname.**
+  `scripts/verify-access-apps.ts` now also expects `idofera.de5.net`.
+
+When the gate is misconfigured this way, the Worker no longer redirects silently:
+it answers the staff page with a **503** naming the hostname and the Audience tag
+Access is actually minting for it, so the fix is legible from the browser alone.
+
 ### Service tokens for the deployment checks
 
 `npm run verify:mall-preview` and `npm run verify:mall-contract` probe the
@@ -253,6 +290,10 @@ with the audited script before the flag becomes reachable through SSO.
    * Delete-a-user attempt → `STEP_UP_REQUIRED`, then succeeds after the
      password prompt.
    * Access logs show the allow decision with the staff email.
+6. After ANY change to an Access application or a hostname:
+   `npm run verify:access-aud` must PASS for every staff host. A host whose live
+   `kid` is missing from `CF_ACCESS_AUD` completes the OTP and then bounces back
+   to the Mall (see §3, "The stale-AUD failure mode").
 
 ## 10. Known gaps
 

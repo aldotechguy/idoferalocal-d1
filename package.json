@@ -14,6 +14,7 @@
     "test:mall-backend": "tsx --test scripts/mall-backend.test.ts scripts/mall-safety.test.ts",
     "test:access": "tsx --test scripts/access-jwt.test.ts scripts/staff-access.test.ts scripts/staff-privileges.test.ts",
     "verify:access-apps": "tsx scripts/verify-access-apps.ts",
+    "verify:access-aud": "tsx scripts/verify-access-aud.ts",
     "verify:frontend": "npm run lint && npm run audit:frontend && npm run test:frontend",
     "verify:mall": "npm run lint && npm run test:mall-backend",
     "verify:mall-preview": "tsx scripts/mall-preview-check.ts",

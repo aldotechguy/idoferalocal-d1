@@ -475,6 +475,54 @@ async function accessIdentityFor(req: Request) {
   return await verifyAccessToken(String(token || ''), { teamDomain, audience });
 }
 
+/**
+ * Parity with `sites-worker.ts#accessGateMisconfigured`: Access injected its
+ * signed assertion yet this deployment cannot read an identity from it — always
+ * a stale/absent `CF_ACCESS_AUD` for this hostname, or a gate left unconfigured
+ * on a host Access fronts. An anonymous browser never reaches the origin with
+ * the header set, so this is never "no entrance".
+ */
+function accessGateMisconfigured(req: Request) {
+  const header = req.headers['cf-access-jwt-assertion'];
+  const token = Array.isArray(header) ? header[0] : header;
+  if (!token) return false;
+  if (process.env.CF_ACCESS_SSO !== 'true') return true;
+  return !process.env.CF_ACCESS_TEAM_DOMAIN || !process.env.CF_ACCESS_AUD;
+}
+
+/**
+ * Names the Audience tag Access is actually minting (`aud` in the unverified
+ * assertion — used ONLY for this message, never for an auth decision) so the
+ * broken configuration is legible without any dashboard access.
+ */
+function accessGateMisconfiguredPage(req: Request) {
+  const header = req.headers['cf-access-jwt-assertion'];
+  const token = String((Array.isArray(header) ? header[0] : header) || '');
+  let tag = 'unavailable';
+  const payloadSegment = token.split('.')[1];
+  if (payloadSegment) {
+    try {
+      const padded = payloadSegment.replace(/-/g, '+').replace(/_/g, '/');
+      const parsed = JSON.parse(Buffer.from(padded, 'base64').toString('utf8')) as { aud?: unknown };
+      if (typeof parsed.aud === 'string') tag = parsed.aud;
+      else if (Array.isArray(parsed.aud)) tag = parsed.aud.filter((entry: unknown) => typeof entry === 'string').join(', ');
+    } catch { /* the message below is still actionable */ }
+  }
+  const hostname = String(req.headers.host || 'this host');
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>Staff Access is misconfigured</title></head>` +
+    `<body style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:2rem">` +
+    `<main style="max-width:44rem;margin:0 auto">` +
+    `<h1 style="font-size:1.5rem;color:#fbbf24">Cloudflare Access is configured, but this deployment is not</h1>` +
+    `<p>Access authenticated you for <strong>${hostname}</strong>, and then handed the server a signed identity it could not verify. ` +
+    `This is a <strong>deployment configuration</strong> problem — your OTP was accepted; the staff gate for this hostname has not been granted the Audience tag Access uses.</p>` +
+    `<p>Access is minting this Audience tag for <strong>${hostname}</strong>:</p>` +
+    `<pre style="background:#1e293b;padding:.75rem;border-radius:.5rem;overflow-wrap:anywhere;white-space:pre-wrap">${tag}</pre>` +
+    `<p>Add it to <code>CF_ACCESS_AUD</code> (comma-separated), make sure <code>CF_ACCESS_SSO="true"</code> and <code>CF_ACCESS_TEAM_DOMAIN</code> are set, then redeploy.</p>` +
+    `<p style="color:#94a3b8">No shopper is affected: the storefront and checkout are deliberately outside the Access application.</p>` +
+    `</main></body></html>`;
+}
+
 const stepUpRequired = (res: Response) =>
   res.status(403).json({ error: 'Confirm your password to continue.', code: 'STEP_UP_REQUIRED' });
 
@@ -540,6 +588,13 @@ app.use(async (req, res, next) => {
         entrance = (await accessIdentityFor(req)) !== null;
       }
       if (!entrance && !await requireAppUser(req)) {
+        // Parity with sites-worker.ts: Access authenticated the request but this
+        // deployment cannot read the identity (stale/absent CF_ACCESS_AUD, or the
+        // gate unconfigured on a host Access fronts). Reporting it beats the
+        // silent redirect to `/` that made a completed OTP look like a no-op.
+        if (staffPage && accessGateMisconfigured(req)) {
+          return res.status(503).set('Cache-Control', 'no-store').type('html').send(accessGateMisconfiguredPage(req));
+        }
         if (isStaffPage(req.path)) return res.set('Cache-Control', 'no-store').redirect(302, '/');
         if (login) return res.status(401).json({error: 'Staff entrance expired. Return to the Mall and hold the Cart button for 3 seconds to reopen Staff Login.', code: 'STAFF_ENTRANCE_REQUIRED'});
         return res.status(401).json({error: 'Authentication required.'});

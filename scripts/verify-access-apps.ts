@@ -44,7 +44,7 @@ if (!accountId || !apiToken) {
 }
 
 /** Hosts an Access application must cover (docs/staff-access.md §2). */
-const EXPECTED_HOSTS = ['idomall.olz.workers.dev', 'idomall-preview.olz.workers.dev'];
+const EXPECTED_HOSTS = ['idomall.olz.workers.dev', 'idofera.de5.net', 'idomall-preview.olz.workers.dev'];
 
 /** Any dashboard path matching one of these would block a shopper or the sign-in flow. */
 const PUBLIC_SAMPLES = [

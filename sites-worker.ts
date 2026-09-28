@@ -67,7 +67,7 @@ import { bootstrapAdmin } from './src/server/adminBootstrap.js';
 import { handleMallWebhook } from './src/server/mallWebhook.js';
 import type { QueryAll } from './src/server/relationalMapper.js';
 import { isStaffPage, isPrivateApi, issueEntrance, hasEntrance, revokeEntrance, entranceCookie } from './src/server/staffEntrance.js';
-import { readAccessIdentity, type AccessIdentity } from './src/server/accessJwt.js';
+import { readAccessIdentity, ACCESS_JWT_HEADER, type AccessIdentity } from './src/server/accessJwt.js';
 import { staffSuperAdminSession, staffPrivilegeCheck, staffEditorCheck } from './src/server/staffPrivileges.js';
 import { STEP_UP_SECONDS, issueStepUp, hasStepUp, revokeStepUp, revokeStepUpForUser, stepUpCookie } from './src/server/stepUp.js';
 
@@ -405,6 +405,77 @@ function stepUpLifetimeSeconds(env: Env) {
 async function accessIdentityFor(request: Request, env: Env): Promise<AccessIdentity | null> {
   if (!env.CF_ACCESS_TEAM_DOMAIN || !env.CF_ACCESS_AUD) return null;
   return await readAccessIdentity(request, { teamDomain: env.CF_ACCESS_TEAM_DOMAIN, audience: env.CF_ACCESS_AUD });
+}
+
+/**
+ * True when Cloudflare Access clearly authenticated this request (it injected its
+ * signed-assertion header) yet this deployment still cannot read an identity
+ * from it. That combination is always a deployment bug — a stale/absent
+ * `CF_ACCESS_AUD` tag for THIS hostname, or the gate left disabled on an
+ * environment Access still sits in front of — because the only way the header
+ * reaches the Worker is through an Access application that covers the path.
+ *
+ * It never means "anonymous": an unauthenticated browser is redirected by the
+ * edge and never gets here with the header set. Treating it as ordinary
+ * "no entrance" is what silently bounced a completed OTP back to the Mall, so
+ * the gate reports it (see `accessGateMisconfiguredResponse`) instead.
+ */
+function accessGateMisconfigured(request: Request, env: Env) {
+  if (!request.headers.get(ACCESS_JWT_HEADER)) return false;
+  if (env.CF_ACCESS_SSO !== 'true') return true;
+  return !env.CF_ACCESS_TEAM_DOMAIN || !env.CF_ACCESS_AUD;
+}
+
+/**
+ * Reads the `aud` claim out of the unverified Access assertion, purely to NAME
+ * the expected Audience tag in the misconfiguration page above. This value is
+ * NEVER used for an authentication decision — `readAccessIdentity` does that, and
+ * it verifies the signature, issuer, expiry and audience before anything is
+ * trusted. A misleading string here can only produce a misleading error message.
+ */
+function accessAudienceFromAssertion(request: Request): string {
+  const token = request.headers.get(ACCESS_JWT_HEADER) || '';
+  const payloadSegment = token.split('.')[1];
+  if (!payloadSegment) return '';
+  try {
+    const padded = payloadSegment.replace(/-/g, '+').replace(/_/g, '/');
+    const parsed = JSON.parse(atob(padded + '='.repeat((4 - (padded.length % 4)) % 4))) as { aud?: unknown };
+    if (typeof parsed.aud === 'string') return parsed.aud;
+    if (Array.isArray(parsed.aud)) return parsed.aud.filter((entry) => typeof entry === 'string').join(', ');
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The operator-facing answer for the state above. A staff PAGE cannot be served
+ * (the entrance gate is intact and correct — the identity, not the gate, is
+ * misconfigured), so it returns an explicit 503 page naming the hostname and the
+ * Audience tag Access is actually minting for it, plus the exact command to fix
+ * it. That tag is delivered by the edge inside the JWT `aud` claim, which is why
+ * this response — unlike a redirect — makes the broken configuration legible
+ * without any dashboard access.
+ */
+function accessGateMisconfiguredResponse(request: Request) {
+  const hostname = new URL(request.url).hostname;
+  const tag = accessAudienceFromAssertion(request) || 'unavailable';
+  return new Response(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>Staff Access is misconfigured</title></head>` +
+    `<body style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:2rem">` +
+    `<main style="max-width:44rem;margin:0 auto">` +
+    `<h1 style="font-size:1.5rem;color:#fbbf24">Cloudflare Access is configured, but this deployment of the Worker is not</h1>` +
+    `<p>Access authenticated you for <strong>${hostname}</strong>, and then handed the Worker a signed identity it could not verify. ` +
+    `This is a <strong>deployment configuration</strong> problem — your OTP was accepted; the staff gate for this hostname has not been granted the Audience tag Access uses.</p>` +
+    `<p>Access is minting this Audience tag for <strong>${hostname}</strong>:</p>` +
+    `<pre style="background:#1e293b;padding:.75rem;border-radius:.5rem;overflow-wrap:anywhere;white-space:pre-wrap">${tag}</pre>` +
+    `<p>Add it to <code>CF_ACCESS_AUD</code> (comma-separated) in <code>wrangler.toml</code> for whichever environment serves this hostname, ` +
+    `make sure <code>CF_ACCESS_SSO = "true"</code> and <code>CF_ACCESS_TEAM_DOMAIN</code> is set there too, then redeploy that environment.</p>` +
+    `<p style="color:#94a3b8">No shopper is affected: the storefront and checkout are deliberately outside the Access application.</p>` +
+    `</main></body></html>`,
+    { status: 503, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } },
+  );
 }
 
 const stepUpRequired = () => json({ error: 'Confirm your password to continue.', code: 'STEP_UP_REQUIRED' }, 403);
@@ -1090,6 +1161,15 @@ export default {
           entrance = (await accessIdentityFor(request, env)) !== null;
         }
         if (!entrance && !await requireAppUser(request, env)) {
+          // Access authenticated this request but this deployment still cannot
+          // read the identity (stale/absent CF_ACCESS_AUD for this hostname, or
+          // the gate left unconfigured on a host Access fronts). Bouncing to `/`
+          // here is what made a completed OTP look like "nothing happened", so
+          // the misconfiguration is reported explicitly instead of silently
+          // resending the operator through the Mall.
+          if (staffPage && accessGateMisconfigured(request, env)) {
+            return accessGateMisconfiguredResponse(request);
+          }
           if (isStaffPage(url.pathname)) return new Response(null, { status: 302, headers: { location: '/', 'cache-control': 'no-store' } });
           if (login) return json({ error: 'Staff entrance expired. Return to the Mall and hold the Cart button for 3 seconds to reopen Staff Login.', code: 'STAFF_ENTRANCE_REQUIRED' }, 401);
           return json({ error: 'Authentication required.' }, 401);
