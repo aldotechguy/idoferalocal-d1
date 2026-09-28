@@ -52,8 +52,6 @@ export const SwapProductModal: React.FC<SwapProductModalProps> = ({
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
   const [customUnitsInput, setCustomUnitsInput] = useState<number | null>(null);
 
-  if (!isOpen) return null;
-
   const cs = currencySymbol;
   const tenureDays = tenureMonths * 30;
 
@@ -219,6 +217,8 @@ export const SwapProductModal: React.FC<SwapProductModalProps> = ({
       oldRunOut,
     };
   }, [selectedItem, targetProduct, finalUnits]);
+
+  if (!isOpen) return null;
 
   const handleConfirm = () => {
     if (!selectedItem || finalUnits <= 0) return;

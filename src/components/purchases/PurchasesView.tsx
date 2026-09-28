@@ -4,6 +4,7 @@ import {
   Plus,
   CheckCircle,
   Clock,
+  Calendar,
   Search,
   X,
   ShieldCheck,
@@ -88,7 +89,9 @@ export const PurchasesView: React.FC = () => {
   const [editPoForm, setEditPoForm] = useState({
     poNumber: '',
     supplierId: '',
+    orderDate: '',
     expectedDelivery: '',
+    receivedDate: '',
     supplierLogisticsFee: 0,
     localLogisticsFee: 0,
     notes: '',
@@ -98,6 +101,9 @@ export const PurchasesView: React.FC = () => {
   const [selectedSupplierId, setSelectedSupplierId] = useState(suppliers[0]?.id || '');
   const [poItems, setPoItems] = useState<POItemFormState[]>([]);
   const [deliveryFee, setDeliveryFee] = useState<number>(0);
+  const [poOrderDate, setPoOrderDate] = useState<string>(
+    new Date().toISOString().split('T')[0]
+  );
   const [expectedDelivery, setExpectedDelivery] = useState(
     new Date(Date.now() + 86400000 * 5).toISOString().split('T')[0]
   );
@@ -179,6 +185,7 @@ export const PurchasesView: React.FC = () => {
     setSelectedSupplierId(suppliers[0]?.id || '');
     setPoItems([]);
     setDeliveryFee(0);
+    setPoOrderDate(new Date().toISOString().split('T')[0]);
     setExpectedDelivery(new Date(Date.now() + 86400000 * 5).toISOString().split('T')[0]);
     setInitialPaymentStatus('Unpaid');
     setDraftNotes('');
@@ -189,6 +196,7 @@ export const PurchasesView: React.FC = () => {
     setEditingDraftPo(draft);
     setSelectedSupplierId(draft.supplierId || suppliers[0]?.id || '');
     setDeliveryFee(draft.deliveryFee || 0);
+    setPoOrderDate(draft.createdAt ? draft.createdAt.split('T')[0] : new Date().toISOString().split('T')[0]);
     setExpectedDelivery(draft.expectedDelivery || new Date(Date.now() + 86400000 * 5).toISOString().split('T')[0]);
     setDraftNotes(draft.notes || '');
     setPoItems(
@@ -335,6 +343,7 @@ export const PurchasesView: React.FC = () => {
       deliveryFee: validDeliveryFee,
       totalAmount: grandTotal,
       expectedDelivery,
+      createdAt: poOrderDate ? new Date(poOrderDate).toISOString() : editingDraftPo.createdAt,
       notes: draftNotes.trim(),
       updatedAt: new Date().toISOString(),
     };
@@ -401,6 +410,7 @@ export const PurchasesView: React.FC = () => {
       deliveryFee: validDeliveryFee,
       totalAmount: grandTotal,
       expectedDelivery,
+      createdAt: poOrderDate ? new Date(poOrderDate).toISOString() : editingDraftPo.createdAt,
       notes: draftNotes.trim(),
       updatedAt: new Date().toISOString(),
     };
@@ -457,8 +467,9 @@ export const PurchasesView: React.FC = () => {
     const itemsSubtotal = itemsFormatted.reduce((acc, i) => acc + i.total, 0);
     const validDeliveryFee = Math.max(0, deliveryFee || 0);
     const grandTotal = itemsSubtotal + validDeliveryFee;
+    const finalCreatedAt = poOrderDate ? new Date(poOrderDate).toISOString() : new Date().toISOString();
 
-    const newPOData: Omit<PurchaseOrder, 'id' | 'createdAt'> = {
+    const newPOData: Omit<PurchaseOrder, 'id' | 'createdAt'> & { createdAt?: string } = {
       poNumber: poNum,
       supplierId: selectedSupplierId || suppliers[0]?.id || 'sup-gen',
       supplierName: sup?.name || 'Supplier Vendor',
@@ -471,6 +482,7 @@ export const PurchasesView: React.FC = () => {
       isDraft: isDraftMode,
       expectedDelivery,
       createdBy: currentUser?.displayName || 'Purchasing Officer',
+      createdAt: finalCreatedAt,
       inspectionStatus: isDraftMode ? undefined : 'Pending',
       notes: draftNotes.trim() || (isDraftMode ? 'Draft mock purchase order for supplier inquiry & price check' : undefined),
     };
@@ -486,7 +498,7 @@ export const PurchasesView: React.FC = () => {
       const draftObj: PurchaseOrder = {
         ...newPOData,
         id: 'draft-' + Date.now(),
-        createdAt: new Date().toISOString(),
+        createdAt: finalCreatedAt,
       };
 
       setOrderNotePo(draftObj);
@@ -501,7 +513,7 @@ export const PurchasesView: React.FC = () => {
     // Official order prepayment logic
     if (initialPaymentStatus === 'Paid' && grandTotal > 0) {
       addMoneyMovement({
-        date: new Date().toISOString(),
+        date: finalCreatedAt,
         type: 'Supplier Payment',
         subtype: `PO #${poNum}`,
         sourceAccount: initialPaymentSource,
@@ -624,10 +636,18 @@ export const PurchasesView: React.FC = () => {
   const openPurchaseOrderEditor = (po: PurchaseOrder) => {
     if (!isSuperAdmin) return;
     setEditingPo(po);
+    const orderDateStr = po.createdAt ? po.createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
+    const receivedDateStr = po.inspectedAt
+      ? po.inspectedAt.split('T')[0]
+      : (po.receivingHistory && po.receivingHistory.length > 0 && po.receivingHistory[0].receivedAt)
+      ? po.receivingHistory[0].receivedAt.split('T')[0]
+      : '';
     setEditPoForm({
       poNumber: po.poNumber,
       supplierId: po.supplierId,
+      orderDate: orderDateStr,
       expectedDelivery: po.expectedDelivery,
+      receivedDate: receivedDateStr,
       supplierLogisticsFee: po.deliveryFee || 0,
       localLogisticsFee: po.localLogisticsFee || 0,
       notes: po.notes || '',
@@ -650,12 +670,52 @@ export const PurchasesView: React.FC = () => {
       ? 'Partial'
       : 'Unpaid';
 
+    // Calculate backdated createdAt ISO string preserving original time if available
+    let updatedCreatedAt = editingPo.createdAt;
+    if (editPoForm.orderDate) {
+      try {
+        const [y, m, d] = editPoForm.orderDate.split('-').map(Number);
+        const baseDate = editingPo.createdAt ? new Date(editingPo.createdAt) : new Date();
+        const targetDate = new Date(baseDate);
+        targetDate.setFullYear(y, m - 1, d);
+        updatedCreatedAt = targetDate.toISOString();
+      } catch (e) {
+        updatedCreatedAt = new Date(editPoForm.orderDate).toISOString();
+      }
+    }
+
+    // Calculate backdated inspectedAt ISO string if receivedDate is provided/changed
+    let updatedInspectedAt = editingPo.inspectedAt;
+    let updatedReceivingHistory = editingPo.receivingHistory;
+    if (editPoForm.receivedDate) {
+      try {
+        const [y, m, d] = editPoForm.receivedDate.split('-').map(Number);
+        const baseDate = editingPo.inspectedAt ? new Date(editingPo.inspectedAt) : new Date();
+        const targetDate = new Date(baseDate);
+        targetDate.setFullYear(y, m - 1, d);
+        updatedInspectedAt = targetDate.toISOString();
+      } catch (e) {
+        updatedInspectedAt = new Date(editPoForm.receivedDate).toISOString();
+      }
+      if (updatedReceivingHistory && updatedReceivingHistory.length > 0) {
+        updatedReceivingHistory = updatedReceivingHistory.map((entry, idx) => {
+          if (idx === 0) {
+            return { ...entry, receivedAt: updatedInspectedAt! };
+          }
+          return entry;
+        });
+      }
+    }
+
     updatePurchaseOrder(
       editingPo.id,
       {
         poNumber: editPoForm.poNumber.trim() || editingPo.poNumber,
         supplierId: editPoForm.supplierId,
         supplierName: supplier?.name || editingPo.supplierName,
+        createdAt: updatedCreatedAt,
+        inspectedAt: updatedInspectedAt,
+        receivingHistory: updatedReceivingHistory,
         expectedDelivery: editPoForm.expectedDelivery,
         deliveryFee: supplierLogisticsFee,
         localLogisticsFee,
@@ -665,7 +725,7 @@ export const PurchasesView: React.FC = () => {
         notes: editPoForm.notes.trim(),
         updatedAt: new Date().toISOString(),
       },
-      currentUser?.displayName || 'Aidy Mike'
+      currentUser?.displayName || 'Admin'
     );
     setEditingPo(null);
   };
@@ -1232,15 +1292,55 @@ export const PurchasesView: React.FC = () => {
             </div>
 
             <form onSubmit={handleSavePurchaseOrderEdits} className="space-y-5 pt-5 text-xs">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className={`grid grid-cols-1 ${
+                editingPo.deliveryStatus === 'Received' || editingPo.deliveryStatus === 'Partial' || editingPo.inspectedAt || (editingPo.receivingHistory && editingPo.receivingHistory.length > 0)
+                  ? 'sm:grid-cols-2 lg:grid-cols-4'
+                  : 'sm:grid-cols-3'
+              } gap-4`}>
                 <div>
                   <label className="block font-bold mb-1">PO Number</label>
                   <input required value={editPoForm.poNumber} onChange={(event) => setEditPoForm((form) => ({ ...form, poNumber: event.target.value }))} className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 font-mono font-bold" />
                 </div>
                 <div>
+                  <label className="block font-bold mb-1 flex items-center justify-between">
+                    <span className="flex items-center gap-1">
+                      <Calendar className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                      <span>Order Date</span>
+                    </span>
+                    <span className="text-[10px] text-blue-600 dark:text-blue-400 font-normal">Backdate</span>
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={editPoForm.orderDate}
+                    onChange={(event) => setEditPoForm((form) => ({ ...form, orderDate: event.target.value }))}
+                    className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-0.5">PO issuance / effective date.</p>
+                </div>
+                <div>
                   <label className="block font-bold mb-1">Expected Delivery</label>
                   <input type="date" required value={editPoForm.expectedDelivery} onChange={(event) => setEditPoForm((form) => ({ ...form, expectedDelivery: event.target.value }))} className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 font-bold" />
+                  <p className="text-[10px] text-slate-400 mt-0.5">Estimated delivery date.</p>
                 </div>
+                {(editingPo.deliveryStatus === 'Received' || editingPo.deliveryStatus === 'Partial' || editingPo.inspectedAt || (editingPo.receivingHistory && editingPo.receivingHistory.length > 0)) && (
+                  <div>
+                    <label className="block font-bold mb-1 flex items-center justify-between">
+                      <span className="flex items-center gap-1">
+                        <Calendar className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                        <span>Received Date</span>
+                      </span>
+                      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-normal">Backdate</span>
+                    </label>
+                    <input
+                      type="date"
+                      value={editPoForm.receivedDate}
+                      onChange={(event) => setEditPoForm((form) => ({ ...form, receivedDate: event.target.value }))}
+                      className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-0.5">Physical receipt date into warehouse.</p>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -1320,7 +1420,7 @@ export const PurchasesView: React.FC = () => {
             <form onSubmit={(e) => { e.preventDefault(); handleCreatePO(false); }} className="flex-1 flex flex-col min-h-0 space-y-4 text-xs">
               <div className="flex-1 overflow-y-auto space-y-4 pr-1">
               
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block font-bold mb-1 text-slate-700 dark:text-slate-300">Select Vendor Supplier *</label>
                   <select
@@ -1337,6 +1437,24 @@ export const PurchasesView: React.FC = () => {
                 </div>
 
                 <div>
+                  <label className="block font-bold mb-1 text-slate-700 dark:text-slate-300 flex items-center justify-between">
+                    <span className="flex items-center gap-1">
+                      <Calendar className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                      <span>Order Date *</span>
+                    </span>
+                    <span className="text-[10px] text-blue-600 dark:text-blue-400 font-normal">Backdate</span>
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={poOrderDate}
+                    onChange={(e) => setPoOrderDate(e.target.value)}
+                    className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-0.5">PO issuance / effective date.</p>
+                </div>
+
+                <div>
                   <label className="block font-bold mb-1 text-slate-700 dark:text-slate-300">Expected Delivery Date *</label>
                   <input
                     type="date"
@@ -1345,6 +1463,7 @@ export const PurchasesView: React.FC = () => {
                     onChange={(e) => setExpectedDelivery(e.target.value)}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
+                  <p className="text-[10px] text-slate-400 mt-0.5">Estimated arrival date.</p>
                 </div>
               </div>
 

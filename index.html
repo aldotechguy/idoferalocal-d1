@@ -24,6 +24,28 @@
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <script type="module">
+      (async () => {
+        if ('caches' in window) {
+          try {
+            const keys = await caches.keys();
+            for (const key of keys) {
+              if (key !== 'idofera-pos-v3') {
+                await caches.delete(key);
+              }
+            }
+          } catch {}
+        }
+        if ('serviceWorker' in navigator) {
+          try {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            for (const reg of regs) {
+              reg.update().catch(() => {});
+            }
+          } catch {}
+        }
+        await import('/src/main.tsx');
+      })();
+    </script>
   </body>
 </html>

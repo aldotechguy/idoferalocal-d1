@@ -12,6 +12,7 @@ interface InvoiceWorkshopModalProps {
 export const InvoiceWorkshopModal: React.FC<InvoiceWorkshopModalProps> = ({ sale, onClose }) => {
   const { settings } = useApp();
   const [items, setItems] = useState<SaleItem[]>(() => sale.items.map((item) => ({ ...item })));
+  const [deliveryFeeInput, setDeliveryFeeInput] = useState<string>(() => String(sale.deliveryFee || 0));
   const [matchPaidToTotal, setMatchPaidToTotal] = useState(true);
   const [manualPaidAmount, setManualPaidAmount] = useState(() => Math.max(0, sale.paidAmount || sale.totalAmount || 0));
   const [showPreview, setShowPreview] = useState(false);
@@ -33,10 +34,10 @@ export const InvoiceWorkshopModal: React.FC<InvoiceWorkshopModalProps> = ({ sale
     const discount = Math.min(Math.max(0, sale.discount || 0), subtotal);
     const taxableAmount = Math.max(0, subtotal - discount);
     const tax = taxableAmount * (Math.max(0, settings.taxRatePct || 0) / 100);
-    const deliveryFee = Math.max(0, sale.deliveryFee || 0);
+    const deliveryFee = Math.max(0, parseFloat(deliveryFeeInput) || 0);
 
     return { subtotal, discount, tax, deliveryFee, totalAmount: taxableAmount + tax + deliveryFee };
-  }, [items, sale.deliveryFee, sale.discount, settings.taxRatePct]);
+  }, [items, deliveryFeeInput, sale.discount, settings.taxRatePct]);
 
   const paidAmount = matchPaidToTotal ? workshopTotals.totalAmount : manualPaidAmount;
   const hasPaymentShortfall = paidAmount < workshopTotals.totalAmount;
@@ -118,7 +119,39 @@ export const InvoiceWorkshopModal: React.FC<InvoiceWorkshopModalProps> = ({ sale
                 <div className="flex justify-between"><span className="text-slate-500">Subtotal</span><strong>{settings.currencySymbol}{(Number(workshopSale.subtotal) || 0).toFixed(2)}</strong></div>
                 {workshopSale.discount > 0 && <div className="flex justify-between text-rose-600"><span>Original Discount</span><strong>-{settings.currencySymbol}{(Number(workshopSale.discount) || 0).toFixed(2)}</strong></div>}
                 <div className="flex justify-between"><span className="text-slate-500">Tax ({settings.taxRatePct}%)</span><strong>{settings.currencySymbol}{(Number(workshopSale.tax) || 0).toFixed(2)}</strong></div>
-                {!!workshopSale.deliveryFee && <div className="flex justify-between"><span className="text-slate-500">Delivery Fee</span><strong>{settings.currencySymbol}{(Number(workshopSale.deliveryFee) || 0).toFixed(2)}</strong></div>}
+                <div className="flex items-center justify-between py-1 border-t border-slate-200/60 dark:border-slate-800/80">
+                  <span className="text-slate-500 font-semibold">Delivery Fee</span>
+                  <div className="flex items-center gap-1 bg-white dark:bg-slate-950 px-2 py-0.5 rounded-lg border border-slate-200 dark:border-slate-700">
+                    <span className="font-bold text-slate-400">{settings.currencySymbol}</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={deliveryFeeInput}
+                      onChange={(e) => setDeliveryFeeInput(e.target.value)}
+                      className="w-20 text-right font-bold text-xs bg-transparent text-slate-900 dark:text-white focus:outline-none"
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-end gap-1 flex-wrap pb-1">
+                  <button
+                    type="button"
+                    onClick={() => setDeliveryFeeInput('0')}
+                    className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 cursor-pointer"
+                  >
+                    Free (0)
+                  </button>
+                  {[500, 1000, 1500, 2000, 3000].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setDeliveryFeeInput(String(preset))}
+                      className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 cursor-pointer"
+                    >
+                      +{settings.currencySymbol}{preset.toLocaleString()}
+                    </button>
+                  ))}
+                </div>
                 <div className="flex justify-between border-t border-slate-300 dark:border-slate-700 pt-2 text-sm"><span className="font-black">Workshop Total</span><strong>{settings.currencySymbol}{(Number(workshopSale.totalAmount) || 0).toFixed(2)}</strong></div>
                 <div className="pt-3 mt-2 border-t border-dashed border-slate-300 dark:border-slate-700 space-y-2">
                   <label className="flex items-center justify-between gap-3 cursor-pointer">

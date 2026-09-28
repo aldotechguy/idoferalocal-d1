@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
-import { AppProvider } from './context/AppContext';
+import { AppProvider, useApp } from './context/AppContext';
 import { ToastProvider } from './context/ToastContext';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { Header } from './components/common/Header';
@@ -20,6 +20,7 @@ import { PWAInstallBanner } from './components/common/PWAInstallBanner';
 
 const MainAppContent: React.FC = () => {
   const { currentUser, hasPermission } = useAuth();
+  const { pendingRepeatSale } = useApp();
   const [activePage, setActivePage] = useState<string>('dashboard');
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
@@ -29,6 +30,12 @@ const MainAppContent: React.FC = () => {
       return false;
     }
   });
+
+  useEffect(() => {
+    if (pendingRepeatSale && activePage !== 'pos') {
+      setActivePage('pos');
+    }
+  }, [pendingRepeatSale, activePage]);
 
   const handleToggleSidebarCollapse = () => {
     setIsSidebarCollapsed((prev) => {

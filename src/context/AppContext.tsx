@@ -184,7 +184,8 @@ interface AppContextType {
     qtyChange: number,
     type: StockMovement['type'],
     notes: string,
-    performedBy: string
+    performedBy: string,
+    customDate?: string
   ) => void;
 
   // Sales actions
@@ -203,7 +204,8 @@ interface AppContextType {
     orderTakenBy?: string,
     convertedBy?: string,
     customInvoiceNo?: string,
-    paymentBreakdown?: Record<string, number>
+    paymentBreakdown?: Record<string, number>,
+    isExplicitHistorical?: boolean
   ) => Sale;
   generateUniqueInvoiceNo: (salesList?: Sale[], whatsappList?: WhatsAppPreOrder[]) => string;
   holdOrder: (name: string, items: SaleItem[], customerId?: string) => void;
@@ -212,7 +214,18 @@ interface AppContextType {
   deleteHeldOrderItem: (heldOrderId: string, productId: string) => void;
   clearAllHeldOrders: () => void;
   refundSale: (saleId: string, reason: string, performedBy: string) => void;
-  updateSale: (saleId: string, updates: Partial<Sale>, performedBy?: string, isSuperAdminOverride?: boolean) => void;
+  updateSale: (
+    saleId: string,
+    updates: Partial<Sale> & {
+      deliveryAddress?: string;
+      deliveryPhone?: string;
+      courierNotes?: string;
+      deliveryStatus?: DeliveryStatus;
+      isPickupConfirmed?: boolean;
+    },
+    performedBy?: string,
+    isSuperAdminOverride?: boolean
+  ) => void;
   deleteSale: (saleId: string, performedBy?: string) => void;
   reconcileHistoricalDeliveryExpenses: (salesList?: Sale[], expensesList?: Expense[]) => { fixedCount: number };
   purgeHistoricalMoneyMovements: () => { purgedCount: number };
@@ -233,8 +246,8 @@ interface AppContextType {
   deleteSupplier: (id: string) => void;
 
   // Purchase actions
-  addPurchaseOrder: (po: Omit<PurchaseOrder, 'id' | 'createdAt'>) => void;
-  receivePurchaseOrder: (poId: string, performedBy: string) => void;
+  addPurchaseOrder: (po: Omit<PurchaseOrder, 'id' | 'createdAt'> & { createdAt?: string }) => void;
+  receivePurchaseOrder: (poId: string, performedBy: string, receivedDate?: string) => void;
   receiveAndInspectPO: (
     poId: string,
     inspectionData: {
@@ -254,6 +267,7 @@ interface AppContextType {
       generalNotes?: string;
       deliveryFee?: number;
       deliveryFeePaymentMethod?: PaymentMethod;
+      receivedDate?: string;
     }
   ) => void;
   updatePOPayment: (
@@ -269,7 +283,7 @@ interface AppContextType {
   deletePurchaseOrder: (poId: string, performedBy: string) => void;
 
   // Expense actions
-  addExpense: (exp: Omit<Expense, 'id' | 'createdAt'>) => void;
+  addExpense: (exp: Omit<Expense, 'id' | 'createdAt'> & { createdAt?: string }) => void;
   deleteExpense: (id: string) => void;
 
   // WhatsApp Pre-Orders actions
@@ -343,6 +357,11 @@ interface AppContextType {
   // Audit
   logAudit: (action: string, entity: string, entityId: string | undefined, performedBy: string, details: string) => void;
   clearAuditLogs: () => void;
+
+  // Repeat Sale in POS
+  pendingRepeatSale: Sale | null;
+  repeatSaleInPos: (sale: Sale) => void;
+  clearPendingRepeatSale: () => void;
 }
 
 const generateUniqueId = (prefix: string) =>
@@ -941,6 +960,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [isD1Ready, products, customers, suppliers, sales, purchases, expenses, notifications, auditLogs, stockMovements, pricingHistory, settings, heldOrders, whatsAppPreOrders, deliveryOrders, moneyMovements, applyCloudData]);
 
   const { showToast } = useToast();
+  const [pendingRepeatSale, setPendingRepeatSale] = useState<Sale | null>(null);
+
+  const repeatSaleInPos = React.useCallback((saleToRepeat: Sale) => {
+    setPendingRepeatSale(saleToRepeat);
+    showToast('Transaction items and customer loaded into POS', 'success');
+  }, [showToast]);
+
+  const clearPendingRepeatSale = React.useCallback(() => {
+    setPendingRepeatSale(null);
+  }, []);
 
   const pullFromD1 = React.useCallback(async (showNotification = true): Promise<boolean> => {
     try {
@@ -1448,7 +1477,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     qtyChange: number,
     type: StockMovement['type'],
     notes: string,
-    performedBy: string
+    performedBy: string,
+    customDate?: string
   ) => {
     const prod = products.find((p) => p.id === productId);
     if (!prod) return;
@@ -1469,7 +1499,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       referenceNo: `REF-${Math.floor(Math.random() * 89999 + 10000)}`,
       notes,
       performedBy,
-      createdAt: new Date().toISOString(),
+      createdAt: customDate || new Date().toISOString(),
     };
 
     setStockMovements((prev) => [mv, ...prev]);
@@ -1545,11 +1575,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     orderTakenBy?: string,
     convertedBy?: string,
     customInvoiceNo?: string,
-    paymentBreakdown?: Record<string, number>
+    paymentBreakdown?: Record<string, number>,
+    isExplicitHistorical?: boolean
   ): Sale => {
     const subtotal = items.reduce((acc, item) => acc + item.total, 0);
     const totalAmount = Math.max(0, subtotal - discount + tax + (deliveryFee || 0));
-    const isHistorical = !!customCreatedAt || (notes ? notes.includes('Historical') : false);
+    const isHistorical = isExplicitHistorical !== undefined
+      ? isExplicitHistorical
+      : (notes ? (notes.includes('Historical') || notes.includes('Past Sale Entry') || notes.includes('Past Entry')) : false);
     // For Historical Sales only, do not create/generate invoices unless explicitly provided
     const invoiceNo = isHistorical ? (customInvoiceNo || 'N/A') : (customInvoiceNo || generateUniqueInvoiceNo(sales, whatsAppPreOrders));
     const now = customCreatedAt || new Date().toISOString();
@@ -1579,7 +1612,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     // Update inventory for each sold item (Only for standard live sales, not historical past sales, and skip clearance non-inventory items)
-    if (!customCreatedAt && !isHistorical) {
+    if (!isHistorical) {
       items.forEach((item) => {
         if (!item.isClearance && !item.productId.startsWith('clearance-')) {
           adjustStock(item.productId, -item.quantity, 'Outgoing', `POS Sale ${invoiceNo}`, performedBy);
@@ -2244,7 +2277,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateSale = (
     saleId: string,
-    updates: Partial<Sale>,
+    updates: Partial<Sale> & {
+      deliveryAddress?: string;
+      deliveryPhone?: string;
+      courierNotes?: string;
+      deliveryStatus?: DeliveryStatus;
+      isPickupConfirmed?: boolean;
+    },
     performedBy = 'Administrator',
     isSuperAdminOverride = false
   ) => {
@@ -2355,6 +2394,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...matchingDeliveryOrder,
         deliveryFee: newFee,
         customerName: finalCustomerName || matchingDeliveryOrder.customerName,
+        customerPhone: updates.deliveryPhone !== undefined ? updates.deliveryPhone : matchingDeliveryOrder.customerPhone,
+        deliveryAddress: updates.deliveryAddress !== undefined ? updates.deliveryAddress : matchingDeliveryOrder.deliveryAddress,
+        courierNotes: updates.courierNotes !== undefined ? updates.courierNotes : matchingDeliveryOrder.courierNotes,
+        status: updates.deliveryStatus !== undefined ? updates.deliveryStatus : matchingDeliveryOrder.status,
+        isPickupConfirmed: updates.isPickupConfirmed !== undefined ? updates.isPickupConfirmed : matchingDeliveryOrder.isPickupConfirmed,
         items: itemsList.length > 0 ? itemsList : matchingDeliveryOrder.items,
         updatedAt: now,
       };
@@ -2362,7 +2406,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setDeliveryOrders((prev) => prev.map((d) => (d.id === updatedDelivery.id ? updatedDelivery : d)));
       saveDocument('deliveryOrders', updatedDelivery);
       putItem('deliveryOrders', updatedDelivery).catch((e) => console.warn('IndexedDB deliveryOrder put error:', e));
-    } else if (newFee > 0 && !isHistorical) {
+    } else if (newFee > 0) {
       // If sale didn't have a delivery order previously, but now has a delivery fee > 0, auto-create one
       const deliveryNo = `DEL-${Date.now().toString().slice(-6)}`;
       const newDel: DeliveryOrder = {
@@ -2372,12 +2416,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         invoiceNo: updatedSale.invoiceNo,
         customerId: updatedSale.customerId,
         customerName: finalCustomerName || 'Customer',
-        customerPhone: '',
-        deliveryAddress: '',
+        customerPhone: updates.deliveryPhone || '',
+        deliveryAddress: updates.deliveryAddress || '',
+        courierNotes: updates.courierNotes || '',
         items: itemsList,
         deliveryFee: newFee,
-        status: 'Pending Pickup',
-        isPickupConfirmed: false,
+        status: updates.deliveryStatus || 'Pending Pickup',
+        isPickupConfirmed: updates.isPickupConfirmed || false,
         notes: updatedSale.notes || '',
         createdBy: performedBy,
         createdAt: now,
@@ -3185,24 +3230,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Purchases
-  const addPurchaseOrder = (po: Omit<PurchaseOrder, 'id' | 'createdAt'>) => {
+  const addPurchaseOrder = (po: Omit<PurchaseOrder, 'id' | 'createdAt'> & { createdAt?: string }) => {
     const newPO: PurchaseOrder = {
       ...po,
       id: 'po-' + Date.now(),
-      createdAt: new Date().toISOString(),
+      createdAt: po.createdAt || new Date().toISOString(),
     };
     setPurchases((prev) => [newPO, ...prev]);
     saveDocument('purchases', newPO);
 
     if (po.deliveryStatus === 'Received') {
       po.items.forEach((item) => {
-        adjustStock(item.productId, item.quantity, 'Incoming', `Purchase Order ${po.poNumber}`, po.createdBy);
+        adjustStock(item.productId, item.quantity, 'Incoming', `Purchase Order ${po.poNumber}`, po.createdBy, newPO.createdAt);
       });
     }
     showToast({ title: 'Purchase Order Created', message: `PO #${po.poNumber} created successfully.`, type: 'success' });
   };
 
-  const receivePurchaseOrder = (poId: string, performedBy: string) => {
+  const receivePurchaseOrder = (poId: string, performedBy: string, receivedDate?: string) => {
     const po = purchases.find((p) => p.id === poId);
     if (!po) return;
 
@@ -3223,6 +3268,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       inspectionStatus: 'Passed',
       inspectorName: performedBy,
       generalNotes: 'Quick-received delivery into stock',
+      receivedDate,
     });
   };
 
@@ -3247,6 +3293,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       generalNotes?: string;
       deliveryFee?: number;
       deliveryFeePaymentMethod?: PaymentMethod;
+      receivedDate?: string;
     }
   ) => {
     const po = purchases.find((p) => p.id === poId);
@@ -3254,6 +3301,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const grnNumber = po.grnNumber || `GRN-${new Date().getFullYear()}-${Math.floor(Math.random() * 8999 + 1000)}`;
     const now = new Date().toISOString();
+    const finalReceivedAt = inspectionData.receivedDate
+      ? (inspectionData.receivedDate.includes('T') ? inspectionData.receivedDate : new Date(inspectionData.receivedDate).toISOString())
+      : now;
+    const finalReceivedDateStr = finalReceivedAt.split('T')[0];
 
     let totalAcceptedUnits = 0;
     let totalDamagedUnits = 0;
@@ -3301,18 +3352,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
       }
 
-      // Adjust stock for accepted quantity
+      // Adjust stock for accepted quantity with backdated receiving timestamp
       if (inspectItem.acceptedQty > 0) {
         adjustStock(
           item.productId,
           inspectItem.acceptedQty,
           'Incoming',
           `GRN #${grnNumber} PO #${po.poNumber} Inspected (${inspectItem.conditionNotes || 'Accepted'})`,
-          inspectionData.inspectorName
+          inspectionData.inspectorName,
+          finalReceivedAt
         );
       }
 
-      // Record damaged stock movement for audit/accounting visibility
+      // Record damaged stock movement for audit/accounting visibility with backdated timestamp
       if (inspectItem.damagedQty > 0) {
         const mv: StockMovement = {
           id: generateUniqueId('mv'),
@@ -3325,7 +3377,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           referenceNo: po.poNumber,
           notes: `Inspection Damaged/Defective (${inspectItem.damagedQty} units): ${inspectItem.conditionNotes || 'Rejected during PO receiving'}`,
           performedBy: inspectionData.inspectorName,
-          createdAt: now,
+          createdAt: finalReceivedAt,
         };
         setStockMovements((prev) => [mv, ...prev]);
         saveDocument('stockMovements', mv);
@@ -3341,7 +3393,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         receivedQuantity: newReceived,
         acceptedQuantity: newAccepted,
         damagedQuantity: newDamaged,
-        lastInspectedAt: now,
+        lastInspectedAt: finalReceivedAt,
         lastInspectionNotes: inspectItem.conditionNotes,
       };
     });
@@ -3363,7 +3415,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         description: `Local delivery fee charge incurred during stock receiving for PO #${po.poNumber} (${grnNumber}). Supplier: ${po.supplierName}`,
         paidBy: inspectionData.inspectorName || 'Admin',
         paymentMethod: inspectionData.deliveryFeePaymentMethod || 'Cash',
-        date: new Date().toISOString().split('T')[0],
+        date: finalReceivedDateStr,
+        createdAt: finalReceivedAt,
       });
 
       // Calculate gross profit impact on received accepted items
@@ -3397,7 +3450,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const historyEntry: ReceivingHistoryEntry = {
       id: 'grn-' + Date.now(),
       grnNumber,
-      receivedAt: now,
+      receivedAt: finalReceivedAt,
       receivedBy: inspectionData.inspectorName,
       notes: inspectionData.generalNotes,
       deliveryFee: recvDeliveryFee,
@@ -3425,7 +3478,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       deliveryStatus: newDeliveryStatus,
       inspectionStatus: inspectionData.inspectionStatus,
       inspectedBy: inspectionData.inspectorName,
-      inspectedAt: now,
+      inspectedAt: finalReceivedAt,
       inspectionNotes: inspectionData.generalNotes || po.inspectionNotes,
       grnNumber,
       deliveryFee: po.deliveryFee,
@@ -3520,14 +3573,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const po = purchases.find((p) => p.id === poId);
     if (!po) return;
 
+    const baseReceivingHistory = updates.receivingHistory ?? po.receivingHistory ?? [];
     const updatedLocalLogistics = updates.localLogisticsFee ?? po.localLogisticsFee ??
-      (po.receivingHistory || []).reduce((sum, entry) => sum + (entry.deliveryFee || 0), 0);
-    const previousHistoryLogistics = (po.receivingHistory || []).reduce(
+      baseReceivingHistory.reduce((sum, entry) => sum + (entry.deliveryFee || 0), 0);
+    const previousHistoryLogistics = baseReceivingHistory.reduce(
       (sum, entry) => sum + (entry.deliveryFee || 0),
       0
     );
     let remainingHistoryLogistics = updatedLocalLogistics;
-    const cascadedReceivingHistory = (po.receivingHistory || []).map((entry, index, history) => {
+    const cascadedReceivingHistory = baseReceivingHistory.map((entry, index, history) => {
       const isLast = index === history.length - 1;
       const adjustedFee = isLast
         ? remainingHistoryLogistics
@@ -3604,6 +3658,64 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
         saveDocument('expenses', updatedExpense);
         putItem('expenses', updatedExpense).catch((e) => console.warn('IndexedDB expense cascade error:', e));
+        return updatedExpense;
+      }));
+    }
+
+    // Cascade backdated createdAt to linked initial prepayment money movement if date changed
+    if (updates.createdAt && updates.createdAt !== po.createdAt) {
+      setMoneyMovements((prev) => prev.map((movement) => {
+        const isLinkedPrepayment =
+          movement.type === 'Supplier Payment' &&
+          (movement.referenceId === po.id || movement.referenceNo === oldReference || movement.subtype === `PO #${oldReference}`);
+        if (!isLinkedPrepayment) return movement;
+        const updatedMovement: MoneyMovement = {
+          ...movement,
+          date: updates.createdAt!,
+        };
+        saveDocument('moneyMovements', updatedMovement);
+        putItem('moneyMovements', updatedMovement).catch(() => {});
+        return updatedMovement;
+      }));
+    }
+
+    // Cascade backdated inspectedAt / received date to linked stock movements and logistics expenses if date changed
+    if (updates.inspectedAt && updates.inspectedAt !== po.inspectedAt) {
+      const newReceivedDateStr = updates.inspectedAt.split('T')[0];
+      setStockMovements((prev) => prev.map((movement) => {
+        const matchesPO =
+          movement.referenceNo === oldReference ||
+          movement.referenceNo === newReference ||
+          movement.notes?.includes(oldReference) ||
+          movement.notes?.includes(newReference) ||
+          Boolean(po.grnNumber && movement.notes?.includes(po.grnNumber));
+        if (!matchesPO || movement.type !== 'Incoming') return movement;
+        const updatedMovement: StockMovement = {
+          ...movement,
+          createdAt: updates.inspectedAt!,
+        };
+        saveDocument('stockMovements', updatedMovement);
+        putItem('stockMovements', updatedMovement).catch(() => {});
+        return updatedMovement;
+      }));
+
+      // Also cascade date to linked Logistics expense if any
+      setExpenses((prev) => prev.map((expense) => {
+        const matchesPO =
+          expense.category === 'Logistics' &&
+          (expense.title.includes(oldReference) ||
+            expense.title.includes(newReference) ||
+            expense.description?.includes(oldReference) ||
+            expense.description?.includes(newReference) ||
+            Boolean(po.grnNumber && (expense.title.includes(po.grnNumber) || expense.description?.includes(po.grnNumber))));
+        if (!matchesPO) return expense;
+        const updatedExpense: Expense = {
+          ...expense,
+          date: newReceivedDateStr,
+          createdAt: updates.inspectedAt!,
+        };
+        saveDocument('expenses', updatedExpense);
+        putItem('expenses', updatedExpense).catch(() => {});
         return updatedExpense;
       }));
     }
@@ -3718,11 +3830,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Expense Tracking
-  const addExpense = (exp: Omit<Expense, 'id' | 'createdAt'>) => {
+  const addExpense = (exp: Omit<Expense, 'id' | 'createdAt'> & { createdAt?: string }) => {
     const newExp: Expense = {
       ...exp,
       id: 'exp-' + Date.now(),
-      createdAt: new Date().toISOString(),
+      createdAt: exp.createdAt || new Date().toISOString(),
     };
     setExpenses((prev) => [newExp, ...prev]);
     saveDocument('expenses', newExp);
@@ -3733,7 +3845,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const isCash = newExp.paymentMethod === 'Cash';
       const expMM: MoneyMovement = {
         id: generateUniqueId('mm'),
-        date: newExp.date || new Date().toISOString(),
+        date: newExp.createdAt || newExp.date || new Date().toISOString(),
         type: 'Expense Outflow',
         subtype: newExp.category,
         sourceAccount: isCash ? 'Physical Cash' : 'Biz Account',
@@ -3742,7 +3854,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         referenceId: newExp.id,
         performedBy: newExp.paidBy,
         notes: newExp.description || `Expense: ${newExp.title}`,
-        createdAt: new Date().toISOString(),
+        createdAt: newExp.createdAt || new Date().toISOString(),
       };
       setMoneyMovements((prev) => [expMM, ...prev]);
       saveDocument('moneyMovements', expMM);
@@ -4945,6 +5057,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         pullFromD1,
         logAudit,
         clearAuditLogs,
+        pendingRepeatSale,
+        repeatSaleInPos,
+        clearPendingRepeatSale,
       }}
     >
       {children}

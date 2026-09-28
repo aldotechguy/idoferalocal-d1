@@ -1,4 +1,4 @@
-const CACHE_NAME = 'idofera-pos-v2';
+const CACHE_NAME = 'idofera-pos-v3';
 const STATIC_ASSETS = [
   '/manifest.json',
   '/icon.svg',
@@ -10,7 +10,6 @@ const STATIC_ASSETS = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      console.log('[ServiceWorker] Pre-caching App Shell');
       return cache.addAll(STATIC_ASSETS).catch((err) => {
         console.warn('[ServiceWorker] Pre-cache partial failure:', err);
       });
@@ -19,14 +18,13 @@ self.addEventListener('install', (event) => {
   self.skipWaiting();
 });
 
-// Activate event - Clean up old caches
+// Activate event - Clean up old caches immediately
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames.map((cache) => {
           if (cache !== CACHE_NAME) {
-            console.log('[ServiceWorker] Removing old cache:', cache);
             return caches.delete(cache);
           }
         })
@@ -36,13 +34,26 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// Fetch event - Serve from cache/network depending on request type
+// Fetch event - Serve from network/cache depending on request type
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
   // Skip non-GET requests or external extensions
   if (request.method !== 'GET' || !url.protocol.startsWith('http')) {
+    return;
+  }
+
+  // Never cache Vite dev server modules, pre-bundled deps, or HMR scripts
+  if (
+    url.pathname.startsWith('/src/') ||
+    url.pathname.startsWith('/node_modules/') ||
+    url.pathname.startsWith('/@') ||
+    url.pathname.endsWith('.tsx') ||
+    url.pathname.endsWith('.ts') ||
+    url.searchParams.has('v') ||
+    url.searchParams.has('t')
+  ) {
     return;
   }
 
@@ -66,8 +77,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Always check the network for HTML so a new deployment cannot retain an
-  // index page that points at an expired hashed JavaScript bundle.
+  // Always check the network for HTML navigation
   if (request.mode === 'navigate') {
     event.respondWith(
       fetch(request).catch(() => caches.match('/index.html'))
@@ -75,25 +85,21 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Handle Static Assets (Stale-While-Revalidate / Cache First with background revalidation)
+  // Network First with cache fallback for production static assets to prevent version skew
   event.respondWith(
-    caches.match(request).then((cachedResponse) => {
-      const fetchPromise = fetch(request)
-        .then((networkResponse) => {
-          const contentType = networkResponse.headers.get('content-type') || '';
-          const isExecutableAsset = request.destination === 'script' || request.destination === 'style';
-          const validAsset = !isExecutableAsset || !contentType.includes('text/html');
-          if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic' && validAsset) {
-            const responseToCache = networkResponse.clone();
-            caches.open(CACHE_NAME).then((cache) => {
-              cache.put(request, responseToCache);
-            });
-          }
-          return networkResponse;
-        })
-        .catch(() => cachedResponse);
-
-      return cachedResponse || fetchPromise;
-    })
+    fetch(request)
+      .then((networkResponse) => {
+        const contentType = networkResponse.headers.get('content-type') || '';
+        const isExecutableAsset = request.destination === 'script' || request.destination === 'style';
+        const validAsset = !isExecutableAsset || !contentType.includes('text/html');
+        if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic' && validAsset) {
+          const responseToCache = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(request, responseToCache);
+          });
+        }
+        return networkResponse;
+      })
+      .catch(() => caches.match(request))
   );
 });
