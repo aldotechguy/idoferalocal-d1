@@ -5,19 +5,7 @@
   "description": "Offline-first Point of Sale, Inventory & Packaging Management Platform for Idofera Packaging",
   "icons": [
     {
-      "src": "/icon.svg",
-      "type": "image/svg+xml",
-      "sizes": "any",
-      "purpose": "any"
-    },
-    {
-      "src": "/icon-192.png",
-      "type": "image/png",
-      "sizes": "192x192",
-      "purpose": "any"
-    },
-    {
-      "src": "/icon-512.png",
+      "src": "https://idofera.de5.net/images/mall/logo/logo.png",
       "type": "image/png",
       "sizes": "512x512",
       "purpose": "any"
@@ -40,21 +28,21 @@
       "short_name": "New Sale",
       "description": "Open POS cash register for sales",
       "url": "/",
-      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+      "icons": [{ "src": "https://idofera.de5.net/images/mall/logo/logo.png", "sizes": "512x512" }]
     },
     {
       "name": "Inventory & Stock Catalog",
       "short_name": "Stock",
       "description": "View and manage packaging inventory",
       "url": "/?tab=inventory",
-      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+      "icons": [{ "src": "https://idofera.de5.net/images/mall/logo/logo.png", "sizes": "512x512" }]
     },
     {
       "name": "System Settings & Cloud Sync",
       "short_name": "Settings",
       "description": "Access system configuration & sync",
       "url": "/?tab=settings",
-      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+      "icons": [{ "src": "https://idofera.de5.net/images/mall/logo/logo.png", "sizes": "512x512" }]
     }
   ]
 }

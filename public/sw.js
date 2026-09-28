@@ -1,9 +1,7 @@
-const CACHE_NAME = 'idofera-pos-v4';
+const CACHE_NAME = 'idofera-pos-v5';
 const STATIC_ASSETS = [
   '/manifest.json',
-  '/icon.svg',
-  '/icon-192.png',
-  '/icon-512.png'
+  'https://idofera.de5.net/images/mall/logo/logo.png'
 ];
 
 // Install event - Cache core app shell
