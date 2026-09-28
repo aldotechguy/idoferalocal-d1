@@ -730,17 +730,16 @@ export const Header: React.FC<HeaderProps> = ({
 
                     {/* Lock and Sign Out are DIFFERENT actions and used to be one
                         button labelled "Sign Out / Lock Workspace" that only ever
-                        signed out. Lock keeps the session (fast to reopen) and
-                        drops the step-up proof; Sign Out ends both the app AND the
-                        Cloudflare Access session, so the next cart hold needs a
-                        fresh OTP. */}
+                        signed out. Both end the Access session and both return to
+                        the Mall; only Sign Out also destroys the app session, so
+                        coming back after a Lock needs just the OTP. */}
                     <button
                       onClick={() => {
                         setShowUserDropdown(false);
                         void lock();
                       }}
                       className="w-full flex items-center justify-center gap-2 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold rounded-xl text-xs transition-colors border border-slate-200/70 dark:border-slate-700"
-                      title="Keep your session active but require a password for privileged actions"
+                      title="End your Access login and return to the Mall. Your workspace session is kept, so you get straight back in after the next verification."
                     >
                       <Lock className="w-3.5 h-3.5" />
                       <span>Lock Workspace</span>
@@ -787,13 +786,14 @@ export const Header: React.FC<HeaderProps> = ({
         onClose={() => setSelectedSaleForReceipt(null)}
       />
 
-      {/* Sign Out Confirmation. Sign-out is the destructive one: it ends the app
-          session AND the Cloudflare Access session, so the next 3-second cart
-          hold demands a fresh OTP. Lock never needs this prompt. */}
+      {/* Sign Out Confirmation. Both actions end the Access session and return to
+          the Mall; Sign Out is confirmed because it is the one that also destroys
+          the app session, so returning afterwards is a clean start rather than a
+          resume. Lock stays one-tap. */}
       <ConfirmModal
         isOpen={showConfirmSignOut}
         title="Sign Out of the Workspace"
-        message="This ends your session and your Cloudflare Access login. To open the workspace again you will need to hold the Mall's Cart button for 3 seconds and complete a fresh verification. To step away without signing out, use Lock Workspace instead."
+        message="This ends your session and your Cloudflare Access login, and closes your workspace session for good. To open the workspace again you will need to hold the Mall's Cart button for 3 seconds and complete a fresh verification. To step away for a moment without ending your session, use Lock Workspace instead."
         confirmText="Sign Out"
         variant="warning"
         onClose={() => setShowConfirmSignOut(false)}

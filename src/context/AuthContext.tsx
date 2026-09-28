@@ -255,13 +255,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   /**
-   * Lock: an AFK action, NOT a sign-out (docs/staff-access.md).
+   * Lock: step away from the terminal. NOT a sign-out (docs/staff-access.md).
    *
-   * The app session is intentionally left alive, so unlocking needs no password
-   * and no second OTP — but the server-side step-up proof is revoked, so the
-   * unattended terminal cannot change users, roles or passwords without a fresh
-   * password. The operator lands on the staff entrance rather than the storefront,
-   * because the Mall is the door and they have not left the building.
+   * It ends the CLOUDFLARE ACCESS session, and that is the whole point. Access
+   * is the only thing standing between the public Mall and this workspace, and
+   * `authSession` re-mints an app session from any valid Access identity — so a
+   * lock that left Access alone would clear the screen, navigate, and be
+   * instantly logged back in, which is a no-op that looks broken.
+   *
+   * The app session is deliberately KEPT, so when the same operator returns and
+   * completes their OTP they are straight back in the workspace with no password
+   * step; only the sign-out destroys that session. The step-up proof is revoked
+   * either way, so a terminal left unattended cannot change users, roles or
+   * passwords without a fresh password.
    */
   const lock = async (options?: { idle?: boolean }) => {
     const idle = Boolean(options?.idle);
@@ -271,20 +277,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       headers['authorization'] = `Bearer ${token}`;
       headers['x-session-token'] = token;
     }
+    // Read the Access logout URL FIRST. Ending Access is what makes this a lock
+    // rather than a screen wipe, and it must happen even if the step-up call
+    // below fails — so it is resolved before the navigation is committed.
+    const accessUrl = await accessLogoutUrl();
     try {
       await fetch('/api/auth/lock', { method: 'POST', credentials: 'include', headers });
-    } catch { /* Locking is best effort: the local state below still applies. */ }
+    } catch { /* Best effort: the local state and the Access logout below still apply. */ }
     clearLocalSession();
-    showToast({
-      title: 'Workspace Locked',
-      message: idle
-        ? `Locked after ${Math.round(IDLE_LOCK_MS / 60000)} minutes of inactivity. Your session is still active — reopen the workspace when you return.`
-        : 'The workspace is locked. Your session is still active; reopen the workspace when you return.',
-      type: idle ? 'warning' : 'info',
-    });
-    // The staff entrance, not the storefront: signing out is what returns to the
-    // Mall, and a lock is not a sign-out.
-    window.location.replace('/labs');
+    // Straight to the Mall. Lock and sign-out both return to the storefront now;
+    // the difference is that sign-out also destroys the app session, so coming
+    // back after a lock needs only the OTP, while a sign-out starts clean.
+    window.location.replace(accessUrl || '/');
   };
   // The privileged request pauses here while the operator types their password.
   // The resolver lives in a REF: React may double-invoke state updaters in
@@ -447,12 +451,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const { user, entranceAllowed, accessEmail } = await response.json();
         // An Access-confirmed person without a roster account stays on the
         // staff route (the AccessNotice owns that screen, not the storefront).
-        // An idle-expired session must LOCK (stay on the staff entrance), not
-        // dump the operator into the storefront: the Mall is the door, and being
-        // sent shopping mid-shift looks like a crash.
+        // A session the server has stopped accepting (idle expiry) is a real
+        // lock, so route it through `lock()` — which also ends the Access
+        // session. Barely navigating to /labs would NOT work: `authSession`
+        // re-mints from the still-valid Access identity and puts the operator
+        // straight back into the workspace.
         if (active && !user && !entranceAllowed && !accessEmail) {
-          clearLocalSession();
-          window.location.replace('/labs');
+          await lock();
         }
       } catch { /* A transient network error is not a confirmed expired session. */ }
     };

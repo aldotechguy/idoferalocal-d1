@@ -239,19 +239,35 @@ They are separate actions and used to be one button labelled
 
 | | Lock Workspace | Sign Out |
 | --- | --- | --- |
-| App session (`app_sessions`) | **kept** — reopening is immediate, no password, no second OTP | deleted |
-| Step-up proof | **revoked** — an unattended terminal cannot change users, roles or passwords without a fresh password | revoked |
-| Cloudflare Access session | untouched (you are still you) | **ended** |
-| Next cart hold | straight back in | full OTP again |
-| Where you land | `/labs` (the staff entrance) | the Mall, via the team domain's logout |
+| Cloudflare Access session | **ended** | **ended** |
+| App session (`app_sessions`) | **kept** — returning needs only the OTP, no password | **deleted** |
+| Step-up proof | revoked | revoked |
 | Prompt | none — one tap, that is the point of it | confirmation |
+| Where you land | the Mall, via the team domain's logout | the Mall, via the team domain's logout |
 
-Sign-out must reach the team domain, because ending only the app session leaves
-Access holding its own `CF_AppSession`: the next 3-second cart hold would walk
-straight back into the workspace with no OTP at all. The client asks the server
-for that URL via `GET /api/auth/access-logout-url` (the team domain is never
-hardcoded in the client); `{"url":null}` means the gate is off — local
-development — and the client falls back to the Mall.
+Both end the Access session, and that is not an implementation detail — it is
+what makes either action a lock. `authSession` mints an app session from **any**
+valid Access identity (the SSO bootstrap), so while Access still considers the
+browser authenticated, a "locked" workspace is reopened automatically: the client
+clears its state, navigates, and the next `/api/auth/session` hands the session
+straight back. The first version of Lock navigated to `/labs` and did exactly
+that, which read as "Lock does nothing".
+
+The difference between the two is what survives:
+
+* **Lock** keeps the app session, so the same operator returning after their OTP
+  is straight back in the workspace with no password step. Use it to step away
+  from a shared counter.
+* **Sign Out** deletes the app session as well, so returning afterwards is a
+  clean start rather than a resume.
+
+Both return to the Mall, not to `/labs`. Going back to the staff route would
+just hand the browser straight back to the workspace for the reason above.
+
+The client asks the server for the logout URL via
+`GET /api/auth/access-logout-url` (the team domain is never hardcoded in the
+client); `{"url":null}` means the gate is off — local development — and the
+client falls back to the Mall.
 
 ### Idle auto-lock
 
@@ -268,6 +284,12 @@ The server is the authority and enforces this regardless. The client mirrors it
 so the lock is *visible*: after a one-minute warning, it calls the same Lock
 path, so an operator is never left guessing why a save failed. Any pointer, key,
 wheel, touch or focus activity resets both timers.
+
+An idle-expired session that the client discovers on its two-minute revalidation
+also goes through the full Lock — including ending the Access session. A bare
+redirect would be undone by the SSO bootstrap, which re-mints from the still
+valid Access identity, and the session would quietly renew itself instead of
+locking.
 
 ## 6. Auditing
 
