@@ -72,7 +72,7 @@ import { isStaffPage, isPrivateApi, issueEntrance, hasEntrance, revokeEntrance, 
 import { readAccessIdentity, ACCESS_JWT_HEADER, type AccessIdentity } from './src/server/accessJwt.js';
 import { staffSuperAdminSession, staffPrivilegeCheck, staffEditorCheck } from './src/server/staffPrivileges.js';
 import { STEP_UP_SECONDS, issueStepUp, hasStepUp, revokeStepUp, revokeStepUpForUser, stepUpCookie } from './src/server/stepUp.js';
-import { SESSION_COOKIE, sessionExpiry, sessionIdleSeconds, sessionIdleExpired } from './src/server/staffSession.js';
+import { SESSION_COOKIE, sessionExpiry, sessionIdleSeconds, sessionIdleExpired, isMissingIdleColumn } from './src/server/staffSession.js';
 
 /** Rows out of D1 -> the QueryAll shape the shared mapper expects. */
 function makeD1QueryAll(env: Env): QueryAll {
@@ -383,21 +383,39 @@ async function requireAppUser(request: Request, env: Env): Promise<AppUserRow | 
   const tokenHash = await sha256(token);
   const now = Date.now();
   const idleSeconds = sessionIdleSeconds(env);
-  const rows = await env.DB.prepare(
-    'SELECT u.*, s.last_seen_at AS session_last_seen, s.created_at AS session_created FROM app_sessions s JOIN app_users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND u.status = ?',
-  ).bind(tokenHash, now, 'Active').all<AppUserRow & { session_last_seen: number | null; session_created: number | null }>();
-  const user = rows.results?.[0];
+  let user: (AppUserRow & { session_last_seen: number | null; session_created: number | null }) | undefined;
+  try {
+    const rows = await env.DB.prepare(
+      'SELECT u.*, s.last_seen_at AS session_last_seen, s.created_at AS session_created FROM app_sessions s JOIN app_users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND u.status = ?',
+    ).bind(tokenHash, now, 'Active').all<AppUserRow & { session_last_seen: number | null; session_created: number | null }>();
+    user = rows.results?.[0];
+  } catch (error) {
+    // The gate runs before `ensureSchema`, so between a deploy and the first
+    // migration pass the idle column does not exist. Fall back to the
+    // pre-migration shape rather than 500-ing every gated request.
+    if (!isMissingIdleColumn(error)) throw error;
+    const rows = await env.DB.prepare(
+      'SELECT u.*, NULL AS session_last_seen, s.created_at AS session_created FROM app_sessions s JOIN app_users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND u.status = ?',
+    ).bind(tokenHash, now, 'Active').all<AppUserRow & { session_last_seen: number | null; session_created: number | null }>();
+    user = rows.results?.[0];
+  }
   if (!user) return null;
   // An abandoned terminal must stop authorizing private APIs even though the
-  // absolute expiry has not passed (docs/staff-access.md). `last_seen_at = 0`
-  // means the row predates idle tracking, which the ALTER migration documents as
-  // "never seen": treat the mint time as the baseline instead of admitting it.
+  // absolute expiry has not passed (docs/staff-access.md). A null/zero
+  // `last_seen_at` means the row predates idle tracking, so the mint time is the
+  // baseline — never a fresh full window handed to a session nobody has touched.
   const lastSeen = Number(user.session_last_seen || 0) || Number(user.session_created || 0);
   if (lastSeen && sessionIdleExpired(lastSeen, now, idleSeconds)) return null;
   // Touch the row so the next request measures idleness from THIS request. Written
   // on the hot path on purpose: without it every request would compare against the
   // mint time and a genuinely active seven-day session would expire mid-shift.
-  await env.DB.prepare('UPDATE app_sessions SET last_seen_at = ? WHERE token_hash = ?').bind(now, tokenHash).run();
+  try {
+    await env.DB.prepare('UPDATE app_sessions SET last_seen_at = ? WHERE token_hash = ?').bind(now, tokenHash).run();
+  } catch (error) {
+    // Same pre-migration window: the read above already succeeded, so the caller
+    // is authenticated. Failing to record activity must not fail the request.
+    if (!isMissingIdleColumn(error)) throw error;
+  }
   return user;
 }
 

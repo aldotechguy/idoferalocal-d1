@@ -11,7 +11,7 @@ import { isStaffPage, isPrivateApi, issueEntrance, hasEntrance, revokeEntrance, 
 import { verifyAccessToken } from './src/server/accessJwt';
 import { staffSuperAdminSession, staffPrivilegeCheck, staffEditorCheck } from './src/server/staffPrivileges';
 import { STEP_UP_SECONDS, issueStepUp, hasStepUp, revokeStepUp, revokeStepUpForUser, stepUpCookie } from './src/server/stepUp';
-import { SESSION_COOKIE, sessionExpiry, sessionIdleSeconds, sessionIdleExpired } from './src/server/staffSession';
+import { SESSION_COOKIE, sessionExpiry, sessionIdleSeconds, sessionIdleExpired, isMissingIdleColumn } from './src/server/staffSession';
 
 dotenv.config();
 
@@ -422,20 +422,34 @@ async function requireAppUser(req: Request): Promise<any | null> {
   if (!token) return null;
   const tokenHash = sha256(token);
   const now = Date.now();
-  const stmt = db.prepare(`
-    SELECT u.*, s.last_seen_at AS session_last_seen, s.created_at AS session_created FROM app_sessions s
+  const idleSeconds = sessionIdleSeconds(process.env);
+  const select = (projection: string) => db.prepare(`
+    SELECT u.*, ${projection} AS session_last_seen, s.created_at AS session_created FROM app_sessions s
     JOIN app_users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.expires_at > ? AND u.status = ?
-  `);
-  const row = stmt.get(tokenHash, now, "Active") as any;
+  `).get(tokenHash, now, "Active") as any;
+  let row: any;
+  try {
+    row = select("s.last_seen_at");
+  } catch (error: any) {
+    // Parity with sites-worker.ts: the gate runs before the schema migration, so
+    // between a local start and the first pass the idle column can be absent.
+    if (!isMissingIdleColumn(error)) throw error;
+    row = select("NULL");
+  }
   if (!row) return null;
   // Parity with sites-worker.ts: an abandoned terminal stops authorizing private
   // APIs even before the absolute expiry (docs/staff-access.md). A row whose
-  // `last_seen_at` is 0 predates idle tracking, so its mint time is the baseline.
+  // `last_seen_at` is null/0 predates idle tracking, so its mint time is the
+  // baseline rather than a fresh full window.
   const lastSeen = Number(row.session_last_seen || 0) || Number(row.session_created || 0);
-  if (lastSeen && sessionIdleExpired(lastSeen, now, sessionIdleSeconds(process.env))) return null;
+  if (lastSeen && sessionIdleExpired(lastSeen, now, idleSeconds)) return null;
   // Touch the row so the window measures from THIS request, not the mint.
-  db.prepare("UPDATE app_sessions SET last_seen_at = ? WHERE token_hash = ?").run(now, tokenHash);
+  try {
+    db.prepare("UPDATE app_sessions SET last_seen_at = ? WHERE token_hash = ?").run(now, tokenHash);
+  } catch (error: any) {
+    if (!isMissingIdleColumn(error)) throw error;
+  }
   return row;
 }
 

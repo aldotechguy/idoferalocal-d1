@@ -37,3 +37,18 @@ export const sessionExpiry = (now: number) => now + SESSION_SECONDS * 1000;
 /** True when a session idle for this long must stop authorizing. */
 export const sessionIdleExpired = (lastSeenAt: number, now: number, idleSeconds: number) =>
   now - lastSeenAt > idleSeconds * 1000;
+
+/**
+ * True when a query failed only because the `last_seen_at` migration has not
+ * been applied to this database yet.
+ *
+ * `requireAppUser` runs on gated requests BEFORE `ensureSchema` (the gate has to
+ * answer "is this person signed in?" before it knows which route to serve), so
+ * between a deploy and the first migration pass the idle column is genuinely
+ * absent. Treating that as an error would 500 every gated request on a database
+ * that simply has not been touched by the cron yet, so the caller falls back to
+ * the pre-migration shape instead. Same resilience `staffEntrance.hasEntrance`
+ * applies to a missing `staff_entrances` table.
+ */
+export const isMissingIdleColumn = (error: unknown) =>
+  /no such column/i.test(String((error as Error)?.message ?? error));

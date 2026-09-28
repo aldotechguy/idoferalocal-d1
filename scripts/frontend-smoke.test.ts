@@ -811,6 +811,49 @@ const hashOf = (token: string) => crypto.subtle
   .then((buffer) => Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, '0')).join(''));
 
 /**
+ * The gate must answer "is this person signed in?" BEFORE `ensureSchema` can run,
+ * so between a deploy and the first migration pass `app_sessions` has no
+ * `last_seen_at`. That window 500-ing every gated request would lock staff out
+ * entirely, so the read falls back to the pre-migration shape and measures
+ * idleness from the mint time instead.
+ */
+test('a session authenticates before the last_seen_at migration has run', async t => {
+  const f = entranceFixture();
+  t.after(() => f.db.close());
+  // Deliberately the PRE-migration shape: no last_seen_at column.
+  f.db.exec(`CREATE TABLE app_users (id TEXT, status TEXT);
+    CREATE TABLE app_sessions (token_hash TEXT, user_id TEXT, created_at INTEGER, expires_at INTEGER);
+    INSERT INTO app_users VALUES ('staff', 'Active');`);
+  const token = 'pre-migration';
+  const hash = await hashOf(token);
+  const minted = Date.now();
+  f.db.prepare('INSERT INTO app_sessions VALUES (?, ?, ?, ?)').run(hash, 'staff', minted, minted + 3_600_000);
+  // Any statement naming the missing column throws the way D1 does.
+  const DB = {
+    prepare: (sql: string) => ({
+      bind: (...params: any[]) => ({
+        all: async () => {
+          if (sql.includes('last_seen_at')) throw new Error('D1_ERROR: no such column: s.last_seen_at');
+          return { results: await f.query(sql, params) };
+        },
+        run: async () => {
+          if (sql.includes('last_seen_at')) throw new Error('D1_ERROR: no such column: last_seen_at');
+          return f.db.prepare(sql).run(...params);
+        },
+      })
+    })
+  };
+  const env = { DB, ASSETS: { fetch: async () => new Response('staff shell', { headers: { 'content-type': 'text/html' } }) } } as unknown as Parameters<typeof worker.fetch>[1];
+  // It must authenticate, not 500.
+  assert.equal((await worker.fetch(new Request('https://test/labs/reports', { headers: { cookie: `idofera_session=${token}` } }), env)).status, 200);
+  // And a session minted long ago must still be refused, using the mint time.
+  const stale = Date.now() - 3_600_000;
+  f.db.prepare('DELETE FROM app_sessions').run();
+  f.db.prepare('INSERT INTO app_sessions VALUES (?, ?, ?, ?)').run(hash, 'staff', stale, Date.now() + 3_600_000);
+  assert.equal((await worker.fetch(new Request('https://test/labs/reports', { headers: { cookie: `idofera_session=${token}` } }), env)).status, 302);
+});
+
+/**
  * Lock and Sign Out must stay TWO actions in the UI. They were one button
  * labelled "Sign Out / Lock Workspace" that only ever signed out, which quietly
  * promised a feature that did not exist and made a shared-terminal lock
