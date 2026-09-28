@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import {
   ShoppingCart,
   Search,
@@ -22,14 +22,16 @@ import {
   Edit3,
   History,
   Calendar,
+  Clock,
   Truck,
   ChevronDown,
   ChevronUp,
   SlidersHorizontal,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { Product, SaleItem, PaymentMethod, Customer } from '../../types';
+import { Product, SaleItem, PaymentMethod, Customer, Sale } from '../../types';
 import { ReceiptModal } from '../common/ReceiptModal';
+import { EditSaleModal } from '../sales/EditSaleModal';
 import { useAuth } from '../../context/AuthContext';
 import { useInteractions } from '../../context/InteractionContext';
 import { navigateStaff } from '../../hooks/useRoute';
@@ -48,6 +50,8 @@ export const PosView: React.FC = () => {
     deleteHeldOrderItem,
     clearAllHeldOrders,
     settings,
+    pendingRepeatSale,
+    clearPendingRepeatSale,
   } = useApp();
   const { currentUser } = useAuth();
   const { notify, confirm } = useInteractions();
@@ -71,6 +75,7 @@ export const PosView: React.FC = () => {
     'Mobile Transfer': 0,
   });
   const [activeReceiptSale, setActiveReceiptSale] = useState<any | null>(null);
+  const [editingCompletedSale, setEditingCompletedSale] = useState<Sale | null>(null);
   const [showHeldModal, setShowHeldModal] = useState(false);
   const [expandedHeldOrderId, setExpandedHeldOrderId] = useState<string | null>(null);
   const [holdOrderName, setHoldOrderName] = useState('');
@@ -88,6 +93,12 @@ export const PosView: React.FC = () => {
   const [noTax, setNoTax] = useState<boolean>(true);
   const [showMoreSettings, setShowMoreSettings] = useState<boolean>(false);
   const [isCreditSaleMode, setIsCreditSaleMode] = useState<boolean>(false);
+  const [resumedOrderMeta, setResumedOrderMeta] = useState<{
+    id: string;
+    name: string;
+    date: string;
+    useHeldTime: boolean;
+  } | null>(null);
 
   // Clearance Sale (Non-Inventory Item) State in More Settings
   const [isClearanceSaleOpen, setIsClearanceSaleOpen] = useState<boolean>(false);
@@ -96,6 +107,89 @@ export const PosView: React.FC = () => {
   const [clearanceQty, setClearanceQty] = useState<string>('1');
   const [clearanceCostPrice, setClearanceCostPrice] = useState<string>('0');
   const [clearanceDescription, setClearanceDescription] = useState<string>('');
+
+  // Populate POS Cart & Customer when Repeat Transaction is triggered from ReceiptModal
+  useEffect(() => {
+    if (!pendingRepeatSale) return;
+
+    const saleItems = Array.isArray(pendingRepeatSale.items) ? pendingRepeatSale.items : [];
+    const mappedItems: SaleItem[] = saleItems.map((item, idx) => {
+      const isClearance = Boolean(
+        item.isClearance ||
+          item.productId?.startsWith('clearance-') ||
+          item.sku === 'CLEARANCE'
+      );
+
+      const quantity = Math.max(1, Number(item.quantity) || 1);
+
+      if (isClearance) {
+        const unitPrice = Math.max(0, Number(item.unitPrice) || 0);
+        const costPrice = Math.max(0, Number(item.costPrice) || 0);
+        return {
+          ...item,
+          productId: item.productId?.startsWith('clearance-')
+            ? item.productId
+            : `clearance-${Date.now()}-${idx}-${Math.floor(Math.random() * 1000)}`,
+          productName: item.productName || 'Clearance Sale Item',
+          sku: item.sku || 'CLEARANCE',
+          quantity,
+          unitPrice,
+          costPrice,
+          total: quantity * unitPrice,
+          isWholesale: false,
+          useRetailPrice: false,
+          isClearance: true,
+          clearanceDescription: item.clearanceDescription || '',
+        };
+      }
+
+      const match = products.find(
+        (p) =>
+          (item.productId && p.id === item.productId) ||
+          (item.sku && p.sku === item.sku) ||
+          (item.productName && p.name && p.name.toLowerCase() === item.productName.toLowerCase())
+      );
+
+      const unitPrice = Number(item.unitPrice) || (match ? match.retailPrice : 0);
+      const costPrice =
+        item.costPrice !== undefined
+          ? Number(item.costPrice)
+          : match
+          ? match.costPrice
+          : unitPrice * 0.6;
+
+      return {
+        productId: match ? match.id : item.productId || `prod-gen-${Date.now()}-${idx}`,
+        productName: match ? match.name : item.productName,
+        sku: match ? match.sku : item.sku || 'N/A',
+        quantity,
+        unitPrice,
+        costPrice,
+        total: quantity * unitPrice,
+        isWholesale: Boolean(item.isWholesale),
+        useRetailPrice: Boolean(item.useRetailPrice),
+      };
+    });
+
+    setCart(mappedItems);
+
+    const matchedCustomer =
+      customers.find(
+        (c) =>
+          (pendingRepeatSale.customerId && c.id === pendingRepeatSale.customerId) ||
+          (pendingRepeatSale.customerName &&
+            pendingRepeatSale.customerName.toLowerCase() !== 'walk-in customer' &&
+            c.name.trim().toLowerCase() === pendingRepeatSale.customerName.trim().toLowerCase())
+      ) || null;
+
+    setSelectedCustomer(matchedCustomer);
+    setDiscountAmount(0);
+    setActiveReceiptSale(null);
+    setEditingCompletedSale(null);
+    setResumedOrderMeta(null);
+
+    clearPendingRepeatSale();
+  }, [pendingRepeatSale, products, customers, clearPendingRepeatSale]);
 
   const handleAddClearanceItemToCart = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -284,8 +378,8 @@ export const PosView: React.FC = () => {
     const product = isClearanceItem ? null : products.find((p) => p.id === productId);
     if (!product && !isClearanceItem) return;
 
-    setCart((prevCart) =>
-      prevCart
+    setCart((prevCart) => {
+      const next = prevCart
         .map((item) => {
           if (item.productId !== productId) return item;
           const newQty = item.quantity + delta;
@@ -327,8 +421,12 @@ export const PosView: React.FC = () => {
             useRetailPrice: useRP,
           };
         })
-        .filter(Boolean) as SaleItem[]
-    );
+        .filter(Boolean) as SaleItem[];
+      if (next.length === 0) {
+        setResumedOrderMeta(null);
+      }
+      return next;
+    });
   };
 
   const setCartQtyDirect = (productId: string, targetQty: number) => {
@@ -387,7 +485,13 @@ export const PosView: React.FC = () => {
   };
 
   const removeFromCart = (productId: string) => {
-    setCart((prev) => prev.filter((i) => i.productId !== productId));
+    setCart((prev) => {
+      const remaining = prev.filter((i) => i.productId !== productId);
+      if (remaining.length === 0) {
+        setResumedOrderMeta(null);
+      }
+      return remaining;
+    });
   };
 
   const subtotal = cart.reduce((acc, item) => acc + item.total, 0);
@@ -452,12 +556,25 @@ export const PosView: React.FC = () => {
     const isWholesaleOrder = cart.some((i) => i.isWholesale);
 
     let customCreatedAt: string | undefined = undefined;
+    let isHistoricalSale: boolean | undefined = undefined;
+
     if (isBackdateMode && currentUser?.role === 'Administrator' && backdateDate) {
       customCreatedAt = new Date(backdateDate).toISOString();
+      isHistoricalSale = true;
       const formattedDT = new Date(backdateDate).toLocaleString();
       notesToSave = notesToSave
         ? `${notesToSave} | Historical Sale Entry for ${formattedDT}`
         : `Historical Past Sale Entry (Admin) - ${formattedDT}`;
+    } else if (resumedOrderMeta && resumedOrderMeta.useHeldTime) {
+      customCreatedAt = new Date(resumedOrderMeta.date).toISOString();
+      isHistoricalSale = false;
+      const formattedDT = new Date(resumedOrderMeta.date).toLocaleString([], {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      });
+      notesToSave = notesToSave
+        ? `${notesToSave} | Resumed from Held Order "${resumedOrderMeta.name}" (Held at ${formattedDT})`
+        : `Resumed from Held Order "${resumedOrderMeta.name}" (Held at ${formattedDT})`;
     }
 
     const completedSale = processSale(
@@ -475,7 +592,8 @@ export const PosView: React.FC = () => {
         undefined,
         undefined,
         undefined,
-        paymentMethod === 'Split' ? { ...splitAmounts } : undefined
+        paymentMethod === 'Split' ? { ...splitAmounts } : undefined,
+        isHistoricalSale
       );
 
     if (!completedSale?.isHistorical && !isBackdateMode) {
@@ -483,6 +601,7 @@ export const PosView: React.FC = () => {
     }
     setCart([]);
     setSelectedCustomer(null);
+    setResumedOrderMeta(null);
     setIsCreditSaleMode(false);
     setDiscountAmount(0);
     setNoTax(true);
@@ -503,6 +622,7 @@ export const PosView: React.FC = () => {
     holdOrder(name, cart, selectedCustomer?.id);
     setCart([]);
     setSelectedCustomer(null);
+    setResumedOrderMeta(null);
   };
 
   const handleResumeOrder = (held: any) => {
@@ -511,6 +631,12 @@ export const PosView: React.FC = () => {
       const cust = customers.find((c) => c.id === held.customerId);
       if (cust) setSelectedCustomer(cust);
     }
+    setResumedOrderMeta({
+      id: held.id,
+      name: held.name || `Hold #${heldOrders.length + 1}`,
+      date: held.date || new Date().toISOString(),
+      useHeldTime: true,
+    });
     restoreHeldOrder(held.id);
     setShowHeldModal(false);
   };
@@ -775,13 +901,90 @@ export const PosView: React.FC = () => {
 
             {cart.length > 0 && (
               <button
-                onClick={() => setCart([])}
+                onClick={() => {
+                  setCart([]);
+                  setResumedOrderMeta(null);
+                }}
                 className="text-xs font-bold text-rose-600 hover:text-rose-700"
               >
                 Clear
               </button>
             )}
           </div>
+
+          {/* Resumed Held Order Notice & Timestamp Toggle (Option 2) */}
+          {resumedOrderMeta && cart.length > 0 && (
+            <div className="p-3 bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200/90 dark:border-amber-800/80 rounded-2xl space-y-2.5 animate-in fade-in duration-200">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="p-2 bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300 rounded-xl shrink-0">
+                    <Clock className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="font-extrabold text-xs text-amber-900 dark:text-amber-200">
+                        Resumed Held Order:
+                      </span>
+                      <span className="px-1.5 py-0.5 bg-amber-200/80 dark:bg-amber-900/80 text-amber-900 dark:text-amber-200 text-[10px] font-black rounded-md truncate max-w-[150px]">
+                        {resumedOrderMeta.name}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-0.5">
+                      Originally held at:{' '}
+                      <strong className="font-extrabold text-amber-900 dark:text-amber-200">
+                        {new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </strong>{' '}
+                      <span className="text-[10px] text-amber-600 dark:text-amber-500">
+                        ({new Date(resumedOrderMeta.date).toLocaleDateString([], { month: 'short', day: 'numeric' })})
+                      </span>
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setResumedOrderMeta(null)}
+                  className="p-1 text-amber-600 dark:text-amber-400 hover:text-amber-900 dark:hover:text-amber-200 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors shrink-0"
+                  title="Unlink held order reference (checkout will use current time)"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Time Toggle Pills */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-amber-200/70 dark:border-amber-800/70 text-[10px]">
+                <span className="font-bold text-amber-800/80 dark:text-amber-300/80 uppercase tracking-wider text-[9px]">
+                  Invoice Timestamp:
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setResumedOrderMeta((prev) => (prev ? { ...prev, useHeldTime: true } : null))}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg font-bold transition-all ${
+                      resumedOrderMeta.useHeldTime
+                        ? 'bg-amber-600 text-white shadow-xs'
+                        : 'bg-white/80 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700 border border-amber-200 dark:border-amber-800'
+                    }`}
+                  >
+                    <Check className={`w-3 h-3 ${resumedOrderMeta.useHeldTime ? 'opacity-100' : 'opacity-0'}`} />
+                    <span>Held Time ({new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setResumedOrderMeta((prev) => (prev ? { ...prev, useHeldTime: false } : null))}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg font-bold transition-all ${
+                      !resumedOrderMeta.useHeldTime
+                        ? 'bg-amber-600 text-white shadow-xs'
+                        : 'bg-white/80 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700 border border-amber-200 dark:border-amber-800'
+                    }`}
+                  >
+                    <Check className={`w-3 h-3 ${!resumedOrderMeta.useHeldTime ? 'opacity-100' : 'opacity-0'}`} />
+                    <span>Current Checkout Time</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Cart Items List */}
           <div className="flex-1 overflow-y-auto max-h-[260px] divide-y divide-slate-100 dark:divide-slate-800 pr-1">
@@ -1499,6 +1702,21 @@ export const PosView: React.FC = () => {
               </div>
             </div>
 
+            {/* Resumed Order Timestamp Notice */}
+            {resumedOrderMeta && (
+              <div className="flex items-center justify-between text-[11px] px-3 py-2 rounded-xl bg-amber-50/80 dark:bg-amber-950/40 border border-amber-200/70 dark:border-amber-900/50 text-amber-800 dark:text-amber-300 font-medium">
+                <span className="flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                  <span>Invoice Timestamp:</span>
+                </span>
+                <span className="font-extrabold">
+                  {resumedOrderMeta.useHeldTime
+                    ? `Held Time (${new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
+                    : 'Current Checkout Time'}
+                </span>
+              </div>
+            )}
+
             {/* Checkout CTA */}
             <button
               onClick={() => handleCheckout()}
@@ -1575,8 +1793,14 @@ export const PosView: React.FC = () => {
                               {h.items.length} {h.items.length === 1 ? 'item' : 'items'}
                             </span>
                           </div>
-                          <div className="flex items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400">
-                            <span>{new Date(h.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          <div className="flex items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400 flex-wrap">
+                            <span className="flex items-center gap-1 font-semibold text-amber-700 dark:text-amber-400">
+                              <Clock className="w-3 h-3 text-amber-500" />
+                              <span>
+                                {new Date(h.date).toLocaleDateString([], { month: 'short', day: 'numeric' })},{' '}
+                                {new Date(h.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            </span>
                             {cust && (
                               <>
                                 <span>•</span>
@@ -2042,6 +2266,19 @@ export const PosView: React.FC = () => {
         <ReceiptModal
           sale={activeReceiptSale}
           onClose={() => setActiveReceiptSale(null)}
+          onEdit={() => {
+            const saleToEdit = activeReceiptSale;
+            setActiveReceiptSale(null);
+            setEditingCompletedSale(saleToEdit);
+          }}
+        />
+      )}
+
+      {/* Edit Sale Record Modal (Super-Admin) */}
+      {editingCompletedSale && (
+        <EditSaleModal
+          sale={editingCompletedSale}
+          onClose={() => setEditingCompletedSale(null)}
         />
       )}
     </div>

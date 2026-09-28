@@ -6,6 +6,7 @@ import { Sidebar } from '../components/common/Sidebar';
 import { LoginView } from '../components/auth/LoginView';
 import { PWAInstallBanner } from '../components/common/PWAInstallBanner';
 import { navigateStaff, useRoute } from '../hooks/useRoute';
+import { useApp } from '../context/AppContext';
 
 const DashboardView = React.lazy(() => import('../components/dashboard/DashboardView').then((m) => ({ default: m.DashboardView })));
 const PosView = React.lazy(() => import('../components/pos/PosView').then((m) => ({ default: m.PosView })));
@@ -65,6 +66,9 @@ export const StaffApp: React.FC = () => {
   const route = useRoute();
   const activePage = route.surface === 'staff' ? (route.staffPage || 'dashboard') : 'dashboard';
   const setActivePage = React.useCallback((page: string) => navigateStaff(page), []);
+  // "Repeat sale" is raised from a receipt on any page; the cart itself is
+  // populated by PosView, so the workspace has to move to POS first.
+  const { pendingRepeatSale } = useApp();
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     try {
@@ -94,6 +98,12 @@ export const StaffApp: React.FC = () => {
       navigateStaff(route.staffPage || 'dashboard', true);
     }
   }, [activePage, route]);
+
+  React.useEffect(() => {
+    if (pendingRepeatSale && activePage !== 'pos') {
+      navigateStaff('pos');
+    }
+  }, [pendingRepeatSale, activePage]);
 
   if (loading) return <div role="status" className="p-8 text-center">Checking staff access…</div>;
   // An Access-confirmed person without a roster account gets the notice, never

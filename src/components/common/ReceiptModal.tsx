@@ -1,18 +1,23 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Sale } from '../../types';
 import { useApp } from '../../context/AppContext';
-import { Printer, X, Download, CheckCircle2, AlertTriangle, AlertCircle, Phone, MapPin, CreditCard } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
+import { Printer, X, Download, CheckCircle2, AlertTriangle, AlertCircle, Phone, MapPin, CreditCard, Edit3, RotateCcw } from 'lucide-react';
+import { EditSaleModal } from '../sales/EditSaleModal';
 
 interface ReceiptModalProps {
   sale: Sale | null;
   onClose: () => void;
+  onEdit?: () => void;
   omitFooterDetails?: boolean;
   omitDebtStatement?: boolean;
   modalTitle?: string;
 }
 
-export const ReceiptModal: React.FC<ReceiptModalProps> = ({ sale, onClose, omitFooterDetails = false, omitDebtStatement = false, modalTitle = 'Transaction Receipt & Invoice' }) => {
-  const { settings, customers } = useApp();
+export const ReceiptModal: React.FC<ReceiptModalProps> = ({ sale, onClose, onEdit, omitFooterDetails = false, omitDebtStatement = false, modalTitle = 'Transaction Receipt & Invoice' }) => {
+  const { settings, customers, repeatSaleInPos } = useApp();
+  const { isSuperAdmin } = useAuth();
+  const [isEditingInternal, setIsEditingInternal] = useState(false);
 
   const getStaffDisplayName = (rawName?: string) => {
     if (!rawName || typeof rawName !== 'string') return 'Staff';
@@ -196,21 +201,46 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ sale, onClose, omitF
     }
   };
 
+  if (isEditingInternal && sale) {
+    return (
+      <EditSaleModal
+        sale={sale}
+        onClose={() => {
+          setIsEditingInternal(false);
+          onClose();
+        }}
+      />
+    );
+  }
+
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto print:p-0 print:bg-white print:static print-container-root">
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl max-w-md w-full my-auto overflow-hidden flex flex-col max-h-[90vh] print:max-h-none print:shadow-none print:border-none print:rounded-none print:w-full print:max-w-none">
         {/* Modal Header (Hidden on Print) */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 print:hidden">
-          <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400 font-bold text-sm">
-            <CheckCircle2 className="w-5 h-5" />
-            <span>{modalTitle}</span>
+          <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400 font-bold text-sm min-w-0">
+            <CheckCircle2 className="w-5 h-5 shrink-0" />
+            <span className="truncate">{modalTitle}</span>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => {
+                repeatSaleInPos(sale);
+                onClose();
+              }}
+              title="Load all items and customer from this receipt into POS for a new sale"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs shadow-xs transition-all cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Repeat Transaction</span>
+            </button>
+            <button
+              onClick={onClose}
+              className="p-1 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Printable Thermal Receipt Area */}
@@ -421,6 +451,23 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ sale, onClose, omitF
           >
             Close
           </button>
+          {isSuperAdmin && (
+            <button
+              onClick={() => {
+                if (onEdit) {
+                  onClose();
+                  onEdit();
+                } else {
+                  setIsEditingInternal(true);
+                }
+              }}
+              className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-amber-500 hover:bg-amber-600 text-white rounded-xl shadow-xs transition-colors cursor-pointer"
+              title="Edit Transaction Record"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              <span>Edit</span>
+            </button>
+          )}
           <button
             onClick={handlePrint}
             className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 rounded-xl shadow-xs transition-colors cursor-pointer"

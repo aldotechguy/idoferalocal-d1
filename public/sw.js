@@ -8,7 +8,6 @@ const STATIC_ASSETS = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      console.log('[ServiceWorker] Pre-caching App Shell');
       return cache.addAll(STATIC_ASSETS).catch((err) => {
         console.warn('[ServiceWorker] Pre-cache partial failure:', err);
       });
@@ -17,14 +16,13 @@ self.addEventListener('install', (event) => {
   self.skipWaiting();
 });
 
-// Activate event - Clean up old caches
+// Activate event - Clean up old caches immediately
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames.map((cache) => {
           if (cache !== CACHE_NAME) {
-            console.log('[ServiceWorker] Removing old cache:', cache);
             return caches.delete(cache);
           }
         })
@@ -34,7 +32,7 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// Fetch event - Serve from cache/network depending on request type
+// Fetch event - Serve from network/cache depending on request type
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
@@ -51,11 +49,19 @@ self.addEventListener('fetch', (event) => {
 
   // Never intercept Vite's development graph. Caching these versioned modules
   // can pair ReactDOM with a stale React dispatcher and trigger invalid hooks.
+  // The path/extension/query extras cover the raw dev graph beyond the
+  // pre-bundled deps so a stray source module is never served from cache.
   const isDevelopmentHost = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
   const isViteModule = url.pathname.startsWith('/src/')
     || url.pathname.startsWith('/@vite/')
     || url.pathname.startsWith('/@react-refresh')
-    || url.pathname.startsWith('/node_modules/.vite/');
+    || url.pathname.startsWith('/@')
+    || url.pathname.startsWith('/node_modules/')
+    || url.pathname.startsWith('/node_modules/.vite/')
+    || url.pathname.endsWith('.tsx')
+    || url.pathname.endsWith('.ts')
+    || url.searchParams.has('v')
+    || url.searchParams.has('t');
   if (isDevelopmentHost || isViteModule) return;
 
   // Handle API requests with Network First
@@ -78,8 +84,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Always check the network for HTML so a new deployment cannot retain an
-  // index page that points at an expired hashed JavaScript bundle.
+  // Always check the network for HTML navigation
   if (request.mode === 'navigate') {
     event.respondWith(
       fetch(request)

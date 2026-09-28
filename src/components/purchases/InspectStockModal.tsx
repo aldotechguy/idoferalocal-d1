@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, ShieldCheck, AlertTriangle, CheckCircle, PackageCheck, ClipboardCheck, Truck, TrendingUp, AlertCircle } from 'lucide-react';
+import { X, ShieldCheck, AlertTriangle, CheckCircle, PackageCheck, ClipboardCheck, Truck, TrendingUp, AlertCircle, Calendar } from 'lucide-react';
 import { NairaSign } from '../common/NairaSign';
 import { PurchaseOrder, PaymentMethod, PriceAdjustmentItem } from '../../types';
 import { useApp } from '../../context/AppContext';
@@ -44,6 +44,7 @@ export const InspectStockModal: React.FC<InspectStockModalProps> = ({
   const [itemsState, setItemsState] = useState<ItemInspectionState[]>([]);
   const [inspectionStatus, setInspectionStatus] = useState<'Passed' | 'Passed with Exceptions' | 'Failed'>('Passed');
   const [inspectorName, setInspectorName] = useState(currentUserName || 'Admin Inspector');
+  const [receivedDate, setReceivedDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [generalNotes, setGeneralNotes] = useState('');
   const [deliveryFee, setDeliveryFee] = useState<number>(0);
   const [deliveryFeePaymentMethod, setDeliveryFeePaymentMethod] = useState<PaymentMethod>('Cash');
@@ -83,6 +84,7 @@ export const InspectStockModal: React.FC<InspectStockModalProps> = ({
 
       setItemsState(initialItems);
       setInspectorName(currentUserName || 'Admin Inspector');
+      setReceivedDate(new Date().toISOString().split('T')[0]);
       setGeneralNotes('');
       setInspectionStatus('Passed');
       setDeliveryFee(po.deliveryFee || 0);
@@ -202,6 +204,7 @@ export const InspectStockModal: React.FC<InspectStockModalProps> = ({
       generalNotes,
       deliveryFee,
       deliveryFeePaymentMethod,
+      receivedDate,
     });
 
     // Trigger Price Adjustment Recommendation Modal if cost increased or delivery fee impacts profit
@@ -441,7 +444,7 @@ export const InspectStockModal: React.FC<InspectStockModalProps> = ({
           </div>
 
           {/* Quality Assessment & Sign-Off Section */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
               <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
                 Quality Inspection Verdict *
@@ -468,6 +471,24 @@ export const InspectStockModal: React.FC<InspectStockModalProps> = ({
                 onChange={(e) => setInspectorName(e.target.value)}
                 className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-bold text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
               />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5 flex items-center justify-between">
+                <span className="flex items-center gap-1">
+                  <Calendar className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                  <span>Received Date *</span>
+                </span>
+                <span className="text-[10px] text-blue-600 dark:text-blue-400 font-normal">Backdate</span>
+              </label>
+              <input
+                type="date"
+                required
+                value={receivedDate}
+                onChange={(e) => setReceivedDate(e.target.value)}
+                className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-bold text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+              />
+              <p className="text-[10px] text-slate-400 mt-0.5">Physical receipt date into warehouse.</p>
             </div>
           </div>
 

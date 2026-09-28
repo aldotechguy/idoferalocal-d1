@@ -44,11 +44,13 @@ import {
   Phone,
   Mail,
   Award,
+  Truck,
+  MapPin,
 } from 'lucide-react';
 import { NairaSign } from '../common/NairaSign';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
-import { Sale, SaleItem, PaymentMethod, SaleStatus, Customer } from '../../types';
+import { Sale, SaleItem, PaymentMethod, SaleStatus, Customer, DeliveryOrder, DeliveryStatus } from '../../types';
 import { ReceiptModal } from '../common/ReceiptModal';
 import { Pagination } from '../common/Pagination';
 import { InvoiceWorkshopModal } from './InvoiceWorkshopModal';
@@ -67,7 +69,7 @@ const isGuestCustomerName = (name?: string): boolean => {
 };
 
 export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
-  const { sales, products, customers, settings, refundSale, updateSale, deleteSale } = useApp();
+  const { sales, products, customers, deliveryOrders, settings, refundSale, updateSale, deleteSale } = useApp();
   const { currentUser, isSuperAdmin, hasPermission } = useAuth();
   const { notify } = useInteractions();
 
@@ -119,7 +121,14 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
   const [editNotes, setEditNotes] = useState<string>('');
   const [editDiscount, setEditDiscount] = useState<number>(0);
   const [editTax, setEditTax] = useState<number>(0);
-  const [editDeliveryFee, setEditDeliveryFee] = useState<number>(0);
+  const [editDeliveryFee, setEditDeliveryFee] = useState<number | string>(0);
+  const [editDeliveryAddress, setEditDeliveryAddress] = useState<string>('');
+  const [editDeliveryPhone, setEditDeliveryPhone] = useState<string>('');
+  const [editCourierNotes, setEditCourierNotes] = useState<string>('');
+  const [editDeliveryStatus, setEditDeliveryStatus] = useState<DeliveryStatus>('Pending Pickup');
+  const [isPickupConfirmed, setIsPickupConfirmed] = useState<boolean>(false);
+  const [autoKeepFullyPaid, setAutoKeepFullyPaid] = useState<boolean>(true);
+  const [showDeliveryDetails, setShowDeliveryDetails] = useState<boolean>(false);
   const [editPaidAmount, setEditPaidAmount] = useState<number>(0);
   const [selectedAddProductId, setSelectedAddProductId] = useState<string>('');
   const [showEditAddClearance, setShowEditAddClearance] = useState<boolean>(false);
@@ -134,8 +143,23 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
   }, [editingSaleItems]);
 
   const editCalculatedTotal = useMemo(() => {
-    return Math.max(0, editItemsSubtotal - editDiscount + editTax + editDeliveryFee);
+    return Math.max(0, editItemsSubtotal - editDiscount + editTax + (Number(editDeliveryFee) || 0));
   }, [editItemsSubtotal, editDiscount, editTax, editDeliveryFee]);
+
+  const handleDeliveryFeeChange = (val: number | string) => {
+    setEditDeliveryFee(val);
+    const parsedFee = Math.max(0, Number(val) || 0);
+    if (autoKeepFullyPaid) {
+      const newTotal = Math.max(0, editItemsSubtotal - editDiscount + editTax + parsedFee);
+      setEditPaidAmount(newTotal);
+    }
+  };
+
+  const handleAdjustDeliveryFee = (delta: number) => {
+    const current = Math.max(0, Number(editDeliveryFee) || 0);
+    const nextVal = Math.max(0, current + delta);
+    handleDeliveryFeeChange(nextVal);
+  };
 
   const editSanitizedPaid = useMemo(() => {
     return Math.max(0, isNaN(editPaidAmount) ? 0 : editPaidAmount);
@@ -229,7 +253,25 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
     setEditNotes(sale.notes || '');
     setEditDiscount(sale.discount || 0);
     setEditTax(sale.tax || 0);
-    setEditDeliveryFee(sale.deliveryFee || 0);
+
+    const matchingDelivery = deliveryOrders.find(
+      (d) => d.saleId === sale.id || (sale.invoiceNo && d.invoiceNo === sale.invoiceNo)
+    );
+    const matchedCustomer = customers.find((c) => c.id === sale.customerId);
+    const initialFee = sale.deliveryFee !== undefined && sale.deliveryFee > 0
+      ? sale.deliveryFee
+      : (matchingDelivery?.deliveryFee || 0);
+
+    setEditDeliveryFee(initialFee);
+    setEditDeliveryAddress(matchingDelivery?.deliveryAddress || matchedCustomer?.address || '');
+    setEditDeliveryPhone(matchingDelivery?.customerPhone || matchedCustomer?.phone || '');
+    setEditCourierNotes(matchingDelivery?.courierNotes || '');
+    setEditDeliveryStatus(matchingDelivery?.status || 'Pending Pickup');
+    setIsPickupConfirmed(matchingDelivery?.isPickupConfirmed || false);
+    setShowDeliveryDetails(initialFee > 0 || Boolean(matchingDelivery));
+
+    const wasFullyPaid = (sale.paidAmount !== undefined ? sale.paidAmount : (sale.totalAmount || 0)) >= (sale.totalAmount || 0);
+    setAutoKeepFullyPaid(wasFullyPaid);
     setEditPaidAmount(sale.paidAmount !== undefined ? sale.paidAmount : (sale.totalAmount || 0));
     setSelectedAddProductId('');
     setShowEditAddClearance(false);
@@ -243,7 +285,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
     if (!editSaleTarget) return;
 
     const itemsSubtotal = editingSaleItems.reduce((acc, it) => acc + (it.unitPrice * it.quantity), 0);
-    const calculatedTotal = Math.max(0, itemsSubtotal - editDiscount + editTax + editDeliveryFee);
+    const parsedDeliveryFee = Math.max(0, Number(editDeliveryFee) || 0);
+    const calculatedTotal = Math.max(0, itemsSubtotal - editDiscount + editTax + parsedDeliveryFee);
     const sanitizedPaidAmount = Math.max(0, isNaN(editPaidAmount) ? 0 : editPaidAmount);
 
     const finalCustomerId = isCustomGuestMode ? undefined : editCustomerId;
@@ -271,9 +314,14 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
         subtotal: itemsSubtotal,
         discount: editDiscount,
         tax: editTax,
-        deliveryFee: editDeliveryFee,
+        deliveryFee: parsedDeliveryFee,
         totalAmount: calculatedTotal,
         paidAmount: sanitizedPaidAmount,
+        deliveryAddress: editDeliveryAddress.trim() || undefined,
+        deliveryPhone: editDeliveryPhone.trim() || undefined,
+        courierNotes: editCourierNotes.trim() || undefined,
+        deliveryStatus: editDeliveryStatus,
+        isPickupConfirmed: isPickupConfirmed,
       },
       currentUser?.displayName || (isSuperAdmin ? 'Super-Admin' : 'Administrator'),
       isSuperAdmin
@@ -1747,6 +1795,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
         <ReceiptModal
           sale={selectedReceiptSale}
           onClose={() => setSelectedReceiptSale(null)}
+          onEdit={() => handleOpenEditSale(selectedReceiptSale)}
         />
       )}
 
@@ -2678,17 +2727,49 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                 </div>
 
                 <div>
-                  <label className="block text-[10px] font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Delivery Fee ({settings.currencySymbol}):
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[10px] font-bold text-slate-700 dark:text-slate-300">
+                      Delivery Fee ({settings.currencySymbol}):
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowDeliveryDetails(!showDeliveryDetails)}
+                      className="text-[9px] font-bold text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-0.5 cursor-pointer"
+                      title="Toggle delivery address and courier notes"
+                    >
+                      <Truck className="w-3 h-3 inline" />
+                      <span>{showDeliveryDetails ? 'Hide' : 'Details'}</span>
+                    </button>
+                  </div>
                   <input
                     type="number"
                     min="0"
                     step="0.01"
                     value={editDeliveryFee}
-                    onChange={(e) => setEditDeliveryFee(parseFloat(e.target.value) || 0)}
+                    onChange={(e) => handleDeliveryFeeChange(e.target.value)}
                     className="w-full px-2.5 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl text-xs font-bold text-slate-900 dark:text-white"
                   />
+                  {/* Quick Fee Presets */}
+                  <div className="flex items-center gap-1 mt-1 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => handleDeliveryFeeChange(0)}
+                      className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300 transition-colors cursor-pointer"
+                      title="Set delivery fee to 0 (Free)"
+                    >
+                      Free
+                    </button>
+                    {[500, 1000, 1500, 2000, 3000].map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => handleDeliveryFeeChange(preset)}
+                        className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 hover:bg-blue-100 transition-colors cursor-pointer"
+                      >
+                        +{preset >= 1000 ? `${preset / 1000}k` : preset}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 <div>
@@ -2701,7 +2782,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                         type="button"
                         onClick={() => {
                           const sub = editingSaleItems.reduce((acc, it) => acc + it.unitPrice * it.quantity, 0);
-                          const tot = Math.max(0, sub - editDiscount + editTax + editDeliveryFee);
+                          const tot = Math.max(0, sub - editDiscount + editTax + (Number(editDeliveryFee) || 0));
                           setEditPaidAmount(tot);
                         }}
                         className="text-[9px] font-extrabold px-1.5 py-0.5 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 rounded border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 transition-colors cursor-pointer"
@@ -2730,14 +2811,25 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                     }}
                     className="w-full px-2.5 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl text-xs font-bold text-slate-900 dark:text-white"
                   />
+                  <div className="mt-1 flex items-center justify-between">
+                    <label className="flex items-center gap-1.5 cursor-pointer text-[9px] text-slate-600 dark:text-slate-400 font-semibold">
+                      <input
+                        type="checkbox"
+                        checked={autoKeepFullyPaid}
+                        onChange={(e) => setAutoKeepFullyPaid(e.target.checked)}
+                        className="w-3 h-3 rounded text-indigo-600 accent-indigo-600 cursor-pointer"
+                      />
+                      <span>Auto-sync with total</span>
+                    </label>
+                  </div>
                   {(() => {
                     const sub = editingSaleItems.reduce((acc, it) => acc + it.unitPrice * it.quantity, 0);
-                    const tot = Math.max(0, sub - editDiscount + editTax + editDeliveryFee);
+                    const tot = Math.max(0, sub - editDiscount + editTax + (Number(editDeliveryFee) || 0));
                     const unpaid = Math.max(0, tot - editPaidAmount);
                     if (unpaid > 0) {
                       return (
                         <p className="text-[10px] text-amber-600 dark:text-amber-400 font-bold mt-1">
-                          ⚠️ Outstanding Due: {settings.currencySymbol}{(Number(unpaid) || 0).toFixed(2)} (will be attached to {editCustomerName || 'customer'})
+                          ⚠️ Outstanding: {settings.currencySymbol}{(Number(unpaid) || 0).toFixed(2)} (on {editCustomerName || 'customer'})
                         </p>
                       );
                     }
@@ -2748,6 +2840,151 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                     );
                   })()}
                 </div>
+              </div>
+
+              {/* Delivery & Logistics Dispatch Card */}
+              <div className="p-3 bg-blue-50/60 dark:bg-blue-950/20 rounded-2xl border border-blue-200/80 dark:border-blue-900/60 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-xl bg-blue-600 text-white flex items-center justify-center">
+                      <Truck className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-900 dark:text-white">Delivery & Logistics Dispatch</span>
+                        {Number(editDeliveryFee) > 0 ? (
+                          <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300">
+                            Fee: {settings.currencySymbol}{(Number(editDeliveryFee) || 0).toLocaleString()}
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
+                            No Delivery Fee
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                        Adjusting delivery fee synchronizes the customer invoice total, delivery orders, and logistics ledger
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowDeliveryDetails(!showDeliveryDetails)}
+                    className="text-[11px] font-bold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer flex items-center gap-1"
+                  >
+                    {showDeliveryDetails ? 'Collapse Details' : 'Edit Dispatch Details'}
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showDeliveryDetails ? 'rotate-180' : ''}`} />
+                  </button>
+                </div>
+
+                {showDeliveryDetails && (
+                  <div className="pt-2 border-t border-blue-200/60 dark:border-blue-900/40 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[10px] font-bold text-slate-700 dark:text-slate-300">
+                          Destination Address:
+                        </label>
+                        {editCustomerId && customers.find((c) => c.id === editCustomerId)?.address && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const c = customers.find((cust) => cust.id === editCustomerId);
+                              if (c?.address) setEditDeliveryAddress(c.address);
+                            }}
+                            className="text-[9px] font-bold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                          >
+                            Use Customer Address
+                          </button>
+                        )}
+                      </div>
+                      <div className="relative">
+                        <MapPin className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                        <input
+                          type="text"
+                          placeholder="e.g. 14 Admiralty Way, Lekki Phase 1, Lagos"
+                          value={editDeliveryAddress}
+                          onChange={(e) => setEditDeliveryAddress(e.target.value)}
+                          className="w-full pl-8 pr-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl text-xs text-slate-900 dark:text-white"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[10px] font-bold text-slate-700 dark:text-slate-300">
+                          Contact Phone for Delivery:
+                        </label>
+                        {editCustomerId && customers.find((c) => c.id === editCustomerId)?.phone && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const c = customers.find((cust) => cust.id === editCustomerId);
+                              if (c?.phone) setEditDeliveryPhone(c.phone);
+                            }}
+                            className="text-[9px] font-bold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                          >
+                            Use Customer Phone
+                          </button>
+                        )}
+                      </div>
+                      <div className="relative">
+                        <Phone className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                        <input
+                          type="text"
+                          placeholder="e.g. +234 801 234 5678"
+                          value={editDeliveryPhone}
+                          onChange={(e) => setEditDeliveryPhone(e.target.value)}
+                          className="w-full pl-8 pr-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl text-xs text-slate-900 dark:text-white"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        Delivery Status:
+                      </label>
+                      <select
+                        value={editDeliveryStatus}
+                        onChange={(e) => setEditDeliveryStatus(e.target.value as DeliveryStatus)}
+                        className="w-full px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl text-xs font-semibold text-slate-900 dark:text-white"
+                      >
+                        <option value="Pending Pickup">Pending Pickup</option>
+                        <option value="Picked Up">Picked Up</option>
+                        <option value="Out for Delivery">Out for Delivery</option>
+                        <option value="Delivered">Delivered</option>
+                        <option value="Cancelled">Cancelled</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        Courier / Rider Notes:
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Assigned to Rider Ahmed (08099887766)"
+                        value={editCourierNotes}
+                        onChange={(e) => setEditCourierNotes(e.target.value)}
+                        className="w-full px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl text-xs text-slate-900 dark:text-white"
+                      />
+                    </div>
+
+                    <div className="sm:col-span-2 pt-1">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={isPickupConfirmed}
+                          onChange={(e) => setIsPickupConfirmed(e.target.checked)}
+                          className="w-4 h-4 rounded text-blue-600 accent-blue-600 focus:ring-blue-500"
+                        />
+                        <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                          Confirm Pickup (marks courier pickup confirmed and triggers logistics ledger expense)
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
