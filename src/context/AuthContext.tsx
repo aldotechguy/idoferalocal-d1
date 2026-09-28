@@ -58,13 +58,13 @@ interface AuthContextType {
   loginWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
   /**
-   * Lock the workspace without signing out (docs/staff-access.md). Keeps the app
-   * session so unlocking is immediate, revokes the step-up proof so an
-   * unattended terminal cannot perform privileged actions, and returns to the
-   * staff entrance. `idle: true` marks the automatic idle lock, which explains
-   * itself in the toast instead of looking like an operator action.
+   * Lock the workspace without signing out (docs/staff-access.md). A SCREEN lock:
+   * it clears this browser's session state and returns to the Mall, changing
+   * nothing server-side. Both the app session and the Cloudflare Access session
+   * survive, so the same operator returns with no OTP — which also means it does
+   * NOT secure a shared terminal. Use Sign Out for that.
    */
-  lock: (options?: { idle?: boolean }) => Promise<void>;
+  lock: () => Promise<void>;
   hasPermission: (requiredRoles: UserRole[]) => boolean;
 }
 
@@ -78,14 +78,16 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const SESSION_RECHECK_MS = 120000;
 
 /**
- * Idle auto-lock. Mirrors `CF_SESSION_IDLE_SECONDS` on the server (30 minutes,
+ * Idle auto-sign-out. Mirrors `CF_SESSION_IDLE_SECONDS` on the server (30 minutes,
  * `src/server/staffSession.ts`): the server is the authority and stops
  * authorizing private APIs at this boundary regardless, so this timer exists to
- * make the lock EXPLICIT and VISIBLE rather than letting the next API call fail
+ * make the expiry EXPLICIT and VISIBLE rather than letting the next API call fail
  * mysteriously.
  *
- * The warning fires first so nobody loses an in-progress form without notice;
- * any real activity (pointer, key, focus, scroll) resets both timers.
+ * Unlike the manual screen lock, idle ENDS the Access session: nobody announced
+ * they were leaving, so a quiet terminal is treated as an abandoned one. The
+ * warning fires first so nobody loses an in-progress form without notice; any
+ * real activity (pointer, key, focus, scroll) resets both timers.
  */
 export const IDLE_LOCK_MS = 30 * 60 * 1000;
 export const IDLE_WARNING_MS = 60 * 1000;
@@ -255,40 +257,54 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   /**
-   * Lock: step away from the terminal. NOT a sign-out (docs/staff-access.md).
+   * Leave the workspace AND end the Cloudflare Access session, so the Mall's door
+   * asks again. This is the security-boundary exit: after it, the next person at
+   * the terminal cannot reach the workspace without a fresh verification.
    *
-   * It ends the CLOUDFLARE ACCESS session, and that is the whole point. Access
-   * is the only thing standing between the public Mall and this workspace, and
-   * `authSession` re-mints an app session from any valid Access identity — so a
-   * lock that left Access alone would clear the screen, navigate, and be
-   * instantly logged back in, which is a no-op that looks broken.
+   * Ending Access is not optional. `authSession` mints an app session from ANY
+   * valid Access identity (the SSO bootstrap), so as long as Access still
+   * considers this browser authenticated, simply navigating away is undone: the
+   * next `/api/auth/session` hands the session straight back.
    *
-   * The app session is deliberately KEPT, so when the same operator returns and
-   * completes their OTP they are straight back in the workspace with no password
-   * step; only the sign-out destroys that session. The step-up proof is revoked
-   * either way, so a terminal left unattended cannot change users, roles or
-   * passwords without a fresh password.
+   * Used by sign-out and by BOTH idle paths. Manual Lock deliberately does not
+   * come here — see `lock` below.
    */
-  const lock = async (options?: { idle?: boolean }) => {
-    const idle = Boolean(options?.idle);
+  const endAccessAndLeave = async () => {
     const token = localStorage.getItem('idofera_session_token') || sessionStorage.getItem('idofera_session_token');
     const headers: Record<string, string> = {};
     if (token) {
       headers['authorization'] = `Bearer ${token}`;
       headers['x-session-token'] = token;
     }
-    // Read the Access logout URL FIRST. Ending Access is what makes this a lock
-    // rather than a screen wipe, and it must happen even if the step-up call
-    // below fails — so it is resolved before the navigation is committed.
+    // Resolve the logout URL FIRST: it is resolved before the navigation is
+    // committed, so a slow response cannot drop us back into the workspace.
     const accessUrl = await accessLogoutUrl();
     try {
       await fetch('/api/auth/lock', { method: 'POST', credentials: 'include', headers });
-    } catch { /* Best effort: the local state and the Access logout below still apply. */ }
+    } catch { /* Best effort: the Access logout below still applies. */ }
     clearLocalSession();
-    // Straight to the Mall. Lock and sign-out both return to the storefront now;
-    // the difference is that sign-out also destroys the app session, so coming
-    // back after a lock needs only the OTP, while a sign-out starts clean.
     window.location.replace(accessUrl || '/');
+  };
+
+  /**
+   * Lock: a SCREEN lock, deliberately weaker than signing out
+   * (docs/staff-access.md).
+   *
+   * It clears this browser's copy of the session and returns to the Mall, changing
+   * NOTHING server-side: the app session and the Cloudflare Access session both
+   * survive, so the same operator gets straight back into the workspace on the
+   * next 3-second cart hold with no OTP and no password. That is the whole point
+   * — it hides the dashboard from somebody walking past for the price of nothing.
+   *
+   * The trade-off, stated plainly because it matters: this does NOT secure a
+   * shared terminal. The next person at the counter holds the Cart button for
+   * three seconds and is in. Lock is for eyes, not for adversaries — that is
+   * Sign Out's job, and the idle lock escalates to it precisely because nobody
+   * clicked anything before walking away.
+   */
+  const lock = async () => {
+    clearLocalSession();
+    window.location.replace('/');
   };
   // The privileged request pauses here while the operator types their password.
   // The resolver lives in a REF: React may double-invoke state updaters in
@@ -455,9 +471,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // lock, so route it through `lock()` — which also ends the Access
         // session. Barely navigating to /labs would NOT work: `authSession`
         // re-mints from the still-valid Access identity and puts the operator
-        // straight back into the workspace.
+        // straight back into the workspace. Idle therefore escalates to the FULL
+        // exit (end Access), not the screen lock — a session the server has
+        // stopped accepting must not be recoverable without a fresh verification.
         if (active && !user && !entranceAllowed && !accessEmail) {
-          await lock();
+          await endAccessAndLeave();
         }
       } catch { /* A transient network error is not a confirmed expired session. */ }
     };
@@ -477,28 +495,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   /**
-   * Idle auto-lock with a one-minute warning (docs/staff-access.md).
+   * Idle auto-sign-out with a one-minute warning (docs/staff-access.md).
    *
    * Only runs while a workspace is actually open. The server enforces the same
    * 30-minute window independently, so this is the *visible* half: it warns, then
-   * locks, instead of letting the operator discover the expiry from a failed save.
+   * leaves.
+   *
+   * It deliberately escalates to `endAccessAndLeave` rather than calling the
+   * screen `lock`. A manual Lock means "I am coming straight back", and it is
+   * cheap. Idle means nobody said anything and the terminal simply went quiet —
+   * which on a shared counter is indistinguishable from being left open. If idle
+   * only wiped the screen, the very next 3-second cart hold would walk the next
+   * person straight in and the window would be decorative.
    */
   useEffect(() => {
     if (!currentUser) return;
     let warnTimer: number | undefined;
     let lockTimer: number | undefined;
-    // The warning is a single toast; the lock itself is what changes the screen.
+    // The warning is a single toast; the exit itself is what changes the screen.
     const arm = () => {
       window.clearTimeout(warnTimer);
       window.clearTimeout(lockTimer);
       warnTimer = window.setTimeout(() => {
         showToast({
           title: 'Still There?',
-          message: 'The workspace will lock in one minute. Move the mouse or press any key to stay signed in.',
+          message: 'The workspace will sign you out in one minute. Move the mouse or press any key to stay signed in.',
           type: 'warning',
         });
       }, Math.max(IDLE_LOCK_MS - IDLE_WARNING_MS, 0));
-      lockTimer = window.setTimeout(() => { void lock({ idle: true }); }, IDLE_LOCK_MS);
+      lockTimer = window.setTimeout(() => { void endAccessAndLeave(); }, IDLE_LOCK_MS);
     };
     // `capture` so a scroll inside a nested panel still counts as activity, and
     // so the reset happens before any handler can stop propagation.
@@ -964,10 +989,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       headers['authorization'] = `Bearer ${token}`;
       headers['x-session-token'] = token;
     }
-    // Both must be read BEFORE the session is revoked: /api/auth/access-logout-url
-    // is an authenticated-free endpoint, but reading it first keeps the ordering
-    // obvious and lets a failure here still fall back to the Mall.
-    const accessUrl = await accessLogoutUrl();
     // Best effort: if the server cannot confirm the sign-out, this device is
     // still signed out locally (the old code threw and left the session token
     // and the signed-in UI in place, with no way to retry cleanly).
@@ -978,7 +999,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch {
       serverConfirmed = false;
     }
-    clearLocalSession();
     showToast({
       title: 'Signed Out',
       message: serverConfirmed
@@ -986,12 +1006,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         : 'Signed out on this device. The server could not confirm sign-out; it will be revoked when the session expires.',
       type: serverConfirmed ? 'info' : 'warning',
     });
-    // Sign-out is incomplete while Access still holds its own session: a 3-second
-    // cart hold would walk straight back in with no OTP. Ending the Access
-    // session requires a full-page navigation to the team domain, which also
-    // returns the operator to the Mall entrance. Without a gate (local
-    // development) there is nothing to end, so go to the Mall directly.
-    window.location.replace(accessUrl || '/');
+    // Then the same full exit the idle paths take: ending the Access session
+    // requires a full-page navigation to the team domain, which also returns the
+    // operator to the Mall. Without a gate (local development) there is nothing
+    // to end, and it falls back to the Mall.
+    await endAccessAndLeave();
   };
 
   const hasPermission = (requiredRoles: UserRole[]) => {

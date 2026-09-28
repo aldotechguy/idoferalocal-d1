@@ -870,47 +870,83 @@ test('Lock and Sign Out are separate, differently-confirmed actions', () => {
   assert.match(header, /void lock\(\)/);
   assert.match(header, /setShowConfirmSignOut\(true\)/);
   assert.match(header, /isOpen=\{showConfirmSignOut\}/);
-  // The confirmation is honest about what it ends.
-  assert.match(header, /ends your session and your Cloudflare Access login, and closes your workspace session for good/);
+  // The confirmation must be honest about BOTH halves of sign-out, and must point
+  // at Lock as the cheaper alternative.
+  assert.match(header, /ends your session AND your Cloudflare Access login, so nobody else can open the workspace/);
+  assert.match(header, /use Lock Workspace instead/);
+  // Lock must be honest that it does NOT protect the terminal.
+  assert.match(header, /Does NOT protect the terminal from the next person/);
   // Sign-out must be able to reach the team domain, and the team domain is
   // never hardcoded in the client.
   assert.match(header, /isOpen=\{showConfirmSignOut\}[\s\S]*?void logout\(\)/);
 });
 
 /**
- * The idle lock mirrors the server's 30-minute window. Both halves must agree:
- * the server is the authority, and the client exists so the lock is visible
- * rather than surfacing as a mysteriously failed save.
+ * Lock and Sign Out differ in EXACTLY ONE way, and the test asserts that way
+ * precisely because the first implementation got it wrong: both ended the Access
+ * session and both returned to the Mall, so staff had two buttons that did the
+ * same thing. Under Access the app-session difference is invisible anyway, because
+ * `authSession` re-mints a session from any valid Access identity.
+ *
+ * So: Lock is a SCREEN lock (leaves Access alone, zero friction to return) and
+ * Sign Out is the security boundary (ends Access). Idle escalates to the full
+ * exit, because nobody announced they were leaving.
  */
-test('the client idle lock matches the server idle window and warns first', () => {
+test('Lock and Sign Out differ in exactly one way: who ends the Access session', () => {
+  const auth = fs.readFileSync('src/context/AuthContext.tsx', 'utf8');
+  // CRLF-tolerant: the source is checked out with Windows line endings.
+  const body = (name: string) => new RegExp(`const ${name} = async[\\s\\S]*?\\r?\\n  };\\r?\\n`).exec(auth)?.[0] || '';
+  const lock = body('lock');
+  const leave = body('endAccessAndLeave');
+  const logout = body('logout');
+  assert.ok(lock, 'lock must be defined');
+  assert.ok(leave, 'endAccessAndLeave must be defined');
+  assert.ok(logout, 'logout must be defined');
+
+  // Lock: screen only. It must NOT resolve or navigate to the Access logout, and
+  // must not touch the server at all — that is what makes returning free.
+  assert.doesNotMatch(lock, /accessLogoutUrl/, 'lock must leave the Access session alone');
+  assert.doesNotMatch(lock, /fetch\(/, 'lock must change nothing server-side');
+  assert.doesNotMatch(lock, /\/api\/auth\/lock/, 'lock must not revoke anything server-side');
+  assert.match(lock, /clearLocalSession\(\)/, 'lock must clear the local session state');
+  assert.match(lock, /window\.location\.replace\('\/'\)/, 'lock must return to the Mall');
+
+  // Sign-out: ends Access, and reuses the shared full exit.
+  assert.match(leave, /await accessLogoutUrl\(\)/, 'the full exit must resolve the Access logout URL');
+  assert.match(leave, /window\.location\.replace\(accessUrl \|\| '\/'\)/, 'the full exit must leave via Access, else the Mall');
+  assert.match(logout, /await endAccessAndLeave\(\)/, 'sign-out must take the full exit');
+  assert.match(logout, /\/api\/auth\/logout/, 'sign-out must also destroy the app session');
+
+  // Both leave the workspace; neither may return to /labs, or the SSO bootstrap
+  // hands the session straight back.
+  assert.doesNotMatch(lock, /replace\('\/labs'\)/);
+  assert.doesNotMatch(leave, /replace\('\/labs'\)/);
+  // The Access-recovery redirect must survive: when Access redirects the session
+  // probe, navigating is the only way back into the IdP flow.
+  assert.match(auth, /response\.redirected && !response\.url\.startsWith\(window\.location\.origin\)[\s\S]*?window\.location\.replace\('\/labs'\)/);
+});
+
+/**
+ * Idle must escalate to the full exit, not reuse the screen lock. A screen-only
+ * idle would be decorative: the session expires server-side, the client wipes the
+ * screen, and the next 3-second cart hold walks the next person straight back in.
+ */
+test('idle signs out rather than screen-locking, and warns first', () => {
   const auth = fs.readFileSync('src/context/AuthContext.tsx', 'utf8');
   assert.match(auth, /export const IDLE_LOCK_MS = 30 \* 60 \* 1000;/);
   assert.match(auth, /export const IDLE_WARNING_MS = 60 \* 1000;/);
-  assert.match(auth, /lockTimer = window\.setTimeout\(\(\) => \{ void lock\(\{ idle: true \}\); \}, IDLE_LOCK_MS\)/);
-  // The warning precedes the lock, so nobody loses a form without notice.
-  assert.ok(auth.indexOf('IDLE_LOCK_MS - IDLE_WARNING_MS') < auth.indexOf('void lock({ idle: true })'));
+  // Both idle triggers take the full exit.
+  assert.match(auth, /lockTimer = window\.setTimeout\(\(\) => \{ void endAccessAndLeave\(\); \}, IDLE_LOCK_MS\)/);
+  assert.match(auth, /if \(active && !user && !entranceAllowed && !accessEmail\) \{\s*await endAccessAndLeave\(\);\s*\}/);
+  // And neither may call the screen lock.
+  assert.doesNotMatch(auth, /lock\(\{ idle: true \}\)/);
+  // The warning precedes the exit, so nobody loses a form without notice.
+  assert.ok(auth.indexOf('IDLE_LOCK_MS - IDLE_WARNING_MS') < auth.indexOf('void endAccessAndLeave()'));
+  assert.match(auth, /The workspace will sign you out in one minute/);
   // Activity resets both timers.
   for (const event of ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart', 'focus']) {
     assert.ok(auth.includes(`'${event}'`), `idle timers must reset on ${event}`);
   }
-  // Lock and sign-out BOTH go to the Mall. Navigating to /labs instead is what
-  // made Lock a no-op: `authSession` re-mints from the still-valid Access
-  // identity and puts the operator straight back in.
-  // `/labs` still appears once in this file, and must: when Access redirects the
-  // session probe, a bare navigation is the only way to re-enter the IdP flow.
-  // So the assertion is scoped to the lock body rather than the whole module.
-  // CRLF-tolerant: the source is checked out with Windows line endings.
-  const lockBody = /const lock = async[\s\S]*?\r?\n  };\r?\n/.exec(auth)?.[0] || '';
-  assert.ok(lockBody, 'lock must be defined');
-  assert.doesNotMatch(lockBody, /replace\('\/labs'\)/, 'lock must not navigate back to the staff route');
-  assert.match(lockBody, /window\.location\.replace\(accessUrl \|\| '\/'\)/, 'lock must leave via the Access logout, else the Mall');
-  // Lock must end the Access session, or it is only a screen wipe.
-  assert.match(lockBody, /await accessLogoutUrl\(\)/, 'lock must resolve the Access logout URL');
-  assert.match(lockBody, /\/api\/auth\/lock/, 'lock must revoke the step-up proof');
-  // An idle-expired session must go through lock(), not a bare redirect.
-  assert.match(auth, /if \(active && !user && !entranceAllowed && !accessEmail\) \{\s*await lock\(\);\s*\}/);
-  // The Access-recovery redirect must survive.
-  assert.match(auth, /response\.redirected && !response\.url\.startsWith\(window\.location\.origin\)[\s\S]*?window\.location\.replace\('\/labs'\)/);
 });
 
 /**

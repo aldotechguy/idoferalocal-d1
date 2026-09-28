@@ -730,16 +730,17 @@ export const Header: React.FC<HeaderProps> = ({
 
                     {/* Lock and Sign Out are DIFFERENT actions and used to be one
                         button labelled "Sign Out / Lock Workspace" that only ever
-                        signed out. Both end the Access session and both return to
-                        the Mall; only Sign Out also destroys the app session, so
-                        coming back after a Lock needs just the OTP. */}
+                        signed out. Lock is a SCREEN lock: it hides the workspace for
+                        a passer-by at zero cost, and the same operator returns with
+                        no OTP. Sign Out ends the Access session too, so the terminal
+                        is actually secured. */}
                     <button
                       onClick={() => {
                         setShowUserDropdown(false);
                         void lock();
                       }}
                       className="w-full flex items-center justify-center gap-2 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold rounded-xl text-xs transition-colors border border-slate-200/70 dark:border-slate-700"
-                      title="End your Access login and return to the Mall. Your workspace session is kept, so you get straight back in after the next verification."
+                      title="Hide the workspace and return to the Mall. You stay signed in, so you can reopen it instantly. Does NOT protect the terminal from the next person — use Sign Out for that."
                     >
                       <Lock className="w-3.5 h-3.5" />
                       <span>Lock Workspace</span>
@@ -793,7 +794,7 @@ export const Header: React.FC<HeaderProps> = ({
       <ConfirmModal
         isOpen={showConfirmSignOut}
         title="Sign Out of the Workspace"
-        message="This ends your session and your Cloudflare Access login, and closes your workspace session for good. To open the workspace again you will need to hold the Mall's Cart button for 3 seconds and complete a fresh verification. To step away for a moment without ending your session, use Lock Workspace instead."
+        message="This ends your session AND your Cloudflare Access login, so nobody else can open the workspace from this device without a fresh verification. To open it again you will need to hold the Mall's Cart button for 3 seconds and verify once more. To simply hide the workspace while you stay signed in, use Lock Workspace instead."
         confirmText="Sign Out"
         variant="warning"
         onClose={() => setShowConfirmSignOut(false)}

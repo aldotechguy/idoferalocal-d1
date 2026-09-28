@@ -239,30 +239,32 @@ They are separate actions and used to be one button labelled
 
 | | Lock Workspace | Sign Out |
 | --- | --- | --- |
-| Cloudflare Access session | **ended** | **ended** |
-| App session (`app_sessions`) | **kept** — returning needs only the OTP, no password | **deleted** |
-| Step-up proof | revoked | revoked |
-| Prompt | none — one tap, that is the point of it | confirmation |
-| Where you land | the Mall, via the team domain's logout | the Mall, via the team domain's logout |
+| Cloudflare Access session | **kept** | **ended** |
+| App session | **kept** | **deleted** |
+| Return path | 3s cart hold → **straight in, no OTP, no password** | 3s cart hold → **fresh OTP** |
+| Protects a shared terminal | **No** — hides the screen only | **Yes** |
+| Prompt | none — one tap | confirmation |
+| Where you land | the Mall | the Mall |
 
-Both end the Access session, and that is not an implementation detail — it is
-what makes either action a lock. `authSession` mints an app session from **any**
-valid Access identity (the SSO bootstrap), so while Access still considers the
-browser authenticated, a "locked" workspace is reopened automatically: the client
-clears its state, navigates, and the next `/api/auth/session` hands the session
-straight back. The first version of Lock navigated to `/labs` and did exactly
-that, which read as "Lock does nothing".
+**Lock is a screen lock, not a security control.** It clears this browser's
+session state and returns to the Mall, changing nothing server-side. That is
+deliberate: the operator said they were coming straight back, so the cost of
+leaving should be zero. The honest consequence is that the next person at the
+counter holds the Cart button for three seconds and is in — Lock is for eyes,
+not for adversaries.
 
-The difference between the two is what survives:
+**Sign Out is the boundary.** It ends the Access session as well as the app
+session, so the terminal is genuinely closed and returning costs a fresh
+verification.
 
-* **Lock** keeps the app session, so the same operator returning after their OTP
-  is straight back in the workspace with no password step. Use it to step away
-  from a shared counter.
-* **Sign Out** deletes the app session as well, so returning afterwards is a
-  clean start rather than a resume.
-
-Both return to the Mall, not to `/labs`. Going back to the staff route would
-just hand the browser straight back to the workspace for the reason above.
+An earlier version of this had both actions ending the Access session, which made
+them identical in production: two buttons, one behaviour. The "kept vs deleted"
+app-session distinction that looked like the real difference is invisible under
+Access, because `authSession` mints a fresh app session from **any** valid Access
+identity (the SSO bootstrap) — so after a sign-out the next OTP put you straight
+back in the workspace with no password. Deleting the session changes the
+bookkeeping, not the experience. The only environment where the two differed was
+local development, where Access is off.
 
 The client asks the server for the logout URL via
 `GET /api/auth/access-logout-url` (the team domain is never hardcoded in the
@@ -281,15 +283,25 @@ apply to every app session (`src/server/staffSession.ts`):
   within the window stops authorizing anything.
 
 The server is the authority and enforces this regardless. The client mirrors it
-so the lock is *visible*: after a one-minute warning, it calls the same Lock
-path, so an operator is never left guessing why a save failed. Any pointer, key,
-wheel, touch or focus activity resets both timers.
+so the expiry is *visible*: after a one-minute warning it takes the **full
+exit** (ending Access), not the screen lock. That is a deliberate escalation —
+a manual Lock means "I am coming straight back", but nobody announced anything
+before the terminal went quiet, and on a shared counter that is
+indistinguishable from an abandoned one. A screen-only idle would be decorative:
+the session expires server-side, the screen wipes, and the next 3-second cart
+hold walks the next person straight in.
 
-An idle-expired session that the client discovers on its two-minute revalidation
-also goes through the full Lock — including ending the Access session. A bare
-redirect would be undone by the SSO bootstrap, which re-mints from the still
-valid Access identity, and the session would quietly renew itself instead of
-locking.
+### What the idle window cannot do, and what does
+
+The server-side window bounds the **app session**. It cannot lock out an SSO
+user on its own, because a live Access identity will simply mint a new one
+(`authSession`). The control that survives a browser the client no longer runs in
+is the **Access application session duration in the Cloudflare dashboard** —
+set it to roughly an hour so the edge expires the login itself. That is a
+dashboard change, not a deployment.
+
+Practical consequence: on a shared counter, use **Sign Out** (or let idle do it)
+when the terminal is not being watched. Lock is for eyes only.
 
 ## 6. Auditing
 
