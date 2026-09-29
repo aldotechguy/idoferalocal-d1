@@ -11,6 +11,7 @@ import { localIsoDate } from '../src/shared/localDate.ts';
 import { mallAvailabilityLabel, mallStockLabel } from '../src/shared/mallProductPresentation.ts';
 import { mallClient } from '../src/services/mallClient.ts';
 import { createMallSearchMatcher, mallOneTypo } from '../src/shared/mallSearch.ts';
+import { handleMallApi } from '../src/server/mallApi.ts';
 import worker from '../sites-worker.ts';
 import { createStaffCartHold, STAFF_CART_HOLD_MS } from '../src/hooks/useStaffCartHold.ts';
 import { DatabaseSync } from 'node:sqlite';
@@ -278,6 +279,161 @@ test('mall catalog requests forward cancellation and encode live-search text', a
     assert.equal(url.searchParams.get('limit'), '6');
     assert.equal(signal, controller.signal);
   } finally { globalThis.fetch = original; }
+});
+
+test('storefront read routes are cacheable but every money or session route is not', async () => {
+  const emptyExec: any = { queryAll: async () => [], runBatch: async () => [1] };
+  // Product detail needs a row, or the route 404s and a 404 is (correctly)
+  // never cached -- which would make a naive "is it public?" assertion lie.
+  const stockedExec: any = {
+    queryAll: async () => ([{ id: 'prod-1', name: 'Test', stock_qty: 5, price_kobo: 1500, status: 'Active' }]),
+    runBatch: async () => [1],
+  };
+  const cacheControlFor = async (path: string, exec: any = emptyExec, init: RequestInit = {}) => {
+    const response = await handleMallApi(new Request(`http://test${path}`, init), exec);
+    return { status: response.status, cacheControl: response.headers.get('cache-control') || '' };
+  };
+
+  // Public reads carry no session, no PII and no money.
+  const list = await cacheControlFor('/api/mall/products?limit=10');
+  assert.equal(list.status, 200);
+  assert.match(list.cacheControl, /public, max-age=30, stale-while-revalidate=300/);
+  const detail = await cacheControlFor('/api/mall/products/prod-1', stockedExec);
+  assert.equal(detail.status, 200);
+  assert.match(detail.cacheControl, /public, max-age=30/);
+
+  // Session-scoped and money-bearing reads must never be cached.
+  for (const path of ['/api/mall/home', '/api/mall/cart', '/api/mall/cart/total', '/api/mall/config', '/api/mall/orders']) {
+    assert.equal((await cacheControlFor(path)).cacheControl, 'no-store', `${path} must not be cached`);
+  }
+  // A 404 must never be cached either, or a shopper would be pinned to it.
+  assert.equal((await cacheControlFor('/api/mall/products/missing')).cacheControl, 'no-store');
+  // A mutation is never cacheable, even on a read route shape.
+  const posted = await cacheControlFor('/api/mall/products?limit=10', emptyExec, { method: 'POST' });
+  assert.equal(posted.cacheControl, 'no-store', 'a POST must never be cached');
+});
+
+test('the service worker is registered for BOTH surfaces, not just the staff app', () => {
+  const bootstrap = fs.readFileSync('src/bootstrap.ts', 'utf8');
+  const pwaHook = fs.readFileSync('src/hooks/usePWAInstall.ts', 'utf8');
+  const app = fs.readFileSync('src/App.tsx', 'utf8');
+  const sw = fs.readFileSync('public/sw.js', 'utf8');
+  const html = fs.readFileSync('index.html', 'utf8');
+
+  // Registration must live in bootstrap (runs for every surface, before React).
+  assert.match(bootstrap, /serviceWorker\.register\(['"]\/sw\.js/);
+  // ...and must NOT still be duplicated in the staff-only hook, or the two
+  // registrations race and the hook's copy re-registers after bootstrap's.
+  assert.doesNotMatch(pwaHook, /serviceWorker\s*\n?\s*\.register/);
+  // The hook only reports, it does not own registration.
+  assert.match(pwaHook, /serviceWorker\.controller/);
+
+  // The new worker must PARK, not take over a live page: unconditional
+  // skipWaiting() on install re-introduces the version-skew hazard that the
+  // network-first rule for executable assets exists to prevent.
+  const installBlock = sw.slice(sw.indexOf("addEventListener('install'"), sw.indexOf("addEventListener('activate'"));
+  assert.doesNotMatch(installBlock, /skipWaiting\(\)/);
+  assert.match(sw, /addEventListener\('message'/);
+  assert.match(sw, /SKIP_WAITING/);
+
+  // A real app shell means the hashed entry assets, not just the HTML.
+  assert.match(sw, /precache-manifest\.json/);
+  assert.ok(fs.existsSync('scripts/generate-precache-manifest.ts'), 'precache manifest generator must exist');
+  assert.match(bootstrap, /storage\.persist\(\)/);
+
+  // The purge constant in index.html must track CACHE_NAME in the worker. When
+  // these drift, the inline script deletes the live cache on EVERY page load.
+  const cacheName = /const CACHE_NAME = '([^']+)'/.exec(sw)?.[1];
+  const currentCache = /const CURRENT_CACHE = '([^']+)'/.exec(html)?.[1];
+  assert.ok(cacheName, 'sw.js must declare CACHE_NAME');
+  assert.equal(currentCache, cacheName, 'index.html CURRENT_CACHE must match sw.js CACHE_NAME');
+});
+
+test('the service worker owns catalog caching and the storefront keeps its own branding', () => {
+  const sw = fs.readFileSync('public/sw.js', 'utf8');
+  const client = fs.readFileSync('src/services/mallClient.ts', 'utf8');
+  const app = fs.readFileSync('src/App.tsx', 'utf8');
+  const html = fs.readFileSync('index.html', 'utf8');
+
+  // The worker caches the public catalog and says so, rather than the app
+  // re-implementing a cache and guessing whether it was live.
+  assert.match(sw, /X-From-Cache/);
+  assert.match(sw, /DATA_CACHE/);
+  assert.match(client, /headers\.get\('X-From-Cache'\)/);
+  // Session-scoped reads must stay app-level: /home carries this session's Buy
+  // Again history, so a URL-keyed worker cache would leak it across sessions.
+  assert.doesNotMatch(sw, /\/api\/mall\/home.*respondWith/);
+  assert.match(client, /readThrough/);
+  // The dead type is gone.
+  assert.doesNotMatch(client, /type CachedMap/);
+
+  // Cross-origin product photos arrive opaque; requiring type==='basic' meant no
+  // image was ever cached, so offline browsing showed no photos.
+  assert.match(sw, /destination === 'image'/);
+  assert.match(sw, /type === 'opaque'/);
+
+  // Two manifests: a customer must not install the app as "Idofera POS".
+  const mall = JSON.parse(fs.readFileSync('public/manifest.json', 'utf8'));
+  const staff = JSON.parse(fs.readFileSync('public/manifest-staff.json', 'utf8'));
+  assert.equal(mall.short_name, 'IdoferaMall');
+  assert.equal(staff.short_name, 'Idofera POS');
+  assert.equal(mall.start_url, '/');
+  assert.equal(staff.start_url, '/labs/dashboard');
+  assert.ok(mall.icons.some((i: { purpose?: string }) => i.purpose === 'maskable'), 'Mall icon needs a maskable variant');
+  // No shortcut may point at a staff page from the shopper's manifest.
+  for (const shortcut of mall.shortcuts || []) {
+    assert.ok(!String(shortcut.url).startsWith('/labs'), `shopper shortcut must not open the staff app: ${shortcut.url}`);
+  }
+  assert.match(app, /manifest-staff\.json/);
+  assert.doesNotMatch(html, /Idofera POS & Investment Planner/);
+  assert.match(html, /IdoferaMall/);
+  // Both manifests must be precached, or a staff member offline gets no app.
+  assert.match(sw, /'\/manifest-staff\.json'/);
+});
+
+test('reconnecting refreshes the Mall instead of only flipping the banner', () => {
+  const context = fs.readFileSync('src/context/MallContext.tsx', 'utf8');
+  assert.match(context, /addEventListener\('online'/);
+  assert.match(context, /removeEventListener\('online'/);
+  // Guarded, so a flapping connection cannot start a request storm.
+  assert.match(context, /reconnectingRef/);
+});
+
+test('the IndexedDB mirror flushes pending writes on unmount', () => {
+  const source = fs.readFileSync('src/context/AppContext.tsx', 'utf8');
+  // A bare `return () => clearTimeout(timer)` cancels the pending write, so a
+  // logout inside the debounce window drops the last change from the offline
+  // store -- the one store that must survive losing the connection.
+  assert.doesNotMatch(source, /const timer = setTimeout\(\(\) => \{\s*replaceStoreItems\('products'/);
+  assert.match(source, /pendingMirrors/);
+  assert.match(source, /unmount flush/i);
+});
+
+test('the storefront boots one catalog request and keeps the staff POS out of the Mall entry', () => {
+  const context = fs.readFileSync('src/context/MallContext.tsx', 'utf8');
+  const site = fs.readFileSync('src/mall-site/MallSite.tsx', 'utf8');
+  // The duplicate boot fetch doubled catalog rows read on every page load.
+  assert.doesNotMatch(site, /refreshProducts\(\);\s*\n\s*document\.title/);
+  assert.doesNotMatch(context, /mallClient\.health\(\)/);
+  assert.doesNotMatch(context, /mallClient\.products\(\{ limit: 60/);
+
+  // StaffApp/StaffProviders must be lazy, or the Suspense in App.tsx is
+  // decorative and every shopper downloads the POS.
+  const app = fs.readFileSync('src/App.tsx', 'utf8');
+  assert.match(app, /React\.lazy\(\(\) => import\('\.\/staff\/StaffApp'\)/);
+  assert.match(app, /React\.lazy\(\(\) => import\('\.\/staff\/StaffProviders'\)/);
+  assert.doesNotMatch(app, /^import \{ StaffApp \}/m);
+  assert.doesNotMatch(app, /^import \{ StaffProviders \}/m);
+
+  // The service worker must not claim the storefront has an IndexedDB write path.
+  // Match the quoted literals, not the prose, so an explanatory comment about the
+  // old wording does not make this test fail.
+  const sw = fs.readFileSync('public/sw.js', 'utf8');
+  assert.doesNotMatch(sw, /message: 'You are currently offline\./);
+  assert.doesNotMatch(sw, /'Offline Mode Active'/);
+  assert.match(sw, /error: 'You appear to be offline\.'/);
+  assert.match(sw, /ASSET_CACHE_MAX/);
+  assert.match(sw, /SHELL_ASSETS = \['\/index\.html'\]/);
 });
 
 test('mall header exposes accessible cancellable live search without staff data', () => {

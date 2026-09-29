@@ -1,11 +1,10 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { useToast } from '../context/ToastContext';
-import { mallClient, type MallHealth, type MallProductsResponse, type MallCart, type MallOrder, type MallCheckoutBody } from '../services/mallClient';
+import { mallClient, setMallStaleListener, type MallProductsResponse, type MallCart, type MallOrder, type MallCheckoutBody } from '../services/mallClient';
 
 type MallViewMode = 'catalog' | 'cart' | 'checkout' | 'receipt';
 
 interface MallContextValue {
-  health: MallHealth | null;
   products: MallProductsResponse | null;
   cart: MallCart | null;
   order: MallOrder | null;
@@ -21,6 +20,8 @@ interface MallContextValue {
   newSession: () => void;
   error: string | null;
   clearError: () => void;
+  /** True when the products on screen came from the offline cache. */
+  stale: boolean;
 }
 
 const MallContext = createContext<MallContextValue | undefined>(undefined);
@@ -28,19 +29,24 @@ const messageOf = (error: unknown) => error instanceof Error ? error.message : S
 
 export const MallProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const toast = useToast();
-  const [health, setHealth] = useState<MallHealth | null>(null);
   const [products, setProducts] = useState<MallProductsResponse | null>(null);
   const [cart, setCart] = useState<MallCart | null>(null);
   const [order, setOrder] = useState<MallOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<MallViewMode>('catalog');
   const [error, setError] = useState<string | null>(null);
+  const [stale, setStale] = useState(false);
 
   const clearError = useCallback(() => setError(null), []);
 
+  /**
+   * Catalog read. The caller's `limit` always wins: the homepage's own grid asks
+   * for a 10-row page, and the previous unconditional `limit: 60` default made
+   * every boot fetch (and cache) six times the rows the shopper would ever see.
+   */
   const refreshProducts = useCallback(async (params?: { q?: string; category?: string; limit?: number; offset?: number }) => {
     try {
-      const data = await mallClient.products({ limit: 60, offset: 0, ...(params || {}) });
+      const data = await mallClient.products({ limit: 24, offset: 0, ...(params || {}) });
       setProducts(data);
       setError(null);
     } catch (err) {
@@ -113,27 +119,56 @@ export const MallProvider: React.FC<{ children: React.ReactNode }> = ({ children
     toast.showToast({ title: 'New session', message: 'Cart reset', type: 'info' });
   }, [toast]);
 
+  // Reconnect must actually refresh, not just flip the banner. The reads are
+  // network-first, so a successful one also clears `stale` on its own and the
+  // "showing saved products" notice disappears without any extra bookkeeping.
+  // The ref guard keeps a flapping connection from starting a request storm.
+  const reconnectingRef = React.useRef(false);
+  React.useEffect(() => {
+    const handleOnline = () => {
+      if (reconnectingRef.current) return;
+      reconnectingRef.current = true;
+      void Promise.all([refreshProducts(), refreshCart()])
+        .catch(() => { /* the banner keeps telling the truth */ })
+        .finally(() => { reconnectingRef.current = false; });
+    };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, [refreshProducts, refreshCart]);
+
+  // The client reports whether a read fell back to the offline cache, so the
+  // banner can say "saved products" instead of a false "you are offline".
+  React.useEffect(() => {
+    setMallStaleListener(setStale);
+    return () => setMallStaleListener(null);
+  }, []);
+
+  /**
+   * Boot: the catalog is the only request that gates first paint, so it runs
+   * alone. The cart and the rail payload are deliberately NOT in this promise --
+   * they fill in behind the shell, so a slow link shows the storefront chrome and
+   * product grid instead of an empty spinner waiting on three round-trips.
+   */
   useEffect(() => {
     let active = true;
     mallClient.ensureSession();
     setLoading(true);
-    Promise.all([mallClient.health(), refreshProducts(), refreshCart()])
-      .then(([healthData]) => {
-        if (!active) return;
-        setHealth(healthData);
-        setLoading(false);
-      })
+    refreshProducts()
+      .then(() => { if (active) setLoading(false); })
       .catch(() => { if (active) setLoading(false); });
+    // Cart and home rails hydrate after first paint; neither blocks the UI and
+    // both are served from the cache when the network is unavailable.
+    void refreshCart().catch(() => { /* the banner reports offline; keep the cached cart */ });
     return () => { active = false; };
   }, [refreshProducts, refreshCart]);
 
   // Stable context value: it used to be rebuilt on every provider render, so
   // every Mall consumer re-rendered whenever anything in the tree re-rendered.
   const value = useMemo<MallContextValue>(() => ({
-    health, products, cart, order, loading, view, setView,
+    products, cart, order, loading, view, setView,
     refreshProducts, refreshCart, addToCart, setCartQty, removeFromCart,
-    checkout, newSession, error, clearError,
-  }), [health, products, cart, order, loading, view, refreshProducts, refreshCart, addToCart, setCartQty, removeFromCart, checkout, newSession, error, clearError]);
+    checkout, newSession, error, clearError, stale,
+  }), [products, cart, order, loading, view, refreshProducts, refreshCart, addToCart, setCartQty, removeFromCart, checkout, newSession, error, clearError, stale]);
 
   return (
     <MallContext.Provider

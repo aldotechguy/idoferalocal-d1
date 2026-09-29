@@ -37,6 +37,7 @@ export function usePWAInstall() {
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
   const [swRegistered, setSwRegistered] = useState(false);
+  const [needRefresh, setNeedRefresh] = useState(false);
 
   const [isDismissed, setIsDismissed] = useState<boolean>(() => {
     try {
@@ -82,17 +83,31 @@ export function usePWAInstall() {
         .catch(() => {});
     }
 
-    // 3. Register the offline worker only for production. A service worker must
-    // never cache Vite's versioned development modules because that can mix two
-    // React module graphs after dependency re-optimization.
+    // 3. Registration is NOT done here. It lives in src/bootstrap.ts so BOTH
+    // surfaces get a worker -- this hook is only mounted by PWAInstallBanner,
+    // which only renders in StaffApp, so registering here left the Mall with no
+    // service worker at all. This hook now only REPORTS the controller, and
+    // watches for a newer worker so the user can accept the update.
     if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+      if (navigator.serviceWorker.controller) setSwRegistered(true);
       navigator.serviceWorker
-        .register('/sw.js')
+        .getRegistration()
         .then((reg) => {
-          setSwRegistered(true);
+          if (!reg) return;
+          if (reg.waiting && navigator.serviceWorker.controller) setNeedRefresh(true);
+          reg.addEventListener('updatefound', () => {
+            const installing = reg.installing;
+            if (installing) {
+              installing.addEventListener('statechange', () => {
+                if (installing.state === 'installed' && navigator.serviceWorker.controller) {
+                  setNeedRefresh(true);
+                }
+              });
+            }
+          });
         })
         .catch((err) => {
-          console.warn('[PWA] ServiceWorker registration warning:', err);
+          console.warn('[PWA] ServiceWorker registration lookup failed:', err);
         });
     }
 
@@ -168,12 +183,35 @@ export function usePWAInstall() {
     } catch {}
   }, []);
 
+  /**
+   * Activates the waiting worker and reloads. The worker does NOT call
+   * skipWaiting() on install, so a new release parks until either the user
+   * accepts here or the tab is closed and reopened. That is what stops a
+   * deployment from swapping the worker under a page that is still running the
+   * previous hashed modules.
+   */
+  const updateServiceWorker = useCallback(() => {
+    if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.getRegistration().then((reg) => {
+      if (!reg?.waiting) return;
+      reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+      // Wait for the new worker to take control before reloading, otherwise the
+      // reload can land on the old worker and loop.
+      const done = () => window.location.reload();
+      navigator.serviceWorker.addEventListener('controllerchange', done, { once: true });
+      // If no controller change arrives (worker already active), reload anyway.
+      window.setTimeout(done, 1500);
+    }).catch(() => { /* nothing waiting: the user is already current */ });
+  }, []);
+
   return {
     isInstallable,
     isInstalled,
     isIOS,
     isOnline,
     swRegistered,
+    needRefresh,
+    updateServiceWorker,
     isDismissed,
     dismiss,
     resetDismiss,

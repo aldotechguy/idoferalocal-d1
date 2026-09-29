@@ -1,0 +1,25 @@
+{
+  "id": "idofera-pos-pwa",
+  "short_name": "Idofera POS",
+  "name": "Idofera Packaging POS & Business System",
+  "description": "Offline-first Point of Sale, Inventory & Packaging Management Platform for Idofera Packaging",
+  "icons": [
+    {
+      "src": "https://idofera.de5.net/images/mall/logo/logo.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any"
+    }
+  ],
+  "start_url": "/labs/dashboard",
+  "background_color": "#0f172a",
+  "theme_color": "#2563eb",
+  "display": "standalone",
+  "display_override": ["standalone", "window-controls-overlay", "minimal-ui"],
+  "orientation": "portrait",
+  "scope": "/labs/",
+  "categories": ["business", "productivity", "utilities", "finance"],
+  "launch_handler": {
+    "client_mode": "focus-existing"
+  }
+}

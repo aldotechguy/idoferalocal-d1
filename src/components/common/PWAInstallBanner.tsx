@@ -23,6 +23,8 @@ export const PWAInstallBanner: React.FC = () => {
     isDismissed,
     dismiss,
     triggerInstall,
+    needRefresh,
+    updateServiceWorker,
   } = usePWAInstall();
 
   const [installing, setInstalling] = useState(false);
@@ -62,6 +64,29 @@ export const PWAInstallBanner: React.FC = () => {
 
   return (
     <>
+      {/* Update available: a newer worker is parked and waiting. Accepting swaps it
+          in and reloads; ignoring it keeps the current release until the tab is
+          closed, so a page is never re-pointed at a new worker mid-session. */}
+      {needRefresh && (
+        <div role="status" aria-live="polite"
+          className="fixed bottom-4 sm:bottom-6 right-4 sm:right-6 left-4 sm:left-auto sm:w-[380px] bg-blue-600 text-white p-4 rounded-2xl shadow-2xl shadow-blue-950/40 z-50 border border-blue-400/40">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h4 className="text-sm font-black tracking-tight">A new version is ready</h4>
+              <p className="text-[11px] text-blue-100 mt-0.5">
+                Reload to switch to the latest version of Idofera.
+              </p>
+            </div>
+            <button
+              onClick={updateServiceWorker}
+              className="shrink-0 h-9 px-4 rounded-xl bg-white text-blue-700 text-xs font-extrabold hover:bg-blue-50 transition-colors cursor-pointer"
+            >
+              Reload
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Offline Alert Bar (Visible whenever connection is dropped) */}
       {!isOnline && (
         <div className="fixed top-0 inset-x-0 bg-amber-500 text-slate-950 px-4 py-2 text-xs font-bold flex items-center justify-between shadow-lg z-50 animate-pulse">

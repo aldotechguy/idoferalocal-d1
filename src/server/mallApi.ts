@@ -925,6 +925,29 @@ async function routeMallApi(request: Request, exec: MallExecutor): Promise<Respo
   }
 }
 
+/**
+ * Read routes are publicly cacheable: they carry no session state, no PII and no
+ * money, and the storefront already tolerates a few seconds of staleness because
+ * D1 re-validates price and stock inside every cart and checkout write. A short
+ * fresh window plus a long stale window is what makes a reload on a weak link
+ * paint instantly from the browser cache while the Worker revalidates behind it.
+ *
+ * Everything money- or session-bearing stays no-store: /cart, /cart/qty,
+ * /checkout, /orders (phone enumeration), /config and /ready.
+ */
+const READ_CACHE_CONTROL = 'public, max-age=30, stale-while-revalidate=300';
+
+/**
+ * `path` here is the FULL pathname (e.g. `/api/mall/products`), unlike the
+ * stripped one inside routeMallApi, so the `/api/mall` prefix is removed before
+ * matching. Getting this wrong would silently mark every read as no-store again.
+ */
+function isCacheableRead(fullPath: string): boolean {
+  const path = fullPath.replace(/^\/api\/mall/, '');
+  if (path === '/home' || path === '/config' || path === '/health' || path === '/ready') return false;
+  return path === '/products' || path.startsWith('/products?') || path.startsWith('/products/');
+}
+
 export async function handleMallApi(request:Request,exec:MallExecutor):Promise<Response> {
   const response=await routeMallApi(request,exec);
   const path=new URL(request.url).pathname;
@@ -933,7 +956,14 @@ export async function handleMallApi(request:Request,exec:MallExecutor):Promise<R
     try { await exec.runBatch([{sql:'INSERT INTO mall_metrics(day,metric,count) VALUES (?,?,1) ON CONFLICT(day,metric) DO UPDATE SET count=count+1',params:[new Date().toISOString().slice(0,10),metric]}]); }
     catch { console.error('[mall-metrics] unavailable'); }
   }
-  response.headers.set('cache-control','no-store');
+  // Only a 200 GET of a public read route is ever cached. A 4xx/5xx, a POST, or
+  // an error page must never be stored by an intermediary.
+  if (isCacheableRead(path) && response.status === 200) {
+    response.headers.set('cache-control', READ_CACHE_CONTROL);
+    response.headers.set('vary', 'accept-encoding');
+  } else {
+    response.headers.set('cache-control','no-store');
+  }
   if(response.status===429) response.headers.set('retry-after','60');
   return response;
 }

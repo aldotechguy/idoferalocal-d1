@@ -1,47 +1,46 @@
 {
-  "id": "idofera-pos-pwa",
-  "short_name": "Idofera POS",
-  "name": "Idofera Packaging POS & Business System",
-  "description": "Offline-first Point of Sale, Inventory & Packaging Management Platform for Idofera Packaging",
+  "id": "idoferamall-storefront",
+  "short_name": "IdoferaMall",
+  "name": "IdoferaMall — Packaging & Everyday Goods",
+  "description": "Packaging and everyday goods in Uyo. Order online and pay on pickup.",
   "icons": [
     {
       "src": "https://idofera.de5.net/images/mall/logo/logo.png",
       "type": "image/png",
       "sizes": "512x512",
       "purpose": "any"
+    },
+    {
+      "src": "https://idofera.de5.net/images/mall/logo/logo.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "maskable"
     }
   ],
   "start_url": "/",
-  "background_color": "#0f172a",
-  "theme_color": "#2563eb",
+  "background_color": "#e3f4f1",
+  "theme_color": "#0d9488",
   "display": "standalone",
-  "display_override": ["standalone", "window-controls-overlay", "minimal-ui"],
+  "display_override": ["standalone", "minimal-ui"],
   "orientation": "portrait",
   "scope": "/",
-  "categories": ["business", "shopping", "productivity", "utilities", "finance"],
+  "categories": ["shopping", "food", "business"],
   "launch_handler": {
     "client_mode": "focus-existing"
   },
   "shortcuts": [
     {
-      "name": "New Sale Point of Sale",
-      "short_name": "New Sale",
-      "description": "Open POS cash register for sales",
-      "url": "/",
+      "name": "Your Cart",
+      "short_name": "Cart",
+      "description": "Review your basket and proceed to pickup",
+      "url": "/checkout",
       "icons": [{ "src": "https://idofera.de5.net/images/mall/logo/logo.png", "sizes": "512x512" }]
     },
     {
-      "name": "Inventory & Stock Catalog",
-      "short_name": "Stock",
-      "description": "View and manage packaging inventory",
-      "url": "/?tab=inventory",
-      "icons": [{ "src": "https://idofera.de5.net/images/mall/logo/logo.png", "sizes": "512x512" }]
-    },
-    {
-      "name": "System Settings & Cloud Sync",
-      "short_name": "Settings",
-      "description": "Access system configuration & sync",
-      "url": "/?tab=settings",
+      "name": "Track My Order",
+      "short_name": "Track",
+      "description": "Check the status of an order you placed",
+      "url": "/orders",
       "icons": [{ "src": "https://idofera.de5.net/images/mall/logo/logo.png", "sizes": "512x512" }]
     }
   ]

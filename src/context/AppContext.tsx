@@ -48,7 +48,7 @@ import {
 import { saveDocument, removeDocument } from '../firebase/services';
 import { subscribeTabSync } from '../firebase/syncManager';
 import { useToast } from './ToastContext';
-import { getAllItems, putManyItems, replaceStoreItems, putItem, clearStore, deleteItem, writeD1SnapshotToIndexedDB } from '../db/indexedDB';
+import { getAllItems, putManyItems, replaceStoreItems, putItem, clearStore, deleteItem, writeD1SnapshotToIndexedDB, type StoreName } from '../db/indexedDB';
 import { initializeD1Storage, queueD1Snapshot, pullLatestFromD1, type D1Snapshot } from '../services/d1StorageService';
 import { removeLegacyBusinessStorage, safeSetLocalStorage } from '../utils/localStorage';
 
@@ -443,6 +443,12 @@ const readLegacyCollection = <T,>(key: string, fallback: T[]): T[] => {
 };
 
 
+/**
+ * Debounce for the IndexedDB business-collection mirror. Coalesces the burst of
+ * state changes a single POS action produces into one write per collection.
+ */
+const MIRROR_DEBOUNCE_MS = 300;
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { currentUser, loading: authLoading } = useAuth();
   const isClearedBoot = typeof window !== 'undefined' && localStorage.getItem('idofera_cleared_empty') === 'true';
@@ -463,6 +469,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    */
   const mirrorArmedRef = useRef(false);
   const mirrorReady = () => isStorageReady && mirrorArmedRef.current && !isApplyingD1Ref.current;
+  /** store -> latest value still owed a debounced IndexedDB write. */
+  const pendingMirrors = useRef(new Map<StoreName, unknown>());
 
   const [products, setProducts] = useState<Product[]>(() =>
     sanitizeUniqueIds(readLegacyCollection<Product>('idofera_products', isClearedBoot ? [] : INITIAL_PRODUCTS), 'prod'));
@@ -776,56 +784,53 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [applyCloudData]);
 
   // Keep business collections in IndexedDB instead of duplicating them in the
-  // much smaller localStorage quota.
-  useEffect(() => {
-    if (!mirrorReady()) return;
-    replaceStoreItems('products', products).catch((e) => console.warn('IndexedDB products sync error:', e));
-  }, [isStorageReady, products]);
+  // much smaller localStorage quota. Debounced to avoid write amplification and
+  // main-thread I/O thrashing during rapid state mutations.
+  //
+  // Each mirrored store registers its latest value in `pendingMirrors` for the
+  // duration of the debounce. That registry is what makes the unmount flush
+  // below possible: a bare `return () => clearTimeout(timer)` would CANCEL the
+  // pending write, so a logout or a route change inside the 300ms window would
+  // silently drop the last change from the offline mirror -- the one store whose
+  // entire job is to survive losing the connection.
+  // `T` is constrained to the record shape replaceStoreItems requires, so the
+  // helper stays type-safe for every collection it mirrors.
+  const useMirroredStore = <T extends { id: string }>(store: StoreName, value: T[], ready: boolean) => {
+    useEffect(() => {
+      if (!ready) return;
+      pendingMirrors.current.set(store, value);
+      const timer = setTimeout(() => {
+        pendingMirrors.current.delete(store);
+        replaceStoreItems(store, value).catch((e) => console.warn(`IndexedDB ${store} sync error:`, e));
+      }, MIRROR_DEBOUNCE_MS);
+      return () => clearTimeout(timer);
+    }, [store, ready, value]);
+  };
 
-  useEffect(() => {
-    if (!mirrorReady()) return;
-    replaceStoreItems('customers', customers).catch((e) => console.warn('IndexedDB customers sync error:', e));
-  }, [isStorageReady, customers]);
+  useMirroredStore('products', products, mirrorReady());
+  useMirroredStore('customers', customers, mirrorReady());
+  useMirroredStore('suppliers', suppliers, mirrorReady());
+  useMirroredStore('sales', sales, mirrorReady());
+  useMirroredStore('purchases', purchases, mirrorReady());
+  useMirroredStore('expenses', expenses, mirrorReady());
+  useMirroredStore('notifications', notifications, mirrorReady());
+  useMirroredStore('auditLogs', auditLogs, mirrorReady());
+  useMirroredStore('stockMovements', stockMovements, mirrorReady());
+  useMirroredStore('pricingHistory', pricingHistory, mirrorReady());
+  useMirroredStore('heldOrders', heldOrders, mirrorReady());
+  useMirroredStore('deliveryOrders', deliveryOrders, mirrorReady());
 
+  // Unmount flush. Empty deps: this runs ONLY when the provider goes away, not
+  // on every state change, so the debounce above is preserved.
   useEffect(() => {
-    if (!mirrorReady()) return;
-    replaceStoreItems('suppliers', suppliers).catch((e) => console.warn('IndexedDB suppliers sync error:', e));
-  }, [isStorageReady, suppliers]);
-
-  useEffect(() => {
-    if (!mirrorReady()) return;
-    replaceStoreItems('sales', sales).catch((e) => console.warn('IndexedDB sales sync error:', e));
-  }, [isStorageReady, sales]);
-
-  useEffect(() => {
-    if (!mirrorReady()) return;
-    replaceStoreItems('purchases', purchases).catch((e) => console.warn('IndexedDB purchases sync error:', e));
-  }, [isStorageReady, purchases]);
-
-  useEffect(() => {
-    if (!mirrorReady()) return;
-    replaceStoreItems('expenses', expenses).catch((e) => console.warn('IndexedDB expenses sync error:', e));
-  }, [isStorageReady, expenses]);
-
-  useEffect(() => {
-    if (!mirrorReady()) return;
-    replaceStoreItems('notifications', notifications).catch((e) => console.warn('IndexedDB notifications sync error:', e));
-  }, [isStorageReady, notifications]);
-
-  useEffect(() => {
-    if (!mirrorReady()) return;
-    replaceStoreItems('auditLogs', auditLogs).catch((e) => console.warn('IndexedDB auditLogs sync error:', e));
-  }, [isStorageReady, auditLogs]);
-
-  useEffect(() => {
-    if (!mirrorReady()) return;
-    replaceStoreItems('stockMovements', stockMovements).catch((e) => console.warn('IndexedDB stockMovements sync error:', e));
-  }, [isStorageReady, stockMovements]);
-
-  useEffect(() => {
-    if (!mirrorReady()) return;
-    replaceStoreItems('pricingHistory', pricingHistory).catch((e) => console.warn('IndexedDB pricingHistory sync error:', e));
-  }, [isStorageReady, pricingHistory]);
+    const pending = pendingMirrors.current;
+    return () => {
+      for (const [store, value] of pending) {
+        replaceStoreItems(store, value).catch((e) => console.warn(`IndexedDB ${store} unmount flush error:`, e));
+      }
+      pending.clear();
+    };
+  }, []);
 
   useEffect(() => {
     if (!mirrorReady()) return;
@@ -835,16 +840,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       saveDocument('settings', { ...settings, id: 'store_settings' });
     }
   }, [isStorageReady, settings]);
-
-  useEffect(() => {
-    if (!mirrorReady()) return;
-    replaceStoreItems('heldOrders', heldOrders).catch((e) => console.warn('IndexedDB heldOrders sync error:', e));
-  }, [isStorageReady, heldOrders]);
-
-  useEffect(() => {
-    if (!mirrorReady()) return;
-    replaceStoreItems('deliveryOrders', deliveryOrders).catch((e) => console.warn('IndexedDB deliveryOrders sync error:', e));
-  }, [isStorageReady, deliveryOrders]);
 
   // Auto deduplicate any existing duplicate SKUs once, on the real catalog.
   // The old empty-deps effect ran at mount against the useState initializer

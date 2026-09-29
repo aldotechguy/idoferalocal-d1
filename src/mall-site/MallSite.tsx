@@ -12,6 +12,7 @@ import { MallBottomNav, MallFooter } from './MallFooter';
 import { MallCartDrawer } from '../components/mall/MallCartDrawer';
 import { AsyncState } from '../components/common/AsyncState';
 import { AccessibleOverlay } from '../components/common/AccessibleOverlay';
+import { MallOfflineBanner } from './MallOfflineBanner';
 
 const MallProductPage = React.lazy(() => import('./MallProductPage').then((m) => ({ default: m.MallProductPage })));
 const MallCheckout = React.lazy(() => import('./MallCheckout').then((m) => ({ default: m.MallCheckout })));
@@ -21,15 +22,16 @@ const MallOrderSuccess = React.lazy(() => import('./MallOrders').then((m) => ({ 
 export const MallSite: React.FC = () => {
   const route = useRoute();
   const go = useNavigateMall();
-  const { products, loading, error, clearError, refreshProducts } = useMall();
+  const { products, loading, error, clearError, refreshProducts, stale } = useMall();
   const [query, setQuery] = React.useState('');
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [cartOpen, setCartOpen] = React.useState(false);
 
+  // The catalog boot fetch lives in MallContext, which owns it. Calling
+  // refreshProducts() again here issued a second identical request on every
+  // page load, doubling catalog rows read and burning a rate-limit slot.
   React.useEffect(() => {
-    refreshProducts();
     document.title = 'IdoferaMall — Packaging & Everyday Goods';
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   React.useEffect(() => {
     if (route.surface === 'mall' && route.page === 'search') setQuery(route.param || '');
@@ -44,6 +46,7 @@ export const MallSite: React.FC = () => {
 
   return (
     <div className="mall-shell min-h-screen text-slate-900 font-sans">
+      <MallOfflineBanner stale={stale} />
       <MallTopStrip />
       <MallHeader query={query} setQuery={setQuery} onMenu={() => setMenuOpen(true)} />
       <MallCategoryNav categories={cats} active={route.surface === 'mall' && route.page === 'category' ? route.param : undefined} />
