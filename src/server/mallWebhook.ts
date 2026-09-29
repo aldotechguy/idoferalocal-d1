@@ -67,15 +67,103 @@ function safeEqual(left: string, right: string) {
   return mismatch === 0;
 }
 
-/** Human-readable label for the known Mall outbox events. */
-export const MALL_EVENT_LABELS: Record<string, string> = {
-  ORDER_RECEIVED: 'Order received',
-  ORDER_PAID: 'Payment confirmed',
-  ORDER_DISPATCHED: 'Order dispatched',
-  ORDER_DELIVERED: 'Order delivered',
-  ORDER_CANCELLED: 'Order cancelled',
-  ORDER_REFUNDED: 'Order refunded',
+/**
+ * A canonical Mall notification event: the name stored in the delivery ledger,
+ * the label the operator reads, and whether the buyer is told.
+ */
+export interface MallEventSpec {
+  /** Stable name persisted in `mall_webhook_deliveries.event`. */
+  event: string;
+  /** Human-readable label used in the subject line. */
+  label: string;
+  /** Whether a buyer with a usable address receives a copy. */
+  customer: boolean;
+}
+
+/**
+ * Why this lives in the receiver and not in the `mall_order_audited` trigger:
+ * the DDL is `CREATE TRIGGER IF NOT EXISTS`, so editing the trigger string is a
+ * no-op on the deployed database, and it would not repair rows ALREADY queued
+ * in `mall_outbox` under a raw audit action. Resolving here fixes both, needs no
+ * migration, and is safe for retries because dedupe keys on the outbox row id
+ * (`event_id`), never on the event name.
+ *
+ * `MALL_AUDIT_ACTIONS` is the whole vocabulary the audit trigger can emit: the
+ * trigger copies `audit_logs.action` verbatim into `mall_outbox.event`.
+ */
+const MALL_EVENTS: Record<string, Omit<MallEventSpec, 'event'>> = {
+  ORDER_RECEIVED: { label: 'Order received', customer: true },
+  ORDER_CONFIRMED: { label: 'Order confirmed', customer: true },
+  ORDER_PAID: { label: 'Payment confirmed', customer: true },
+  ORDER_DISPATCHED: { label: 'Order dispatched', customer: true },
+  ORDER_DELIVERED: { label: 'Order delivered', customer: true },
+  ORDER_CANCELLED: { label: 'Order cancelled', customer: true },
+  ORDER_REFUNDED: { label: 'Order refunded', customer: true },
+  // Internal bookkeeping: the buyer already sees the resulting invoice, and a
+  // second "your order" email for it is noise, not information.
+  ORDER_INVOICED: { label: 'Order converted to invoice', customer: false },
+  ORDER_PREPARING: { label: 'Order being prepared', customer: true },
+  ORDER_UPDATED: { label: 'Order status updated', customer: false },
+  DELIVERY_VERIFIED: { label: 'Delivery address verified', customer: false },
+  DELIVERY_QUOTED: { label: 'Delivery quoted', customer: false },
+  STAFF_ATTENTION_REQUIRED: { label: 'Order needs staff attention', customer: false },
 };
+
+/** Audit action -> canonical event. */
+const MALL_AUDIT_ACTIONS: Record<string, string> = {
+  ORDER_RECEIVED: 'ORDER_RECEIVED',
+  CONFIRM_MALL_ORDER: 'ORDER_CONFIRMED',
+  CANCEL_MALL_ORDER: 'ORDER_CANCELLED',
+  REFUND_MALL_ORDER: 'ORDER_REFUNDED',
+  CONVERT_MALL_ORDER_SALE: 'ORDER_INVOICED',
+  VERIFY_MALL_DELIVERY: 'DELIVERY_VERIFIED',
+  QUOTE_MALL_DELIVERY: 'DELIVERY_QUOTED',
+  STAFF_ATTENTION_REQUIRED: 'STAFF_ATTENTION_REQUIRED',
+};
+
+/**
+ * `UPDATE_MALL_ORDER_STATUS` is the catch-all for every order transition, so the
+ * event name alone does not say which one happened. Keyed on the order status.
+ * Transitions the buyer would ask about map to a customer copy; the routine
+ * `confirmed`/`processing` steps stay operator-only to keep volume down.
+ */
+const MALL_STATUS_EVENTS: Record<string, string> = {
+  out_for_delivery: 'ORDER_DISPATCHED',
+  completed: 'ORDER_DELIVERED',
+  cancelled: 'ORDER_CANCELLED',
+  refunded: 'ORDER_REFUNDED',
+  packed: 'ORDER_PREPARING',
+  ready_for_pickup: 'ORDER_PREPARING',
+};
+
+/**
+ * Resolve a raw outbox event into its canonical spec. Never throws: an
+ * unrecognised event still emails the operator under its raw name, because
+ * failing here would turn an already-sent delivery into an outbox retry and
+ * email the operator a second time. Unknown events are never customer-facing.
+ *
+ * `data` is the payload captured by the trigger at event time; `liveStatus` is
+ * the order status read at SEND time. `data.status` must win: the drain runs on
+ * a five-minute cron with exponential retry, so an `out_for_delivery` event can
+ * be delivered minutes later, after the order already reached `completed`.
+ * Reading the live row there would mislabel a dispatch as a delivery.
+ */
+export function resolveMallEvent(
+  rawEvent: string,
+  data?: Record<string, unknown>,
+  liveStatus?: string,
+): MallEventSpec {
+  let canonical: string | undefined = MALL_AUDIT_ACTIONS[rawEvent];
+  if (!canonical && rawEvent === 'UPDATE_MALL_ORDER_STATUS') {
+    const status = typeof data?.status === 'string' ? data.status : liveStatus;
+    canonical = (status && MALL_STATUS_EVENTS[status]) || 'ORDER_UPDATED';
+  }
+  if (!canonical) canonical = MALL_EVENTS[rawEvent] ? rawEvent : undefined;
+  const spec = canonical ? MALL_EVENTS[canonical] : undefined;
+  return spec
+    ? { event: canonical, label: spec.label, customer: spec.customer }
+    : { event: rawEvent, label: rawEvent, customer: false };
+}
 
 export async function handleMallWebhook(request: Request, env: WebhookEnv): Promise<Response> {
   const bodyText = await request.text();
@@ -145,9 +233,11 @@ export async function handleMallWebhook(request: Request, env: WebhookEnv): Prom
     return json({ error: 'Email notification is not fully configured on the Worker.' }, 503);
   }
 
-  const label = MALL_EVENT_LABELS[parsed.event] || parsed.event;
   const order = parsed.order || {};
   const orderNo = order.order_no || parsed.id;
+  // `order.status` is read live at send time; the resolver prefers the
+  // event-time `data.status` so a delayed dispatch is not read as a delivery.
+  const { event, label, customer } = resolveMallEvent(parsed.event, parsed.data, order.status);
   const totalNgn = order.total_kobo
     ? (order.total_kobo / 100).toLocaleString('en-NG', { style: 'currency', currency: 'NGN' })
     : '—';
@@ -185,7 +275,7 @@ export async function handleMallWebhook(request: Request, env: WebhookEnv): Prom
     });
 
   const operatorHtml = emailTemplate({
-    event: parsed.event, label,
+    event, label,
     orderNo,
     customerName: order.customer_name || 'unknown',
     customerPhone: order.customer_phone || 'unavailable',
@@ -208,7 +298,7 @@ export async function handleMallWebhook(request: Request, env: WebhookEnv): Prom
     const errText = await resendRes.text();
     await recordDelivery(
       ['id', 'event_id', 'event', 'status', 'error', 'delivered_at'],
-      [deliveryId, parsed.id, parsed.event, 'failed', errText, null],
+      [deliveryId, parsed.id, event, 'failed', errText, null],
     );
     return json({ error: 'Failed to send email', detail: errText }, 502);
   }
@@ -221,7 +311,17 @@ export async function handleMallWebhook(request: Request, env: WebhookEnv): Prom
   let customerError = '';
   let customerOutcome = 'none';
   if (customerEmail) {
-    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail) && parsed.event in MALL_EVENT_LABELS) {
+    // A skip reason must name the real cause. Both used to report "the stored
+    // address did not pass format validation", which is a lie for an event that
+    // was never meant for the buyer — and this column is the first thing the
+    // docs tell an operator to read when notifications stop.
+    if (!customer) {
+      customerOutcome = 'skipped';
+      customerError = `Customer copy skipped: ${event} is an internal staff event, not a buyer update.`;
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail)) {
+      customerOutcome = 'skipped';
+      customerError = 'Customer copy skipped: the stored address did not pass format validation.';
+    } else {
       const customerHtml = customerEmailTemplate({
         label, orderNo,
         customerName: order.customer_name || '',
@@ -244,16 +344,13 @@ export async function handleMallWebhook(request: Request, env: WebhookEnv): Prom
         customerOutcome = 'failed';
         customerError = `Customer copy failed: ${(await customerRes.text()).slice(0, 300)}`;
       }
-    } else {
-      customerOutcome = 'skipped';
-      customerError = 'Customer copy skipped: the stored address did not pass format validation.';
     }
   }
 
   const deliveredAt = new Date().toISOString();
   await recordDelivery(
     ['id', 'event_id', 'event', 'status', 'error', 'delivered_at'],
-    [deliveryId, parsed.id, parsed.event, 'sent', customerError || null, deliveredAt],
+    [deliveryId, parsed.id, event, 'sent', customerError || null, deliveredAt],
   );
 
   return json({ status: 'sent', eventId: parsed.id, deliveredAt, customer: customerOutcome });

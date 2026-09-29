@@ -138,6 +138,23 @@ Behaviour and diagnostics:
   signed wire is provably up without one message per hour forever.
 - Order events (received, paid, dispatched, delivered, cancelled, refunded) email the
   operator with order number, customer, total, status and payment state.
+- The outbox event is NOT one of those names. The `mall_order_audited` trigger copies
+  `audit_logs.action` verbatim into `mall_outbox.event`, so the wire carries a staff
+  action name. The receiver maps it to a canonical event in `resolveMallEvent`
+  (`src/server/mallWebhook.ts`); `UPDATE_MALL_ORDER_STATUS` is resolved further on the
+  event-time status captured in the payload, because the drain joins the order live and
+  an order dispatched five minutes ago may already be `completed`. The canonical name is
+  what lands in `mall_webhook_deliveries.event`. The mapping lives in the receiver, not
+  the trigger, because the DDL is `CREATE TRIGGER IF NOT EXISTS` — editing the trigger is
+  a no-op on the deployed database and would not repair rows already queued in the outbox.
+- Buyer copies are sent only for buyer-relevant milestones (received, confirmed, preparing,
+  dispatched, delivered, cancelled, refunded). Internal events — invoice conversion,
+  address verification, delivery quoting, generic status updates, the stalled-order alert —
+  email the operator only. A skipped copy records the real reason in
+  `mall_webhook_deliveries.error`; an internal event says so rather than blaming the
+  stored address. An unrecognised event still notifies the operator under its raw name and
+  is never buyer-facing: throwing would mark a delivered event failed, the outbox would
+  retry, and the operator would be emailed the same order twice.
 - `mall_webhook_deliveries` deduplicates on the event ID for seven days, so a retry after
   a crash or a lost 2xx re-acknowledges instead of emailing twice. Recording a delivery is
   best-effort: a bookkeeping failure must never turn a sent email into a retry.

@@ -11,7 +11,7 @@ import { handleStaffProductImageApi, handlePublicImageRequest } from '../src/ser
 import { decodeBase64Image, imageKeyFromUrl, imageUrl, newProductImageKey } from '../src/server/imageStore.ts';
 import { makeNodeImageStore } from '../src/server/nodeImageStore.ts';
 import { bootstrapAdmin } from '../src/server/adminBootstrap.ts';
-import { handleMallWebhook } from '../src/server/mallWebhook.ts';
+import { handleMallWebhook, resolveMallEvent } from '../src/server/mallWebhook.ts';
 import { drainMallOutbox, signMallWebhook, mallReadiness, runMallMaintenance, mallRateLimitFor, mallRateLimitGroup, MALL_RATE_LIMITS, MALL_OPERATIONS_DDL, MALL_SCHEMA_VERSION, clearMallRateLimitWindows } from '../src/server/mallOperations.ts';
 import { normalizeMallPhone, normalizedPhoneSql } from '../src/shared/mallPhone.ts';
 import { SNAPSHOT_PUSH_DOC_LIMIT } from '../src/server/relationalSnapshot.ts';
@@ -1414,6 +1414,176 @@ test('oversized snapshot pushes are rejected before any write', async (t) => {
     assert.equal((await badCustomer.json() as any).customer, 'skipped');
     assert.equal(sent.length, 5);
     assert.deepEqual(sent[4].to, ['owner@test.invalid'], 'the operator copy is unaffected by a bad customer address');
+  });
+
+  // The `mall_order_audited` trigger copies `audit_logs.action` verbatim into
+  // `mall_outbox.event`, so the raw wire event is a staff action name, not one of
+  // the ORDER_* events the receiver used to label. Unmapped, the operator read
+  // "[Mall] UPDATE_MALL_ORDER_STATUS" and — because the customer copy was gated
+  // on a label lookup that never matched — the buyer was never told anything
+  // after checkout.
+  test('resolveMallEvent maps the audit vocabulary the trigger can emit', () => {
+    // Every action written to audit_logs for a MallOrder by mallOrderAdminApi.
+    const expectations: [string, string | undefined, string][] = [
+      ['ORDER_RECEIVED', undefined, 'Order received'],
+      ['CONFIRM_MALL_ORDER', undefined, 'Order confirmed'],
+      ['CANCEL_MALL_ORDER', undefined, 'Order cancelled'],
+      ['REFUND_MALL_ORDER', undefined, 'Order refunded'],
+      ['CONVERT_MALL_ORDER_SALE', undefined, 'Order converted to invoice'],
+      ['VERIFY_MALL_DELIVERY', undefined, 'Delivery address verified'],
+      ['QUOTE_MALL_DELIVERY', undefined, 'Delivery quoted'],
+      ['STAFF_ATTENTION_REQUIRED', undefined, 'Order needs staff attention'],
+      ['UPDATE_MALL_ORDER_STATUS', 'out_for_delivery', 'Order dispatched'],
+      ['UPDATE_MALL_ORDER_STATUS', 'completed', 'Order delivered'],
+      ['UPDATE_MALL_ORDER_STATUS', 'refunded', 'Order refunded'],
+      ['UPDATE_MALL_ORDER_STATUS', 'cancelled', 'Order cancelled'],
+      ['UPDATE_MALL_ORDER_STATUS', 'packed', 'Order being prepared'],
+      ['UPDATE_MALL_ORDER_STATUS', 'ready_for_pickup', 'Order being prepared'],
+      // Routine steps stay operator-only to keep buyer volume down.
+      ['UPDATE_MALL_ORDER_STATUS', 'processing', 'Order status updated'],
+      ['UPDATE_MALL_ORDER_STATUS', 'confirmed', 'Order status updated'],
+    ];
+    for (const [raw, status, label] of expectations) {
+      const spec = resolveMallEvent(raw, status ? { status } : undefined);
+      assert.equal(spec.label, label, `${raw}${status ? `/${status}` : ''}`);
+    }
+
+    // The buyer is told about the milestones, not the internal bookkeeping.
+    for (const event of ['ORDER_RECEIVED', 'ORDER_CONFIRMED', 'ORDER_DISPATCHED', 'ORDER_DELIVERED', 'ORDER_CANCELLED', 'ORDER_REFUNDED', 'ORDER_PREPARING']) {
+      assert.equal(resolveMallEvent(event).customer, true, event);
+    }
+    for (const event of ['ORDER_INVOICED', 'ORDER_UPDATED', 'DELIVERY_VERIFIED', 'DELIVERY_QUOTED', 'STAFF_ATTENTION_REQUIRED']) {
+      assert.equal(resolveMallEvent(event).customer, false, event);
+    }
+
+    // Unknown events degrade instead of throwing.
+    const unknown = resolveMallEvent('NOT_A_REAL_EVENT');
+    assert.equal(unknown.label, 'NOT_A_REAL_EVENT');
+    assert.equal(unknown.event, 'NOT_A_REAL_EVENT');
+    assert.equal(unknown.customer, false);
+
+    // With no event-time status the live status is the only available signal.
+    assert.equal(resolveMallEvent('UPDATE_MALL_ORDER_STATUS', undefined, 'completed').label, 'Order delivered');
+  });
+
+  test('order events reach the buyer and internal or unknown events do not', async (t) => {
+    const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+    const secret = 'event-mapping-secret-0123456789abcdef';
+    const env: any = {
+      DB: new SqliteD1(db),
+      ASSETS: { fetch: async () => new Response('asset') },
+      MALL_WEBHOOK_SECRET: secret,
+      MALL_NOTIFY_EMAIL: 'owner@test.invalid',
+      MALL_EMAIL_FROM: 'Mall Orders <orders@verified.test>',
+      RESEND_API_KEY: 're_mapping_key',
+    };
+    const sent: { to: string[]; subject: string }[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
+      sent.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({ id: 'resend-1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    t.after(() => { globalThis.fetch = realFetch; });
+
+    const post = async (payload: Record<string, unknown>) => {
+      const raw = JSON.stringify(payload);
+      const at = String(Math.floor(Date.now() / 1000));
+      const signature = await signMallWebhook(secret, at, raw);
+      return worker.fetch(new Request('http://test/api/mall-webhook', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-mall-timestamp': at, 'x-mall-signature': `sha256=${signature}` },
+        body: raw,
+      }), env);
+    };
+    const order = {
+      order_no: 'MALL-9', customer_name: 'Ada', customer_phone: '08031234567',
+      customer_email: 'ada@example.com', total_kobo: 20000, status: 'out_for_delivery',
+      payment_status: 'paid', payment_method: 'bank_transfer',
+    };
+
+    // A dispatch is the milestone the buyer most wants to hear about: it must
+    // carry a readable label AND produce a customer copy.
+    const dispatched = await post({ id: 'audit-d1', event: 'UPDATE_MALL_ORDER_STATUS', data: { orderNo: 'MALL-9', status: 'out_for_delivery' }, order });
+    assert.equal(dispatched.status, 200);
+    assert.equal((await dispatched.json() as any).customer, 'sent');
+    assert.equal(sent.length, 2, 'a dispatch emails the operator and the buyer');
+    assert.match(sent[0].subject, /Order dispatched . Order MALL-9/);
+    assert.deepEqual(sent[1].to, ['ada@example.com']);
+    assert.match(sent[1].subject, /Order dispatched . your order MALL-9/);
+
+    // The canonical name is what lands in the delivery ledger, so the operations
+    // view shows readable events instead of raw audit actions.
+    const row = db.prepare("SELECT event FROM mall_webhook_deliveries WHERE event_id='audit-d1'").get() as any;
+    assert.equal(row?.event, 'ORDER_DISPATCHED', 'the ledger stores the canonical event name');
+
+    // Internal bookkeeping: the operator is told, the buyer is not. A second
+    // "your order" mail about an invoice they already hold is noise.
+    const verified = await post({ id: 'audit-v1', event: 'VERIFY_MALL_DELIVERY', data: { orderNo: 'MALL-9', status: 'out_for_delivery' }, order });
+    assert.equal(verified.status, 200);
+    assert.equal((await verified.json() as any).customer, 'skipped');
+    assert.equal(sent.length, 3, 'an internal event emails only the operator');
+    assert.match(sent[2].subject, /Delivery address verified . Order MALL-9/);
+    assert.deepEqual(sent[2].to, ['owner@test.invalid']);
+    // The skip reason must name the real cause. It used to claim the address
+    // failed validation, which is false here and sends operators hunting a
+    // formatting bug that does not exist.
+    const internal = db.prepare("SELECT error FROM mall_webhook_deliveries WHERE event_id='audit-v1'").get() as any;
+    assert.match(String(internal?.error), /internal staff event/);
+
+    // An unrecognised event must still notify the operator under its raw name.
+    // Throwing here would mark a delivered event failed, the outbox would retry,
+    // and the operator would be emailed the same order twice.
+    const unknown = await post({ id: 'audit-x1', event: 'SOMETHING_NEW_FROM_A_DEPLOY', data: { orderNo: 'MALL-9' }, order });
+    assert.equal(unknown.status, 200, 'an unknown event must not fail the delivery');
+    assert.equal((await unknown.json() as any).customer, 'skipped', 'an unknown event is never customer-facing');
+    assert.equal(sent.length, 4);
+    assert.match(sent[3].subject, /SOMETHING_NEW_FROM_A_DEPLOY . Order MALL-9/);
+  });
+
+  test('a delayed event is labelled by its event-time status, not the live one', async (t) => {
+    const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+    const secret = 'event-mapping-secret-abcdef0123456789';
+    const env: any = {
+      DB: new SqliteD1(db),
+      ASSETS: { fetch: async () => new Response('asset') },
+      MALL_WEBHOOK_SECRET: secret,
+      MALL_NOTIFY_EMAIL: 'owner@test.invalid',
+      MALL_EMAIL_FROM: 'Mall Orders <orders@verified.test>',
+      RESEND_API_KEY: 're_mapping_key',
+    };
+    const sent: { to: string[]; subject: string }[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
+      sent.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({ id: 'resend-1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    t.after(() => { globalThis.fetch = realFetch; });
+
+    const raw = JSON.stringify({
+      id: 'audit-stale', event: 'UPDATE_MALL_ORDER_STATUS',
+      // The trigger captured `out_for_delivery` at event time...
+      data: { orderNo: 'MALL-11', status: 'out_for_delivery' },
+      // ...but the drain joins the order live, minutes later on the five-minute
+      // cron, by which time staff completed it. Labelling from the live row would
+      // tell the buyer their order was delivered when it had only shipped.
+      order: {
+        order_no: 'MALL-11', customer_name: 'Ada', customer_phone: '08031234567',
+        customer_email: 'ada@example.com', total_kobo: 20000, status: 'completed',
+        payment_status: 'paid', payment_method: 'bank_transfer',
+      },
+    });
+    const at = String(Math.floor(Date.now() / 1000));
+    const signature = await signMallWebhook(secret, at, raw);
+    const response = await worker.fetch(new Request('http://test/api/mall-webhook', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mall-timestamp': at, 'x-mall-signature': `sha256=${signature}` },
+      body: raw,
+    }), env);
+    assert.equal(response.status, 200);
+    assert.equal(sent.length, 2);
+    assert.match(sent[0].subject, /Order dispatched/, 'data.status must win over the live order status');
+    assert.doesNotMatch(sent[0].subject, /Order delivered/);
+    assert.match(sent[1].subject, /Order dispatched/, 'the buyer copy is labelled the same way');
   });
 
   test('the scheduled drain emails the operator and the customer copy', async (t) => {

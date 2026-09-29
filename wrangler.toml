@@ -96,9 +96,15 @@ MALL_PICKUP_HOURS = "10AM - 6PM"
   MALL_BANK_ACCOUNT_NUMBER = "8063766861"
   MALL_WEBHOOK_URL = "https://idofera.de5.net/api/mall-webhook"
   # Sender for order emails. Must be an address on a domain verified in Resend.
-  # `idofera.de5.net` (apex) is verified, so this delivers to any recipient;
-  # the sandbox sender `onboarding@resend.dev` would only reach the account owner.
-  MALL_EMAIL_FROM = "Idofera <orders@idofera.de5.net>"
+  # Transactional mail is isolated on the `mail.` subdomain on purpose: the apex
+  # `idofera.de5.net` reputation was damaged by a Google block, and Resend's own
+  # guidance is to segment sending reputation per subdomain rather than share one
+  # across transactional and other mail. Re-verify `mail.idofera.de5.net` in
+  # Resend and publish its SPF/DKIM/DMARC records before relying on this.
+  # The sandbox sender `onboarding@resend.dev` is only a last-resort fallback in
+  # code: it 403s for any recipient other than the Resend account owner, so it
+  # cannot deliver the customer copy.
+  MALL_EMAIL_FROM = "Idofera <orders@mail.idofera.de5.net>"
   # MALL_WEBHOOK_SECRET, MALL_NOTIFY_EMAIL and RESEND_API_KEY are Wrangler
   # secrets (never committed): `npx wrangler secret put --env mall <NAME>`.
   # The scheduled drain signs each outbox POST with MALL_WEBHOOK_SECRET and
@@ -158,7 +164,7 @@ MALL_PICKUP_HOURS = "9AM - 5PM"
 MALL_BANK_NAME = "PREVIEW BANK"
 MALL_BANK_ACCOUNT_NAME = "IDOFERA PREVIEW"
 MALL_BANK_ACCOUNT_NUMBER = "0000000000"
-MALL_EMAIL_FROM = "Idofera Preview <orders@idofera.de5.net>"
+  MALL_EMAIL_FROM = "Idofera Preview <orders@mail.idofera.de5.net>"
 MALL_WEBHOOK_URL = "https://idomall-preview.olz.workers.dev/api/mall-webhook"
 # MALL_WEBHOOK_SECRET, MALL_NOTIFY_EMAIL and RESEND_API_KEY are set the same way
 # as the mall environment: `npx wrangler secret put --env preview <NAME>`.
