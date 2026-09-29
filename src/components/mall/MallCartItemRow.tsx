@@ -3,6 +3,7 @@ import { Trash2, Package } from 'lucide-react';
 import { useMall } from '../../context/MallContext';
 import type { MallCartItem } from '../../types/mall';
 import { MallQuantityControl } from '../../mall-site/MallQuantityControl';
+import { mallStockLabel } from '../../shared/mallProductPresentation';
 
 function toNaira(kobo: number): string {
   const naira = kobo / 100;
@@ -45,6 +46,8 @@ export const MallCartItemRow: React.FC<Props> = ({ item }) => {
         <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
           {item.unit} · {toNaira(item.price)} each
         </p>
+        {/* The exact count is revealed here, once the item is in the cart. */}
+        <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">{mallStockLabel(item.stock)}</p>
         <p className="text-xs font-bold text-blue-600 dark:text-blue-400 mt-1">{toNaira(lineTotal)}</p>
 
         <div className="flex items-center gap-1.5 mt-2">

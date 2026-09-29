@@ -3,7 +3,7 @@ import { Search, X, Package } from 'lucide-react';
 import { PortalDropdown } from '../components/common/PortalDropdown';
 import { useNavigateMall, useRoute } from '../hooks/useRoute';
 import { mallClient, type MallProduct } from '../services/mallClient';
-import { hasMallPrice, mallStockLabel } from '../shared/mallProductPresentation';
+import { hasMallPrice, mallAvailabilityLabel } from '../shared/mallProductPresentation';
 import { formatNaira } from './mallUi';
 
 export const MallHeaderSearch: React.FC<{ query: string; setQuery: (q: string) => void }> = ({ query, setQuery }) => {
@@ -118,7 +118,7 @@ export const MallHeaderSearch: React.FC<{ query: string; setQuery: (q: string) =
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-bold truncate">{product.name}</p>
                 <p className="text-xs text-slate-500 truncate">{[product.brand, product.category].filter(Boolean).join(' · ')}</p>
-                <p className="text-xs font-semibold">{hasMallPrice(product.price) ? formatNaira(product.price) : 'Price unavailable'} · {mallStockLabel(product.stock)}{product.wholesaleOffer ? ` · ${formatNaira(product.wholesaleOffer.price)} each at ${product.wholesaleOffer.minQty}+` : ''}</p>
+                <p className="text-xs font-semibold">{hasMallPrice(product.price) ? formatNaira(product.price) : 'Price unavailable'} · {mallAvailabilityLabel(product.stock)}{product.wholesaleOffer ? ` · ${formatNaira(product.wholesaleOffer.price)} each at ${product.wholesaleOffer.minQty}+` : ''}</p>
               </div>
             </div>
           ))}

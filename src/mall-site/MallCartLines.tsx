@@ -4,6 +4,7 @@ import { useMall } from '../context/MallContext';
 import type { MallCartItem } from '../types/mall';
 import { formatNaira } from './mallUi';
 import { MallQuantityControl } from './MallQuantityControl';
+import { mallStockLabel } from '../shared/mallProductPresentation';
 
 /** The CTA only invites what the buyer can actually complete: a valid tier
  * below the threshold that the current stock can still reach. */
@@ -58,6 +59,8 @@ export const MallCartLines: React.FC = () => {
                 {it.listPrice != null && it.price < it.listPrice && <span className="ml-1.5 rounded-md bg-emerald-50 dark:bg-emerald-900/30 px-1.5 py-0.5 text-[10px] font-black text-emerald-600 dark:text-emerald-400">Wholesale</span>}
                 <span className="ml-1 font-semibold text-slate-400">x {it.qty}</span>
               </p>
+              {/* The exact count is revealed here, once the item is in the cart. */}
+              <p className="text-[11px] text-slate-400 mt-0.5">{mallStockLabel(it.stock)}</p>
               <div className="mt-1.5 flex items-center gap-1.5">
                 <MallQuantityControl value={it.qty} min={0} max={it.stock} onChange={(quantity) => setCartQty(it.productId, quantity)} compact label={`${it.name} quantity`} />
                 <button type="button" onClick={() => setCartQty(it.productId, 0)} className="ml-auto p-1.5 text-slate-400 hover:text-rose-500" aria-label="Remove"><Trash2 className="w-4 h-4" /></button>

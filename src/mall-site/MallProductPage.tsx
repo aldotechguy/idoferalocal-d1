@@ -7,7 +7,7 @@ import { MallQuantityControl } from './MallQuantityControl';
 import { ProductImage } from '../components/common/ProductImage';
 import { useToast } from '../context/ToastContext';
 import { mallClient, type MallProduct } from '../services/mallClient';
-import { hasMallPrice, mallUnavailableLabel } from '../shared/mallProductPresentation';
+import { hasMallPrice, mallAvailabilityLabel, mallUnavailableLabel } from '../shared/mallProductPresentation';
 
 export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
   const { products, cart, addToCart, refreshProducts } = useMall();
@@ -87,7 +87,7 @@ export const MallProductPage: React.FC<{ id: string }> = ({ id }) => {
             )}
             <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
               <div className="rounded-xl bg-white/60 p-2"><dt className="text-xs text-slate-500">Unit</dt><dd className="font-bold">{product.unit}</dd></div>
-              <div className="rounded-xl bg-white/60 p-2"><dt className="text-xs text-slate-500">Availability</dt><dd className="font-bold">{product.stock > 0 ? `${product.stock.toLocaleString('en-NG')} in stock` : 'Out of stock'}</dd></div>
+              <div className="rounded-xl bg-white/60 p-2"><dt className="text-xs text-slate-500">Availability</dt><dd className="font-bold">{mallAvailabilityLabel(product.stock)}</dd></div>
             </dl>
             <div className="mt-4 flex items-center gap-2">
               <MallQuantityControl value={qty} min={1} max={product.stock} onChange={setQty} disabled={adding || !purchasable} label={`${product.name} quantity`} />

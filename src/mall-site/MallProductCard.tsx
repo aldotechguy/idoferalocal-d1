@@ -6,7 +6,7 @@ import type { MallProduct } from '../types/mall';
 import { formatNaira, discountPct } from './mallUi';
 import { MallQuantityControl } from './MallQuantityControl';
 import { ProductImage } from '../components/common/ProductImage';
-import { hasMallPrice, mallStockLabel, mallUnavailableLabel } from '../shared/mallProductPresentation';
+import { hasMallPrice, mallAvailabilityLabel, mallStockLabel, mallUnavailableLabel } from '../shared/mallProductPresentation';
 
 export const MallProductCard: React.FC<{ product: MallProduct }> = ({ product }) => {
   const { cart, addToCart, setCartQty } = useMall();
@@ -53,7 +53,10 @@ export const MallProductCard: React.FC<{ product: MallProduct }> = ({ product })
               : `${formatNaira(product.wholesaleOffer.price)} each at ${product.wholesaleOffer.minQty}+`}
           </p>
         )}
-        <p className="text-xs text-slate-500 font-medium">{product.unit}{product.unit ? ' • ' : ''}{mallStockLabel(product.stock)}</p>
+        {/* The exact count is withheld until the item is in this browser's cart;
+            `qty > 0` is the in-cart test because a zero-qty line is deleted
+            server-side (mallApi setCartQty), so it is never present in the cart. */}
+        <p className="text-xs text-slate-500 font-medium">{product.unit}{product.unit ? ' • ' : ''}{qty > 0 ? mallStockLabel(product.stock) : mallAvailabilityLabel(product.stock)}</p>
         <div className="mt-auto pt-1.5">
           {qty > 0 && purchasable ? (
             <MallQuantityControl value={qty} min={0} max={product.stock} onChange={change} disabled={adding} compact label={`${product.name} quantity`} />

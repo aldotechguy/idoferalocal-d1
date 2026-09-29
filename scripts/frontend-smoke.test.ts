@@ -8,7 +8,7 @@ import { computeMenuStyle, PORTAL_DROPDOWN_Z } from '../src/components/common/Po
 import { validateBuyer } from '../src/mall-site/useBuyerForm.ts';
 import { mallDeliveryFeeKobo, mallDeliveryZone } from '../src/shared/mallDelivery.ts';
 import { localIsoDate } from '../src/shared/localDate.ts';
-import { mallStockLabel } from '../src/shared/mallProductPresentation.ts';
+import { mallAvailabilityLabel, mallStockLabel } from '../src/shared/mallProductPresentation.ts';
 import { mallClient } from '../src/services/mallClient.ts';
 import { createMallSearchMatcher, mallOneTypo } from '../src/shared/mallSearch.ts';
 import worker from '../sites-worker.ts';
@@ -288,16 +288,35 @@ test('mall header exposes accessible cancellable live search without staff data'
   assert.doesNotMatch(source, /useApp|AppContext|useAuth|\/api\/staff/);
 });
 
-test('Mall cards always show catalog stock independently of purchase eligibility', () => {
+test('Mall cards reveal the exact stock count only once the item is in the cart', () => {
   assert.equal(mallStockLabel(250), '250 left');
   assert.equal(mallStockLabel(1000), '1,000 left');
   assert.equal(mallStockLabel(11), '11 left');
   assert.equal(mallStockLabel(10), 'Only 10 left');
   assert.equal(mallStockLabel(1), 'Only 1 left');
   assert.equal(mallStockLabel(0), 'Out of stock');
+  assert.equal(mallAvailabilityLabel(250), 'In stock');
+  assert.equal(mallAvailabilityLabel(1), 'In stock');
+  assert.equal(mallAvailabilityLabel(0), 'Out of stock');
+
+  // Card: binary until the item is in the cart, exact count after.
   const card = fs.readFileSync('src/mall-site/MallProductCard.tsx', 'utf8');
-  assert.match(card, /\{product.unit\}.*\{mallStockLabel\(product.stock\)\}/);
+  assert.match(card, /qty > 0 \? mallStockLabel\(product\.stock\) : mallAvailabilityLabel\(product\.stock\)/);
   assert.doesNotMatch(card, /product.available && product.stock <= 10/);
+
+  // Header search rows and the product detail page stay binary.
+  const search = fs.readFileSync('src/mall-site/MallHeaderSearch.tsx', 'utf8');
+  assert.match(search, /mallAvailabilityLabel\(product\.stock\)/);
+  assert.doesNotMatch(search, /mallStockLabel/);
+  const detail = fs.readFileSync('src/mall-site/MallProductPage.tsx', 'utf8');
+  assert.match(detail, /mallAvailabilityLabel\(product\.stock\)/);
+  assert.doesNotMatch(detail, /in stock`/);
+
+  // The cart is where the exact count is revealed.
+  const cartLines = fs.readFileSync('src/mall-site/MallCartLines.tsx', 'utf8');
+  assert.match(cartLines, /mallStockLabel\(it\.stock\)/);
+  const cartRow = fs.readFileSync('src/components/mall/MallCartItemRow.tsx', 'utf8');
+  assert.match(cartRow, /mallStockLabel\(item\.stock\)/);
 });
 
 test('homepage keeps ordered single-row carousels and the original catalog grid', () => {
