@@ -43,7 +43,44 @@ export type MallConfig = {
   MALL_CHECKOUT_ENABLED?: string; MALL_UNPAID_EXPIRY_HOURS?: string;
   /** "true" opts the Mall into the product-level POS promotional price. Default OFF. */
   MALL_HONOR_POS_PROMOS?: string;
+  /**
+   * Outbox rows claimed per drain, and the pause between them. A drain used to
+   * take 10 rows and send them back to back, and each event now emails both the
+   * operator and the buyer — so a backlog went out as ~20 near-identical
+   * messages in a few seconds. That burst is the documented trigger for Gmail's
+   * 550-5.7.1 `UnsolicitedMessageError` (docs/gmail-deliverability-fix.md), so
+   * the default is deliberately slow. A malformed value falls back to the
+   * default rather than to "no throttle": failing open here restores the exact
+   * behaviour that got the domain blocked.
+   */
+  MALL_OUTBOX_DRAIN_BATCH?: string;
+  MALL_OUTBOX_DRAIN_GAP_MS?: string;
 };
+
+/** Per-drain send pacing. Exported so the tests can assert the resolved values. */
+export const MALL_DRAIN_BATCH_DEFAULT = 3;
+export const MALL_DRAIN_BATCH_MAX = 25;
+export const MALL_DRAIN_GAP_DEFAULT_MS = 2_000;
+export const MALL_DRAIN_GAP_MAX_MS = 30_000;
+
+export function mallDrainPacing(config: MallConfig = {}) {
+  // `Number('')` is 0, so an unset-but-present variable (an empty value in
+  // wrangler.toml, a trailing `=` in .env, a stripped CI secret) would resolve
+  // to a ZERO gap and silently switch the throttle off — reintroducing exactly
+  // the burst this exists to prevent. Treat blank as absent, not as zero.
+  const read = (raw: string | undefined) => {
+    const trimmed = (raw ?? '').trim();
+    return trimmed ? Number(trimmed) : Number.NaN;
+  };
+  const batch = read(config.MALL_OUTBOX_DRAIN_BATCH);
+  const gap = read(config.MALL_OUTBOX_DRAIN_GAP_MS);
+  return {
+    batch: Number.isFinite(batch) && batch >= 1 ? Math.min(Math.floor(batch), MALL_DRAIN_BATCH_MAX) : MALL_DRAIN_BATCH_DEFAULT,
+    // 0 is the one value that legitimately disables pacing, so it is honoured
+    // rather than replaced by the default.
+    gapMs: Number.isFinite(gap) && gap >= 0 ? Math.min(Math.floor(gap), MALL_DRAIN_GAP_MAX_MS) : MALL_DRAIN_GAP_DEFAULT_MS,
+  };
+}
 
 const phone = normalizedPhoneSql('customer_phone');
 const orderStates = "'pending','confirmed','processing','packed','ready_for_pickup','out_for_delivery','completed','cancelled','refunded'";
@@ -289,11 +326,21 @@ export async function drainMallOutbox(exec: MallExecutor, send?: typeof fetch, n
   if (!(inProcess ? webhookSecretReady(exec.config || {}) : webhookConfigured(exec.config || {}))) return;
   const deliver = send ?? fetch;
   const config = exec.config!;
-  const rows = await exec.queryAll("SELECT * FROM mall_outbox WHERE (status='pending' AND next_attempt_at<=?) OR (status='sending' AND lease_until<?) ORDER BY created_at LIMIT 10",[now,now]);
+  const { batch, gapMs } = mallDrainPacing(config);
+  const rows = await exec.queryAll("SELECT * FROM mall_outbox WHERE (status='pending' AND next_attempt_at<=?) OR (status='sending' AND lease_until<?) ORDER BY created_at LIMIT ?",[now,now,batch]);
+  // Pacing counts EMISSIONS, not rows: a row we failed to claim is skipped
+  // above and never emits anything, so it must not cost a pause. The first
+  // emission is never delayed (the common single-event case stays instant) and
+  // the delay sits before the send rather than after it, so a run never ends
+  // sleeping. The lease UPDATE happens inside the loop, so each row's 120s lease
+  // starts on its own turn — the gap can never push a claim to expiry.
+  let emitted = 0;
   for (const row of rows) {
     const token = crypto.randomUUID();
     const changed = await exec.runBatch([{sql:"UPDATE mall_outbox SET status='sending',lease_token=?,lease_until=?,attempts=attempts+1 WHERE id=? AND ((status='pending' AND next_attempt_at<=?) OR (status='sending' AND lease_until<?))",params:[token,now+120_000,row.id,now,now]}]);
     if (!changed[0]) continue;
+    if (emitted > 0 && gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
+    emitted += 1;
     try {
       const order = row.order_id ? (await exec.queryAll(`SELECT o.order_no,o.customer_phone,o.customer_name,o.customer_email,o.total_kobo,o.status,
         o.delivery_address_json AS fulfilment_json,p.reference AS payment_reference,p.status AS payment_status,p.provider AS payment_method

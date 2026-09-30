@@ -105,6 +105,16 @@ MALL_PICKUP_HOURS = "10AM - 6PM"
   # code: it 403s for any recipient other than the Resend account owner, so it
   # cannot deliver the customer copy.
   MALL_EMAIL_FROM = "Idofera <orders@mail.idofera.de5.net>"
+  # Outbox drain pacing. A drain used to take 10 rows and send them back to back,
+  # and every order event now emails the operator AND the buyer — so a backlog
+  # went out as ~20 near-identical messages in a few seconds. That burst is the
+  # documented trigger for Gmail's 550-5.7.1 UnsolicitedMessageError
+  # (docs/gmail-deliverability-fix.md). These are the safe defaults; a blank or
+  # unparseable value falls back to them rather than to "no throttle".
+  # Worst case is now 3 events (6 emails) spaced 2s apart, per 5-minute run.
+  MALL_OUTBOX_DRAIN_BATCH = "3"
+  MALL_OUTBOX_DRAIN_GAP_MS = "2000"
+
   # MALL_WEBHOOK_SECRET, MALL_NOTIFY_EMAIL and RESEND_API_KEY are Wrangler
   # secrets (never committed): `npx wrangler secret put --env mall <NAME>`.
   # The scheduled drain signs each outbox POST with MALL_WEBHOOK_SECRET and

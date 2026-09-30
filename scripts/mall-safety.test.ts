@@ -12,7 +12,7 @@ import { decodeBase64Image, imageKeyFromUrl, imageUrl, newProductImageKey } from
 import { makeNodeImageStore } from '../src/server/nodeImageStore.ts';
 import { bootstrapAdmin } from '../src/server/adminBootstrap.ts';
 import { handleMallWebhook, resolveMallEvent } from '../src/server/mallWebhook.ts';
-import { drainMallOutbox, signMallWebhook, mallReadiness, runMallMaintenance, mallRateLimitFor, mallRateLimitGroup, MALL_RATE_LIMITS, MALL_OPERATIONS_DDL, MALL_SCHEMA_VERSION, clearMallRateLimitWindows } from '../src/server/mallOperations.ts';
+import { drainMallOutbox, signMallWebhook, mallReadiness, runMallMaintenance, mallDrainPacing, MALL_DRAIN_BATCH_DEFAULT, MALL_DRAIN_BATCH_MAX, MALL_DRAIN_GAP_DEFAULT_MS, MALL_DRAIN_GAP_MAX_MS, mallRateLimitFor, mallRateLimitGroup, MALL_RATE_LIMITS, MALL_OPERATIONS_DDL, MALL_SCHEMA_VERSION, clearMallRateLimitWindows } from '../src/server/mallOperations.ts';
 import { normalizeMallPhone, normalizedPhoneSql } from '../src/shared/mallPhone.ts';
 import { SNAPSHOT_PUSH_DOC_LIMIT } from '../src/server/relationalSnapshot.ts';
 
@@ -766,7 +766,7 @@ test('Worker static routes bypass Mall and unexpected async errors become safe r
 
 test('outbox signatures, exclusive leases, retry, dead letters and readiness', async t => {
   const f = await fixture('node'); t.after(() => f.db.close());
-  f.exec.config = { MALL_CHECKOUT_ENABLED: 'true', MALL_PICKUP_ADDRESS: 'Test pickup', MALL_PICKUP_HOURS: 'Test hours', MALL_BANK_NAME: 'Test bank', MALL_BANK_ACCOUNT_NAME: 'Test business', MALL_BANK_ACCOUNT_NUMBER: '0000000000', MALL_WEBHOOK_URL: 'https://notifications.example.test/mall', MALL_WEBHOOK_SECRET: 'test-secret-only-12345678901234567890' };
+  f.exec.config = { MALL_CHECKOUT_ENABLED: 'true', MALL_PICKUP_ADDRESS: 'Test pickup', MALL_PICKUP_HOURS: 'Test hours', MALL_BANK_NAME: 'Test bank', MALL_BANK_ACCOUNT_NAME: 'Test business', MALL_BANK_ACCOUNT_NUMBER: '0000000000', MALL_WEBHOOK_URL: 'https://notifications.example.test/mall', MALL_WEBHOOK_SECRET: 'test-secret-only-12345678901234567890', MALL_OUTBOX_DRAIN_GAP_MS: '0' };
   await f.checkout(); let count = 0;
   const send: typeof fetch = async (_url, options) => {
     count++;
@@ -788,6 +788,79 @@ test('outbox signatures, exclusive leases, retry, dead letters and readiness', a
   assert.equal((await mallReadiness(f.exec)).ready, true);
   f.db.exec('DROP TRIGGER trg_products_no_oversell');
   assert.equal((await mallReadiness(f.exec)).ready, false);
+});
+
+test('the outbox drain throttles batch size and paces sends', async (t) => {
+  const f = await fixture('node'); t.after(() => f.db.close());
+  const base = {
+    MALL_CHECKOUT_ENABLED: 'true', MALL_PICKUP_ADDRESS: 'Test pickup', MALL_PICKUP_HOURS: 'Test hours',
+    MALL_BANK_NAME: 'Test bank', MALL_BANK_ACCOUNT_NAME: 'Test business', MALL_BANK_ACCOUNT_NUMBER: '0000000000',
+    MALL_WEBHOOK_URL: 'https://notifications.example.test/mall', MALL_WEBHOOK_SECRET: 'test-secret-only-12345678901234567890',
+  };
+  f.exec.config = { ...base, MALL_OUTBOX_DRAIN_BATCH: '3', MALL_OUTBOX_DRAIN_GAP_MS: '0' };
+  // Six queued events used to go out as ~12 emails back to back; that burst is
+  // the documented trigger for Gmail 550-5.7.1, so a drain must not empty the
+  // queue in one pass.
+  for (let i = 0; i < 6; i++) {
+    f.db.exec(`INSERT INTO mall_outbox(id,order_id,event,payload_json,status,attempts,next_attempt_at,created_at)
+      VALUES ('batch-${i}',NULL,'ORDER_RECEIVED','{}','pending',0,0,'2026-01-0${i + 1}T00:00:00.000Z')`);
+  }
+  let sends = 0;
+  await drainMallOutbox(f.exec, async () => { sends += 1; return new Response(null, { status: 204 }); });
+  assert.equal(sends, 3, 'a drain claims only the configured batch');
+  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_outbox WHERE status='delivered'"), 3);
+  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_outbox WHERE status='pending'"), 3, 'the remainder waits for the next cron run');
+
+  // A second drain picks up exactly the next batch, oldest first, so the
+  // backlog drains steadily instead of being held or dumped.
+  await drainMallOutbox(f.exec, async () => new Response(null, { status: 204 }));
+  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_outbox WHERE status='delivered'"), 6);
+
+  // Pacing: the gap applies BETWEEN sends, so N rows cost (N-1) gaps and the
+  // first emission is never delayed.
+  f.db.exec("DELETE FROM mall_outbox");
+  f.exec.config = { ...base, MALL_OUTBOX_DRAIN_BATCH: '3', MALL_OUTBOX_DRAIN_GAP_MS: '60' };
+  for (let i = 0; i < 3; i++) {
+    f.db.exec(`INSERT INTO mall_outbox(id,order_id,event,payload_json,status,attempts,next_attempt_at,created_at)
+      VALUES ('pace-${i}',NULL,'ORDER_RECEIVED','{}','pending',0,0,'2026-01-0${i + 1}T00:00:00.000Z')`);
+  }
+  const startedThree = Date.now();
+  await drainMallOutbox(f.exec, async () => new Response(null, { status: 204 }));
+  const threeElapsed = Date.now() - startedThree;
+  assert.ok(threeElapsed >= 120, `3 sends at a 60ms gap must cost at least 2 gaps, took ${threeElapsed}ms`);
+
+  f.db.exec("DELETE FROM mall_outbox");
+  f.exec.config = { ...base, MALL_OUTBOX_DRAIN_BATCH: '3', MALL_OUTBOX_DRAIN_GAP_MS: '60' };
+  f.db.exec(`INSERT INTO mall_outbox(id,order_id,event,payload_json,status,attempts,next_attempt_at,created_at)
+    VALUES ('solo',NULL,'ORDER_RECEIVED','{}','pending',0,0,'2026-01-01T00:00:00.000Z')`);
+  const startedOne = Date.now();
+  await drainMallOutbox(f.exec, async () => new Response(null, { status: 204 }));
+  const oneElapsed = Date.now() - startedOne;
+  assert.ok(oneElapsed < 60, `a lone event must not pay a leading delay, took ${oneElapsed}ms`);
+});
+
+test('a malformed drain pacing value falls back to the throttled default', () => {
+  // Failing open here would restore exactly the unthrottled burst that got the
+  // domain blocked, so a bad value resolves to the safe default.
+  // The batch must always be at least one row, so every unusable value falls
+  // back to the default.
+  for (const bad of ['abc', '', '   ', '0', '-5', 'NaN']) {
+    assert.equal(mallDrainPacing({ MALL_OUTBOX_DRAIN_BATCH: bad }).batch, MALL_DRAIN_BATCH_DEFAULT, `batch=${bad}`);
+  }
+  // The gap additionally honours an explicit 0 as "no pacing" — that is how the
+  // suite disables it — but a BLANK or unparseable value must not.
+  for (const bad of ['abc', '', '   ', '-5', 'NaN']) {
+    assert.equal(mallDrainPacing({ MALL_OUTBOX_DRAIN_GAP_MS: bad }).gapMs, MALL_DRAIN_GAP_DEFAULT_MS, `gap=${bad}`);
+  }
+  assert.equal(mallDrainPacing({ MALL_OUTBOX_DRAIN_GAP_MS: '0' }).gapMs, 0, 'an explicit 0 disables pacing');
+  assert.equal(mallDrainPacing({ MALL_OUTBOX_DRAIN_BATCH: '0' }).batch, MALL_DRAIN_BATCH_DEFAULT, 'a zero batch is not usable');
+  assert.equal(mallDrainPacing({}).batch, MALL_DRAIN_BATCH_DEFAULT);
+  assert.equal(mallDrainPacing({}).gapMs, MALL_DRAIN_GAP_DEFAULT_MS);
+  // Upper bounds hold; 0 on the gap is the one value that disables pacing.
+  assert.equal(mallDrainPacing({ MALL_OUTBOX_DRAIN_BATCH: '999' }).batch, MALL_DRAIN_BATCH_MAX);
+  assert.equal(mallDrainPacing({ MALL_OUTBOX_DRAIN_GAP_MS: '999999' }).gapMs, MALL_DRAIN_GAP_MAX_MS);
+  assert.equal(mallDrainPacing({ MALL_OUTBOX_DRAIN_GAP_MS: '0' }).gapMs, 0);
+  assert.equal(mallDrainPacing({ MALL_OUTBOX_DRAIN_BATCH: '7' }).batch, 7);
 });
 
 test('unpaid expiry restores stock once, cleans abandoned carts and emits cancellation event', async t => {
@@ -1595,6 +1668,7 @@ test('oversized snapshot pushes are rejected before any write', async (t) => {
       MALL_NOTIFY_EMAIL: 'owner@test.invalid',
       MALL_EMAIL_FROM: 'Mall Orders <orders@verified.test>',
       RESEND_API_KEY: 're_scheduler_key',
+      MALL_OUTBOX_DRAIN_GAP_MS: '0',
     };
     // Only Resend is outbound; the drain must NOT reach back over the network to
     // its own MALL_WEBHOOK_URL (Cloudflare answers a self-subrequest with 1042).
@@ -1652,6 +1726,7 @@ test('oversized snapshot pushes are rejected before any write', async (t) => {
       MALL_NOTIFY_EMAIL: 'owner@test.invalid',
       MALL_EMAIL_FROM: 'Mall Orders <orders@verified.test>',
       RESEND_API_KEY: 're_node_key',
+      MALL_OUTBOX_DRAIN_GAP_MS: '0',
     };
     const sent: any[] = [];
     const realFetch = globalThis.fetch;

@@ -17,6 +17,12 @@ as spam-like.
    sent **20 near-identical emails within two minutes** (10 at 02:20, 10 at 02:25).
    A brand-new domain that suddenly emits a burst of similar mail is the textbook
    trigger for `UnsolicitedMessageError`. This dominates the other factors.
+   **MITIGATED in code** — `drainMallOutbox` is now paced: at most
+   `MALL_OUTBOX_DRAIN_BATCH` (3) rows per run with a `MALL_OUTBOX_DRAIN_GAP_MS`
+   (2000) pause between emissions, so a backlog spreads instead of bursting. Note
+   this was made *worse* by the customer-copy fix (each event now emails two
+   recipients), which is why the throttle was required alongside it. See
+   `docs/mall-operations.md` → "Drain pacing".
 2. **HTML-only messages.** No `text/plain` alternative is a negative content signal
    for a low-reputation sender. **FIXED in code** — every send now includes a
    derived plain-text part (`textFromHtml`).

@@ -96,6 +96,33 @@ dead letters. Successful deliveries are retained for 30 days; undelivered events
 are not silently removed. The receiver URL is privileged configuration: never point
 it at an internal/private endpoint or accept it from public input.
 
+### Drain pacing (burst protection)
+
+A drain is paced, and the pacing is deliberate rather than incidental. Sending was
+the root cause of the Gmail block: a drain used to claim 10 outbox rows and deliver
+them back to back, and each order event now emails the operator **and** the buyer, so
+a backlog went out as ~20 near-identical messages within seconds — the documented
+trigger for `550-5.7.1 UnsolicitedMessageError` (see `docs/gmail-deliverability-fix.md`).
+
+| Variable | Default | Range | Effect |
+| --- | --- | --- | --- |
+| `MALL_OUTBOX_DRAIN_BATCH` | `3` | 1–25 | Rows claimed per drain |
+| `MALL_OUTBOX_DRAIN_GAP_MS` | `2000` | 0–30000 | Pause between emissions |
+
+- The pause sits **between** emissions, so N rows cost N−1 gaps; a lone event is
+  never delayed. A row that fails to claim (another isolate holds the lease) is
+  skipped and never costs a pause, because it emits nothing.
+- The lease `UPDATE` runs inside the loop, so each row's two-minute lease starts on
+  its own turn. The gap can never push a claim past its expiry.
+- **A blank or unparseable value falls back to the default, never to "no throttle."**
+  Failing open would restore the exact burst this exists to prevent. Only an explicit
+  `MALL_OUTBOX_DRAIN_GAP_MS=0` disables pacing.
+- Throughput: 3 rows × 12 runs/hour = ~36 events/hour (≈72 emails/hour). The drain
+  is not the binding constraint at normal order volume. Worst case adds 4s per run.
+- If buyers report late dispatch notices, raise the gap rather than the batch:
+  `MALL_OUTBOX_DRAIN_GAP_MS="10000"` spreads the same volume over a longer window,
+  which is the lever that actually affects reputation.
+
 ## Email notifications (deployed receiver)
 
 The deployed Worker is its own webhook receiver: `POST /api/mall-webhook`. It is public
