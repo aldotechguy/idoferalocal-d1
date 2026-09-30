@@ -164,9 +164,12 @@ the status filter, then **Refresh** — the list also auto-refreshes periodicall
 Three counters sit above the list: **Actionable**, **Awaiting payment**, and
 **Processing**.
 
-Managers additionally see an **Operational readiness** panel: whether checks are passing,
-notification counts, and a **Retry failed notifications** button. Treat "unavailable" as
-unknown, not as healthy.
+Managers additionally see an **Operational readiness** panel, collapsed by default. Its
+header always shows the score — **Ready (14/14)** when every check passes, **Not Ready
+(9/14)** when some fail — and the panel expands on its own the moment a check breaks, so
+a problem can never stay hidden. Expand it for the per-check list, notification counts,
+and a **Retry failed notifications** button. Treat "unavailable" as unknown, not as
+healthy.
 
 **Opening an order** shows the full detail: items, delivery zone/address, totals, the
 **Order timeline** (who did what, when), payment state and every action available to you.

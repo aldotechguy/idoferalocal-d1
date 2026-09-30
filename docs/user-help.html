@@ -93,7 +93,7 @@
 <figure><img src="screenshots/staff-mall-orders.png" alt="Mall Orders tab"><figcaption>Mall Orders tab</figcaption></figure>
 <p><strong>The list</strong> shows every Mall order with order number, customer, item count, total and status. Use the search box (order number, transfer reference, customer name or phone) and the status filter, then <strong>Refresh</strong> — the list also auto-refreshes periodically.</p>
 <p>Three counters sit above the list: <strong>Actionable</strong>, <strong>Awaiting payment</strong>, and <strong>Processing</strong>.</p>
-<p>Managers additionally see an <strong>Operational readiness</strong> panel: whether checks are passing, notification counts, and a <strong>Retry failed notifications</strong> button. Treat "unavailable" as unknown, not as healthy.</p>
+<p>Managers additionally see an <strong>Operational readiness</strong> panel, collapsed by default. Its header always shows the score — <strong>Ready (14/14)</strong> when every check passes, <strong>Not Ready (9/14)</strong> when some fail — and the panel expands on its own the moment a check breaks, so a problem can never stay hidden. Expand it for the per-check list, notification counts, and a <strong>Retry failed notifications</strong> button. Treat "unavailable" as unknown, not as healthy.</p>
 <p><strong>Opening an order</strong> shows the full detail: items, delivery zone/address, totals, the <strong>Order timeline</strong> (who did what, when), payment state and every action available to you.</p>
 <p><strong>The order lifecycle</strong> the system enforces:</p>
 <p>``<code> pending → confirmed → processing → packed → ready_for_pickup → completed packed → out_for_delivery → completed </code>``</p>

@@ -1,10 +1,11 @@
 import React from 'react';
-import { Banknote, CheckCircle2, PackageCheck, RefreshCw, Search, XCircle } from 'lucide-react';
+import { Banknote, CheckCircle2, PackageCheck, RefreshCw, Search, XCircle, Activity, ChevronDown, ChevronUp } from 'lucide-react';
 import { AccessibleOverlay } from '../common/AccessibleOverlay';
 import { AsyncState } from '../common/AsyncState';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { staffMallClient, type StaffMallOrder } from '../../services/staffMallClient';
+import { mallReadinessSummary } from '../../shared/mallReadinessPresentation';
 
 const STATUS_LABELS: Record<string, string> = {
   pending: 'Pending review', confirmed: 'Confirmed', processing: 'Processing', packed: 'Packed',
@@ -39,7 +40,15 @@ export const MallOrdersView: React.FC = () => {
   const [courier,setCourier]=React.useState('');
   const [returnReference,setReturnReference]=React.useState('');
   const [operations,setOperations]=React.useState<any>(null);
+  const [readinessOpen,setReadinessOpen]=React.useState(false);
   const manager = ['Administrator','Store Manager','Accountant'].includes(currentUser?.role || '');
+  // Collapsed, the panel reports its score on the header badge; expanded, the
+  // same label sits above the per-check list. Unavailable (no payload) is kept
+  // distinct from a failing score, so the header never implies health it cannot
+  // prove.
+  const readiness=React.useMemo(()=>mallReadinessSummary(operations?.readiness?.checks),[operations]);
+  const readinessFailing=Boolean(operations)&&!readiness.ready;
+  const wasReadinessFailing=React.useRef(readinessFailing);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -52,6 +61,13 @@ export const MallOrdersView: React.FC = () => {
 
   React.useEffect(() => { load(); const timer=setInterval(load,60000); return ()=>clearInterval(timer); }, [load]);
   React.useEffect(()=>{ if(!manager) return; const refresh=()=>staffMallClient.operations().then(setOperations).catch(()=>setOperations(null)); refresh(); const timer=setInterval(refresh,60000); return ()=>clearInterval(timer); },[manager]);
+  // Auto-expand on the TRANSITION into failure, not as a lock: gating the open
+  // state on `open || failing` would make the panel impossible to collapse while
+  // a check is failing. Keyed on the edge so a newly broken store always
+  // surfaces, while a manager who dismisses it keeps it dismissed. `operations`
+  // is null until the first poll resolves, so a slow first load cannot trigger
+  // a spurious expand.
+  React.useEffect(()=>{ if(readinessFailing&&!wasReadinessFailing.current) setReadinessOpen(true); wasReadinessFailing.current=readinessFailing; },[readinessFailing]);
 
   const open = async (order: StaffMallOrder) => {
     setReturnDecision(''); setReturnReference(''); setCourier(order.dispatch?.courier || ''); setSelected(order); setReference(order.payment.reference || '');
@@ -71,7 +87,48 @@ export const MallOrdersView: React.FC = () => {
   const activeCount = orders.filter((order) => !['completed', 'cancelled', 'refunded'].includes(order.status)).length;
 
   return <div className="space-y-4">
-    {manager && <section className="rounded-xl border p-4 space-y-2"><h2 className="font-bold">Operational readiness</h2>{operations ? <><p>{operations.readiness.ready ? 'Checks passing' : 'Action required before unattended operation'}</p><ul className="text-sm">{Object.entries(operations.readiness.checks).map(([key,value])=><li key={key}>{key}: {value?'OK':'Needs attention'}</li>)}</ul><p className="text-sm">Notifications: {operations.notifications.map((n:any)=>`${n.status}: ${n.count}`).join(', ') || 'No pending events'}</p>{['Administrator','Store Manager'].includes(currentUser?.role || '') && <button className="rounded border px-3 py-2" onClick={async()=>{try{await staffMallClient.retryNotifications();setOperations(await staffMallClient.operations());}catch(error){showToast({title:'Retry failed',message:String(error),type:'error'});}}}>Retry failed notifications</button>}</> : <p>Operational checks unavailable. Do not assume readiness.</p>}</section>}
+    {manager && <section className="rounded-2xl border bg-white dark:bg-slate-900 overflow-hidden">
+      <button
+        type="button"
+        onClick={()=>setReadinessOpen(!readinessOpen)}
+        aria-expanded={readinessOpen}
+        aria-controls="mall-readiness-panel"
+        className="w-full px-4 py-3 flex items-center justify-between gap-3 text-left hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors cursor-pointer"
+      >
+        <span className="flex items-center gap-2 min-w-0">
+          <Activity className={`w-4 h-4 shrink-0 ${readiness.ready?'text-emerald-600 dark:text-emerald-400':readiness.total?'text-amber-600 dark:text-amber-400':'text-slate-400'}`} />
+          <h2 className="font-bold text-sm truncate">Operational readiness</h2>
+          {/* The score is the whole point of the collapsed state, so it stays
+              visible when expanded too, and is announced politely as the
+              background poll changes it. */}
+          <span
+            role="status"
+            aria-live="polite"
+            className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold border whitespace-nowrap ${
+              !readiness.total
+                ? 'bg-slate-100 text-slate-600 border-slate-300 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700'
+                : readiness.ready
+                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-900'
+                  : 'bg-amber-50 text-amber-800 border-amber-300 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-900'
+            }`}
+          >
+            {readiness.label}
+          </span>
+        </span>
+        {readinessOpen
+          ? <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" />
+          : <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />}
+      </button>
+
+      {readinessOpen && <div id="mall-readiness-panel" className="px-4 pb-4 pt-3 space-y-2 border-t border-slate-100 dark:border-slate-800">
+        {operations ? <>
+          <p>{readiness.ready ? 'Checks passing' : 'Action required before unattended operation'}</p>
+          <ul className="text-sm">{Object.entries(operations.readiness.checks).map(([key,value])=><li key={key}>{key}: {value?'OK':'Needs attention'}</li>)}</ul>
+          <p className="text-sm">Notifications: {operations.notifications.map((n:any)=>`${n.status}: ${n.count}`).join(', ') || 'No pending events'}</p>
+          {['Administrator','Store Manager'].includes(currentUser?.role || '') && <button className="rounded border px-3 py-2" onClick={async()=>{try{await staffMallClient.retryNotifications();setOperations(await staffMallClient.operations());}catch(error){showToast({title:'Retry failed',message:String(error),type:'error'});}}}>Retry failed notifications</button>}
+        </> : <p>Operational checks unavailable. Do not assume readiness.</p>}
+      </div>}
+    </section>}
     <div className="grid sm:grid-cols-3 gap-3">
       <div className="rounded-2xl border bg-white dark:bg-slate-900 p-4"><p className="text-xs font-bold text-slate-500">Actionable</p><p className="text-2xl font-black">{activeCount}</p></div>
       <div className="rounded-2xl border bg-white dark:bg-slate-900 p-4"><p className="text-xs font-bold text-slate-500">Awaiting payment</p><p className="text-2xl font-black">{orders.filter((o) => o.payment.status === 'pending').length}</p></div>

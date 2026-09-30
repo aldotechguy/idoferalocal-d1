@@ -9,6 +9,7 @@ import { validateBuyer } from '../src/mall-site/useBuyerForm.ts';
 import { mallDeliveryFeeKobo, mallDeliveryZone } from '../src/shared/mallDelivery.ts';
 import { localIsoDate } from '../src/shared/localDate.ts';
 import { mallAvailabilityLabel, mallStockLabel } from '../src/shared/mallProductPresentation.ts';
+import { mallReadinessSummary } from '../src/shared/mallReadinessPresentation.ts';
 import { mallClient } from '../src/services/mallClient.ts';
 import { createMallSearchMatcher, mallOneTypo } from '../src/shared/mallSearch.ts';
 import { handleMallApi } from '../src/server/mallApi.ts';
@@ -1201,4 +1202,37 @@ test('the Access logout URL is offered only when the gate is configured', async 
   const live = await read({ CF_ACCESS_SSO: 'true', CF_ACCESS_TEAM_DOMAIN: 'https://team.cloudflareaccess.com/' });
   assert.match(live.url || '', /^https:\/\/team\.cloudflareaccess\.com\/cdn-cgi\/access\/logout\?returnTo=/);
   assert.match(decodeURIComponent(live.url || ''), /returnTo=https:\/\/test\/?$/, 'returns the operator to this origin (the Mall)');
+});
+
+/**
+ * The collapsed readiness panel states the score, so a wrong fraction is a
+ * safety bug, not a cosmetic one. `mallReadiness` currently reports 14 checks
+ * (the passing case is asserted server-side in mall-safety.test.ts), and a
+ * missing or empty payload must read as unknown — never as a healthy store.
+ */
+test('readiness scoring reports the real check count and never claims health it cannot prove', () => {
+  const NAMES = ['stockTrigger', 'schemaObjects', 'schema', 'database', 'listingFields', 'scheduler', 'notifications', 'webhookDelivery', 'fulfilmentQueue', 'bank', 'pickup', 'webhook', 'checkoutEnabled', 'imageStorage'];
+  assert.equal(NAMES.length, 14, 'the denominator is derived, so a name list this long implies 14 checks');
+
+  const allPass = Object.fromEntries(NAMES.map((name) => [name, true]));
+  assert.deepEqual(mallReadinessSummary(allPass), { ready: true, passing: 14, total: 14, label: 'Ready (14/14)' });
+
+  // Nine of fourteen passing: the header must say Not Ready and print the
+  // partial score, never a bare word that hides how much is broken.
+  const nineOfFourteen = Object.fromEntries(NAMES.map((name, index) => [name, index < 9]));
+  assert.deepEqual(mallReadinessSummary(nineOfFourteen), { ready: false, passing: 9, total: 14, label: 'Not Ready (9/14)' });
+
+  const allFail = Object.fromEntries(NAMES.map((name) => [name, false]));
+  assert.deepEqual(mallReadinessSummary(allFail), { ready: false, passing: 0, total: 14, label: 'Not Ready (0/14)' });
+
+  // Unknown is not healthy: a failed fetch has no payload, and the server's own
+  // `ready` flag is vacuously true for {} (`[].every(Boolean)`), so trusting it
+  // would report a broken store as a passing one.
+  assert.deepEqual(mallReadinessSummary(null), { ready: false, passing: 0, total: 0, label: 'Unavailable' });
+  assert.deepEqual(mallReadinessSummary(undefined), { ready: false, passing: 0, total: 0, label: 'Unavailable' });
+  assert.deepEqual(mallReadinessSummary({}), { ready: false, passing: 0, total: 0, label: 'Unavailable' });
+
+  // A non-boolean must not score as a passing check: strict equality, not
+  // truthiness, so a malformed payload degrades to Not Ready rather than Ready.
+  assert.deepEqual(mallReadinessSummary({ a: 1, b: 'yes', c: true } as unknown as Record<string, boolean>), { ready: false, passing: 1, total: 3, label: 'Not Ready (1/3)' });
 });
