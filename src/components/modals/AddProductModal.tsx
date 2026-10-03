@@ -8,6 +8,12 @@ interface AddProductModalProps {
   isOpen: boolean;
   onClose: () => void;
   editingProduct?: Product | null;
+  onProductCreated?: (product: Product) => void;
+  initialSupplierId?: string;
+  initialName?: string;
+  initialBarcode?: string;
+  initialStock?: number;
+  zIndexClass?: string;
 }
 
 export const generate4CharSKU = (): string => {
@@ -52,6 +58,12 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
   isOpen,
   onClose,
   editingProduct,
+  onProductCreated,
+  initialSupplierId,
+  initialName,
+  initialBarcode,
+  initialStock,
+  zIndexClass,
 }) => {
   const { products, addProduct, updateProduct, suppliers, settings } = useApp();
   const { currentUser } = useAuth();
@@ -86,15 +98,21 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
         status: editingProduct.status || 'Active',
       };
     }
+
+    const defaultSupId = initialSupplierId || suppliers[0]?.id || 'sup-1';
+    const defaultSup = suppliers.find((s) => s.id === defaultSupId);
+
+    const defaultStock = initialStock !== undefined ? initialStock : (initialSupplierId ? 0 : 50);
+
     return {
-      name: '',
+      name: initialName || '',
       sku: generate4CharSKU(),
-      barcode: `${Math.floor(Math.random() * 899999999999 + 100000000000)}`,
+      barcode: initialBarcode || `${Math.floor(Math.random() * 899999999999 + 100000000000)}`,
       qrCode: `QR-${Math.floor(Math.random() * 89999 + 10000)}`,
       category: 'Packaging Materials',
       brand: 'Idofera Standard',
-      supplierId: suppliers[0]?.id || 'sup-1',
-      supplierName: suppliers[0]?.name || 'AeroTech Electronics Global',
+      supplierId: defaultSupId,
+      supplierName: defaultSup?.name || 'AeroTech Electronics Global',
       description: '',
       images: ['https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f?w=600&auto=format&fit=crop'],
       costPrice: 500,
@@ -104,7 +122,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
       dealerPrice: 850,
       promotionalPrice: 1100,
       minimumSellingPrice: 750,
-      currentStock: 50,
+      currentStock: defaultStock,
       minimumStockLevel: 10,
       unit: 'pcs',
       expiryDate: '',
@@ -158,7 +176,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
       setImageUploadError('');
       setImageUrlInput('');
     }
-  }, [isOpen, editingProduct]);
+  }, [isOpen, editingProduct, initialSupplierId, initialName, initialBarcode, initialStock]);
 
   if (!isOpen) return null;
 
@@ -225,6 +243,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
     const selectedSupplier = suppliers.find((s) => s.id === formData.supplierId);
     const supplierName = selectedSupplier ? selectedSupplier.name : formData.supplierName;
 
+    let createdProduct: Product | null = null;
     if (editingProduct) {
       if (currentUser?.role === 'Sales Staff') {
         alert('Sales Staff accounts are not authorized to edit existing products.');
@@ -235,7 +254,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
         supplierName,
       });
     } else {
-      addProduct({
+      createdProduct = addProduct({
         ...formData,
         supplierName,
         status: formData.status || (formData.currentStock <= 0 ? 'Out of Stock' : formData.currentStock <= formData.minimumStockLevel ? 'Low Stock' : 'Active'),
@@ -243,10 +262,13 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
     }
 
     onClose();
+    if (createdProduct && onProductCreated) {
+      onProductCreated(createdProduct);
+    }
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+    <div className={`fixed inset-0 ${zIndexClass || 'z-50'} bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto`}>
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl max-w-4xl w-full max-h-[92vh] flex flex-col overflow-hidden my-auto">
         {/* Modal Header */}
         <div className="flex items-center justify-between p-5 border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/30">

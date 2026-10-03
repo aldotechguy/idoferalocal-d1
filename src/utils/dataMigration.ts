@@ -129,10 +129,25 @@ export function migrateRecord(collection: string, record: any): any {
       break;
     }
 
+    case 'customers': {
+      migrated.outstandingBalance = Number(migrated.outstandingBalance ?? 0);
+      migrated.overageBalance = Number(migrated.overageBalance ?? 0);
+      migrated.loyaltyPoints = Number(migrated.loyaltyPoints ?? 0);
+      migrated.lifetimeValue = Number(migrated.lifetimeValue ?? 0);
+      migrated.purchaseHistoryCount = Number(migrated.purchaseHistoryCount ?? 0);
+      break;
+    }
+
     case 'sales': {
       migrated.totalAmount = Number(migrated.totalAmount ?? 0);
       migrated.subtotal = Number(migrated.subtotal ?? migrated.totalAmount ?? 0);
       migrated.paidAmount = Number(migrated.paidAmount ?? migrated.totalAmount ?? 0);
+      if (migrated.overageApplied !== undefined && migrated.overageApplied !== null) {
+        migrated.overageApplied = Number(migrated.overageApplied || 0);
+      }
+      if (migrated.overageCreated !== undefined && migrated.overageCreated !== null) {
+        migrated.overageCreated = Number(migrated.overageCreated || 0);
+      }
       migrated.deliveryFee = Number(migrated.deliveryFee ?? 0);
       migrated.discount = Number(migrated.discount ?? 0);
       migrated.tax = Number(migrated.tax ?? 0);

@@ -30,6 +30,7 @@ interface ProductSearchPickerProps {
   poItems: POItemFormState[];
   onAddItem: (productId: string, suggestedQuantity?: number) => void;
   currencySymbol: string;
+  onOpenNewProductModal?: (suggestedName?: string) => void;
 }
 
 type UrgencyCategory =
@@ -63,6 +64,7 @@ export const ProductSearchPicker: React.FC<ProductSearchPickerProps> = ({
   poItems,
   onAddItem,
   currencySymbol,
+  onOpenNewProductModal,
 }) => {
   const app = useApp();
   const sales = propsSales ?? app?.sales ?? [];
@@ -357,7 +359,7 @@ export const ProductSearchPicker: React.FC<ProductSearchPickerProps> = ({
           )}
         </div>
 
-        {/* Sort Order Selector */}
+        {/* Sort Order Selector & New Product Action */}
         <div className="flex items-center gap-1.5 shrink-0">
           <div className="flex items-center gap-1 px-2.5 py-2 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-bold shadow-2xs">
             <ArrowDownUp className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
@@ -373,6 +375,18 @@ export const ProductSearchPicker: React.FC<ProductSearchPickerProps> = ({
               <option value="alphabetical">Product Name (A - Z)</option>
             </select>
           </div>
+
+          {onOpenNewProductModal && (
+            <button
+              type="button"
+              onClick={() => onOpenNewProductModal(searchTerm.trim())}
+              className="flex items-center gap-1 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-2xs transition-all hover:scale-[1.02]"
+              title="Add a brand new product to catalog and this PO"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>New Product</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -495,9 +509,24 @@ export const ProductSearchPicker: React.FC<ProductSearchPickerProps> = ({
               <p className="text-[11px] mt-0.5">
                 Try switching the category or resetting your filter.
               </p>
+              {onOpenNewProductModal && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsOpen(false);
+                    onOpenNewProductModal(searchTerm.trim());
+                  }}
+                  className="mt-3 inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-xs shadow-xs transition-all hover:scale-[1.02]"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Create &quot;{searchTerm.trim() || 'New Product'}&quot; in Catalog</span>
+                </button>
+              )}
             </div>
           ) : (
-            filteredAndSortedProfiles.slice(0, 50).map((prof) => {
+            <>
+              {filteredAndSortedProfiles.slice(0, 50).map((prof) => {
               const product = prof.product;
               const inPoQty = poItemsMap.get(product.id);
               const isOOS = prof.currentStock <= 0;
@@ -635,8 +664,29 @@ export const ProductSearchPicker: React.FC<ProductSearchPickerProps> = ({
                   </div>
                 </div>
               );
-            })
-          )}
+            })}
+
+            {onOpenNewProductModal && (
+              <div className="p-2.5 border-t border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/80 rounded-b-xl flex items-center justify-between sticky bottom-0 backdrop-blur-md z-10">
+                <span className="text-[11px] text-slate-500 font-medium">
+                  Can&apos;t find what you need?
+                </span>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsOpen(false);
+                    onOpenNewProductModal(searchTerm.trim());
+                  }}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold shadow-2xs transition-all hover:scale-[1.02]"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>+ Create New Product</span>
+                </button>
+              </div>
+            )}
+          </>
+        )}
         </div>
       )}
     </div>

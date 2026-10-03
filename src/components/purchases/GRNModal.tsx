@@ -113,6 +113,20 @@ export const GRNModal: React.FC<GRNModalProps> = ({ isOpen, onClose, po, onOpenP
     0
   );
 
+  // Item Unit Totals for Breakdown Table
+  const totalOrderedUnits = po.items.reduce((sum, item) => sum + (item.quantity || 0), 0);
+  const totalReceivedUnits = po.items.reduce((sum, item) => sum + (item.receivedQuantity ?? item.quantity), 0);
+  const totalAcceptedUnits = po.items.reduce((sum, item) => sum + (item.acceptedQuantity ?? (item.receivedQuantity ?? item.quantity)), 0);
+  const totalDamagedUnits = po.items.reduce((sum, item) => sum + (item.damagedQuantity || 0), 0);
+  const totalShortageUnits = po.items.reduce(
+    (sum, item) => sum + (item.shortageQuantity !== undefined ? item.shortageQuantity : Math.max(0, item.quantity - (item.receivedQuantity ?? item.quantity))),
+    0
+  );
+  const totalExcessUnits = po.items.reduce(
+    (sum, item) => sum + (item.excessQuantity !== undefined ? item.excessQuantity : Math.max(0, (item.receivedQuantity ?? item.quantity) - item.quantity)),
+    0
+  );
+
   // Local receiving logistics (recorded during receiving/inspecting stock)
   const recordedLocalReceivingLogistics = po.receivingHistory?.reduce(
     (sum, h) => sum + (h.deliveryFee || 0),
@@ -332,8 +346,12 @@ export const GRNModal: React.FC<GRNModalProps> = ({ isOpen, onClose, po, onOpenP
                     const received = item.receivedQuantity ?? item.quantity;
                     const accepted = item.acceptedQuantity ?? received;
                     const damaged = item.damagedQuantity ?? 0;
-                    const shortage = Math.max(0, item.quantity - received - damaged);
-                    const excess = Math.max(0, received - item.quantity);
+                    const shortage = item.shortageQuantity !== undefined
+                      ? item.shortageQuantity
+                      : Math.max(0, item.quantity - received);
+                    const excess = item.excessQuantity !== undefined
+                      ? item.excessQuantity
+                      : Math.max(0, received - item.quantity);
                     const acceptedTotal = accepted * item.unitCost;
 
                     return (
@@ -357,6 +375,21 @@ export const GRNModal: React.FC<GRNModalProps> = ({ isOpen, onClose, po, onOpenP
                     );
                   })}
                 </tbody>
+                <tfoot className="bg-slate-50 dark:bg-slate-800/80 font-bold border-t border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 print:border-slate-400">
+                  <tr>
+                    <td colSpan={2} className="py-2.5 px-3 uppercase text-[10px] text-slate-400 font-extrabold tracking-wider">
+                      Totals Summary
+                    </td>
+                    <td className="py-2.5 px-2 text-center font-bold">{totalOrderedUnits}</td>
+                    <td className="py-2.5 px-2 text-center font-bold">{totalReceivedUnits}</td>
+                    <td className="py-2.5 px-2 text-center font-black text-emerald-600 dark:text-emerald-400">{totalAcceptedUnits}</td>
+                    <td className="py-2.5 px-2 text-center font-bold text-rose-600">{totalDamagedUnits > 0 ? totalDamagedUnits : 0}</td>
+                    <td className={`py-2.5 px-2 text-center font-black ${totalShortageUnits > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-400'}`}>{totalShortageUnits}</td>
+                    <td className={`py-2.5 px-2 text-center font-black ${totalExcessUnits > 0 ? 'text-blue-600 dark:text-blue-400' : 'text-slate-400'}`}>{totalExcessUnits}</td>
+                    <td className="py-2.5 px-3"></td>
+                    <td className="py-2.5 px-3 text-right font-bold font-mono text-emerald-600 dark:text-emerald-400">{settings.currencySymbol}{(Number(totalAcceptedGoodsCost) || 0).toFixed(2)}</td>
+                  </tr>
+                </tfoot>
               </table>
             </div>
           </div>
