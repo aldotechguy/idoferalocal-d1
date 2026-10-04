@@ -168,7 +168,7 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
           </span>
         )}
 
-        {/* Sync Status Mini Pill Ã¢â‚¬â€ count only on phones (label hidden, saves ~70px) */}
+        {/* Sync Status Mini Pill — count only on phones (label hidden, saves ~70px) */}
         {unsyncedCount > 0 ? (
           <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-md bg-amber-500/20 text-amber-700 dark:text-amber-300">
             <span className="sm:hidden">{unsyncedCount}</span>
@@ -246,7 +246,7 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
                 )}
               </div>
               <div className="text-base font-extrabold font-mono text-slate-800 dark:text-slate-100">
-                {isConnected ? `${health?.latencyMs || 0} ms` : 'Ã¢â‚¬â€'}
+                {isConnected ? `${health?.latencyMs || 0} ms` : '—'}
               </div>
             </div>
 
@@ -325,7 +325,7 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
             </div>
           )}
 
-          {/* Action Buttons Ã¢â‚¬â€ 44px touch targets on mobile */}
+          {/* Action Buttons — 44px touch targets on mobile */}
           <div className="pt-1 space-y-1.5">
             {onSync && (
               <button
