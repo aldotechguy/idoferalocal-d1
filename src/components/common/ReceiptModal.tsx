@@ -214,8 +214,8 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ sale, onClose, onEdi
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto print:p-0 print:bg-white print:static print-container-root">
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl max-w-md w-full my-auto overflow-hidden flex flex-col max-h-[90vh] print:max-h-none print:shadow-none print:border-none print:rounded-none print:w-full print:max-w-none">
+    <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-2 sm:p-4 overflow-y-auto print:p-0 print:bg-white print:static print-container-root" style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' }}>
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-t-3xl sm:rounded-3xl shadow-2xl max-w-md w-full mt-auto sm:my-auto overflow-hidden flex flex-col max-h-[92dvh] sm:max-h-[90vh] print:max-h-none print:shadow-none print:border-none print:rounded-none print:w-full print:max-w-none">
         {/* Modal Header (Hidden on Print) */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 print:hidden">
           <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400 font-bold text-sm min-w-0">
@@ -480,8 +480,8 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ sale, onClose, onEdi
           )}
         </div>
 
-        {/* Modal Actions (Hidden during print) */}
-        <div className="flex items-center justify-end gap-3 p-4 bg-slate-50 dark:bg-slate-900/50 border-t border-slate-100 dark:border-slate-800 print:hidden">
+        {/* Modal Actions (Hidden during print) — full-width stacked buttons on phones */}
+        <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2 sm:gap-3 p-4 bg-slate-50 dark:bg-slate-900/50 border-t border-slate-100 dark:border-slate-800 print:hidden" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
           {isSuperAdmin && (
             <button
               onClick={() => {
@@ -492,7 +492,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ sale, onClose, onEdi
                   setIsEditingInternal(true);
                 }
               }}
-              className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-amber-500 hover:bg-amber-600 text-white rounded-xl shadow-xs transition-colors cursor-pointer"
+              className="flex items-center justify-center gap-1.5 px-4 py-2.5 sm:py-2 min-h-[44px] sm:min-h-0 text-xs font-semibold bg-amber-500 hover:bg-amber-600 text-white rounded-xl shadow-xs transition-colors cursor-pointer"
               title="Edit Transaction Record"
             >
               <Edit3 className="w-3.5 h-3.5" />
@@ -501,7 +501,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ sale, onClose, onEdi
           )}
           <button
             onClick={handlePrint}
-            className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 rounded-xl shadow-xs transition-colors cursor-pointer"
+            className="flex items-center justify-center gap-1.5 px-4 py-2.5 sm:py-2 min-h-[44px] sm:min-h-0 text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 rounded-xl shadow-xs transition-colors cursor-pointer"
           >
             <Printer className="w-4 h-4" />
             <span>Print Invoice</span>

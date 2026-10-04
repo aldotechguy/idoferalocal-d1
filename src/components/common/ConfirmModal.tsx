@@ -41,9 +41,9 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
 
   return (
     <AccessibleOverlay open={isOpen} onClose={onClose} title={title} description="Confirmation required" className="max-w-md" footer={
-      <div className="flex items-center justify-end gap-2.5">
-        <button type="button" onClick={onClose} className="min-h-10 px-4 text-sm font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl">{cancelText}</button>
-        <button type="button" onClick={() => { onConfirm(); onClose(); }} className={`min-h-10 px-4 text-sm font-extrabold rounded-xl shadow-xs ${buttonBg}`}>{confirmText}</button>
+      <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2 sm:gap-2.5">
+        <button type="button" onClick={onClose} className="w-full sm:w-auto min-h-[44px] sm:min-h-10 px-4 text-sm font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl">{cancelText}</button>
+        <button type="button" onClick={() => { onConfirm(); onClose(); }} className={`w-full sm:w-auto min-h-[44px] sm:min-h-10 px-4 text-sm font-extrabold rounded-xl shadow-xs ${buttonBg}`}>{confirmText}</button>
       </div>
     }>
       <div className="space-y-4">

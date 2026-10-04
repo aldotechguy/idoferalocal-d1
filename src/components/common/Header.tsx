@@ -140,6 +140,22 @@ export const Header: React.FC<HeaderProps> = ({
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, []);
 
+  // Mobile placeholder swap: short prompt on phones so it never truncates mid-word.
+  // data-* attributes above are the source of truth; this only swaps the live attribute.
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 639px)');
+    const apply = () => {
+      const el = searchInputRef.current;
+      if (!el) return;
+      el.placeholder = mq.matches
+        ? (el.dataset.mobilePlaceholder || 'Search…')
+        : (el.dataset.desktopPlaceholder || el.placeholder);
+    };
+    apply();
+    mq.addEventListener('change', apply);
+    return () => mq.removeEventListener('change', apply);
+  }, []);
+
   const cleanQuery = searchQuery.trim().toLowerCase();
 
   // Generate real-time prediction items for auto-complete
@@ -281,8 +297,9 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   return (
-    <header className="app-header sticky top-0 z-30 px-4 lg:px-8 py-3 transition-all duration-200">
-      <div className="app-header-layout flex items-center justify-between gap-4">
+    <header className="app-header sticky top-0 z-30 px-3 sm:px-4 lg:px-8 pt-3 pb-2 sm:py-3 transition-all duration-200" style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))' }}>
+      <div className="app-header-layout flex flex-wrap items-center gap-x-3 gap-y-2 sm:gap-4 sm:flex-nowrap">
+        {/* Row 1 — hamburger + compact status cluster (mobile); spacer keeps search full-width below */}
         {/* Left Section (Mobile Hamburger only on non-desktop to maximize search bar real estate) */}
         <div className="flex items-center lg:hidden shrink-0">
           <button
@@ -295,8 +312,8 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
         </div>
 
-        {/* Global Interactive Search Bar with Auto-complete Predictions - Maximized Real Estate Across All Devices */}
-        <div className="flex flex-1 min-w-0 max-w-3xl mx-1.5 sm:mx-3 lg:mx-0 relative">
+        {/* Global search — own full-width row on mobile (order-3 basis-full), inline on sm+ */}
+        <div className="order-3 basis-full sm:order-none sm:basis-auto flex flex-1 min-w-0 sm:min-w-[220px] max-w-3xl sm:mx-3 lg:mx-0 relative">
           <div className="relative w-full">
             <Search className="w-4 h-4 absolute left-3 sm:left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
             <input
@@ -307,7 +324,7 @@ export const Header: React.FC<HeaderProps> = ({
               autoComplete="off"
               autoCorrect="off"
               spellCheck={false}
-              placeholder="Search products, invoices, customers… (Ctrl/⌘ K)"
+              placeholder="Search products, invoices, customers…" data-desktop-placeholder="Search products, invoices, customers… (Ctrl/⌘ K)" data-mobile-placeholder="Search products, invoices…"
               value={searchQuery}
               onChange={(e) => {
                 setSearchQuery(e.target.value);
@@ -322,6 +339,7 @@ export const Header: React.FC<HeaderProps> = ({
               aria-autocomplete="list"
               aria-activedescendant={selectedIndex >= 0 ? `staff-search-option-${selectedIndex}` : undefined}
               onKeyDown={(e) => {
+                if (e.key === 'Escape') { setIsSearchFocused(false); return; }
                 if (e.key === 'ArrowDown') {
                   e.preventDefault();
                   setSelectedIndex((prev) => (prev < predictions.length - 1 ? prev + 1 : 0));
@@ -339,7 +357,7 @@ export const Header: React.FC<HeaderProps> = ({
                   setIsSearchFocused(false);
                 }
               }}
-              className="w-full pl-9 sm:pl-10 pr-10 sm:pr-16 py-2 bg-white/65 dark:bg-slate-900/65 backdrop-blur-md border border-white/60 dark:border-white/10 focus:border-amber-500 text-slate-900 dark:text-slate-100 text-xs sm:text-sm rounded-xl focus:outline-none transition-all shadow-xs"
+              className="w-full min-h-[44px] pl-9 sm:pl-10 pr-10 sm:pr-16 py-2 sm:py-2 bg-white/65 dark:bg-slate-900/65 backdrop-blur-md border border-white/60 dark:border-white/10 focus:border-amber-500 text-slate-900 dark:text-slate-100 text-base sm:text-sm rounded-xl focus:outline-none transition-all shadow-xs"
             />
 
             {/* Right Action Icons in Input */}
@@ -366,10 +384,10 @@ export const Header: React.FC<HeaderProps> = ({
           {isSearchFocused && cleanQuery.length > 0 && (
             <>
               <div
-                className="fixed inset-0 z-40"
+                className="fixed inset-0 z-40 bg-slate-950/20 sm:bg-transparent"
                 onClick={() => setIsSearchFocused(false)}
               />
-              <div id="staff-search-results" role="listbox" className="absolute left-0 right-0 top-full mt-2 liquid-glass-elevated rounded-2xl z-50 overflow-hidden divide-y divide-slate-100/60 dark:divide-slate-800/60 animate-in fade-in duration-150">
+              <div id="staff-search-results" role="listbox" className="liquid-glass-elevated rounded-2xl z-50 overflow-hidden divide-y divide-slate-100/60 dark:divide-slate-800/60 animate-in fade-in duration-150 fixed left-3 right-3 mt-2 max-h-[60dvh] overflow-y-auto overscroll-contain sm:absolute sm:left-0 sm:right-0 sm:top-full sm:max-h-72">
                 {predictions.length === 0 ? (
                   <div className="p-4 text-center text-xs text-slate-500 space-y-1">
                     <p className="font-bold">No quick predictions for "{searchQuery}"</p>
@@ -458,8 +476,8 @@ export const Header: React.FC<HeaderProps> = ({
           )}
         </div>
 
-        {/* Right Action Icons & Profile Menu Trigger */}
-        <div className="app-header-actions flex items-center gap-2.5">
+        {/* Right Action Icons - row 1 right cluster on mobile, inline on sm+ */}
+        <div className="app-header-actions ml-auto sm:ml-0 flex items-center gap-1 sm:gap-2 sm:gap-2.5 shrink-0">
           {/* Cloudflare D1 Network Health Indicator */}
           <D1NetworkHealthBadge
             health={d1Health}
@@ -470,11 +488,11 @@ export const Header: React.FC<HeaderProps> = ({
             onSync={triggerSync}
           />
 
-          {/* Theme Toggle Button */}
+          {/* Theme Toggle Button (hidden on narrow phones — the same switch lives in the profile sheet) */}
           <button
             type="button"
             onClick={toggleTheme}
-            className="p-2 text-slate-600 dark:text-slate-300 liquid-glass-pill rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+            className="hidden min-[420px]:flex p-2 text-slate-600 dark:text-slate-300 liquid-glass-pill rounded-xl transition-all items-center gap-1.5 cursor-pointer"
             title={`Current theme: ${mode.toUpperCase()}. Click to switch to ${mode === 'dark' ? 'Light' : 'Dark'} mode`}
             aria-label="Toggle color theme"
           >
@@ -495,7 +513,7 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="relative">
             <button
               onClick={() => setShowNotifPopover(!showNotifPopover)}
-              className="relative p-2 text-slate-600 dark:text-slate-300 liquid-glass-pill rounded-xl transition-all cursor-pointer"
+              className="relative p-2 sm:p-2 text-slate-600 dark:text-slate-300 liquid-glass-pill rounded-xl transition-all cursor-pointer header-icon-btn"
               title="Notifications"
             >
               <Bell className="w-4 h-4" />
@@ -508,8 +526,8 @@ export const Header: React.FC<HeaderProps> = ({
 
             {showNotifPopover && (
               <>
-                <div className="fixed inset-0 z-40" onClick={() => setShowNotifPopover(false)} />
-                <div className="absolute right-0 mt-2 w-80 sm:w-96 liquid-glass-elevated rounded-2xl z-50 p-4">
+                <div className="fixed inset-0 z-40 bg-slate-950/40 sm:bg-transparent" onClick={() => setShowNotifPopover(false)} onTouchStart={() => setShowNotifPopover(false)} />
+                <div className="liquid-glass-elevated rounded-t-2xl sm:rounded-2xl z-50 p-4 fixed left-2 right-2 bottom-2 top-auto max-h-[78dvh] overflow-y-auto overscroll-contain sm:absolute sm:left-auto sm:right-0 sm:bottom-auto sm:mt-2 sm:top-full sm:max-h-[80vh] w-auto sm:w-96 max-w-[calc(100vw-1rem)]" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
                   <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
                     <div className="flex items-center gap-2">
                       <ShieldAlert className="w-4 h-4 text-blue-600" />
@@ -588,8 +606,8 @@ export const Header: React.FC<HeaderProps> = ({
 
             {showUserDropdown && (
               <>
-                <div className="fixed inset-0 z-40" onClick={() => setShowUserDropdown(false)} />
-                <div className="absolute right-0 mt-2 w-72 liquid-glass-elevated rounded-2xl z-50 p-3 space-y-3 text-slate-900 dark:text-white animate-in fade-in zoom-in-95 duration-150">
+                <div className="fixed inset-0 z-40 bg-slate-950/40 sm:bg-transparent" onClick={() => setShowUserDropdown(false)} onTouchStart={() => setShowUserDropdown(false)} />
+                <div className="liquid-glass-elevated rounded-t-2xl sm:rounded-2xl z-50 p-3 space-y-3 fixed left-2 right-2 bottom-2 top-auto max-h-[78dvh] overflow-y-auto overscroll-contain sm:absolute sm:left-auto sm:right-0 sm:bottom-auto sm:mt-2 sm:top-full w-auto sm:w-72 max-w-[calc(100vw-1rem)] text-slate-900 dark:text-white animate-in fade-in zoom-in-95 duration-150" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
                   {/* Current Active Account Header */}
                   <div className="p-2.5 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-100 dark:border-slate-800 flex items-center gap-3">
                     {currentUser?.avatarUrl ? (
@@ -689,11 +707,20 @@ export const Header: React.FC<HeaderProps> = ({
                   {/* Manage Staff & Sign Out Buttons */}
                   <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-1.5">
                     <button
+                      onClick={toggleTheme}
+                      className="w-full flex items-center justify-center gap-2 py-2 min-h-[44px] bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 dark:hover:bg-amber-900/60 text-amber-700 dark:text-amber-300 font-bold rounded-xl text-xs transition-colors border border-amber-200/60 dark:border-amber-900/50 min-[420px]:hidden"
+                      title="Toggle color theme"
+                    >
+                      {mode === 'dark' ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+                      <span>Switch to {mode === 'dark' ? 'Light' : 'Dark'} mode</span>
+                    </button>
+
+                    <button
                       onClick={() => {
                         setShowUserDropdown(false);
                         onNavigate('settings');
                       }}
-                      className="w-full flex items-center justify-center gap-2 py-2 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/80 text-indigo-600 dark:text-indigo-400 font-bold rounded-xl text-xs transition-colors"
+                      className="w-full flex items-center justify-center gap-2 py-2 min-h-[44px] bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/80 text-indigo-600 dark:text-indigo-400 font-bold rounded-xl text-xs transition-colors"
                     >
                       <KeyRound className="w-3.5 h-3.5" />
                       <span>Change / Reset My Password</span>

@@ -39,6 +39,16 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
   const [lastCheckText, setLastCheckText] = useState('Just now');
   const popoverRef = useRef<HTMLDivElement>(null);
 
+  // Lock body scroll while the mobile bottom-sheet is open; desktop popover scrolls in place
+  useEffect(() => {
+    if (!isOpen) return;
+    const isMobile = window.matchMedia('(max-width: 639px)').matches;
+    if (!isMobile) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, [isOpen]);
+
   const isConnected = Boolean(health?.connected);
   const isHealthy = health?.status === 'healthy' || (isConnected && (health?.latencyMs || 0) < 2000);
   const isDegraded = health?.status === 'degraded' || (isConnected && (health?.latencyMs || 0) >= 2000);
@@ -67,18 +77,24 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
     return () => clearInterval(interval);
   }, [health?.lastChecked]);
 
-  // Handle outside clicks to close popover
+  // Handle outside clicks + touch + Escape to close popover (touch matters on mobile)
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
+    if (!isOpen) return;
+    const handleClickOutside = (event: MouseEvent | TouchEvent) => {
       if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) {
         setIsOpen(false);
       }
     };
-    if (isOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsOpen(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('touchstart', handleClickOutside, { passive: true });
+    document.addEventListener('keydown', handleKey);
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('touchstart', handleClickOutside);
+      document.removeEventListener('keydown', handleKey);
     };
   }, [isOpen]);
 
@@ -152,10 +168,11 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
           </span>
         )}
 
-        {/* Sync Status Mini Pill */}
+        {/* Sync Status Mini Pill — count only on phones (label hidden, saves ~70px) */}
         {unsyncedCount > 0 ? (
           <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-md bg-amber-500/20 text-amber-700 dark:text-amber-300">
-            {unsyncedCount} unsynced
+            <span className="sm:hidden">{unsyncedCount}</span>
+            <span className="hidden sm:inline">{unsyncedCount} unsynced</span>
           </span>
         ) : isConnected ? (
           <span className="hidden lg:inline-block px-1.5 py-0.5 text-[10px] font-medium rounded-md bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
@@ -164,7 +181,7 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
         ) : null}
       </button>
 
-      {/* Quick Ping Button - gives user instant liberty to ping whenever in doubt */}
+      {/* Quick Ping Button — hidden on narrow phones, ping lives inside the popover */}
       <button
         type="button"
         id="d1-quick-ping-btn"
@@ -174,7 +191,7 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
         }}
         disabled={isChecking}
         title="Ping Cloudflare D1 endpoint now (test connectivity & latency anytime)"
-        className="p-1.5 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-all cursor-pointer shadow-xs disabled:opacity-50 flex items-center gap-1"
+        className="hidden min-[420px]:flex p-1.5 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-all cursor-pointer shadow-xs disabled:opacity-50 items-center gap-1"
       >
         <RefreshCw className={`w-3.5 h-3.5 ${isChecking ? 'animate-spin text-emerald-500' : 'text-slate-500'}`} />
         <span className="sr-only xl:not-sr-only text-[10px] font-medium hidden xl:inline">
@@ -182,12 +199,22 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
         </span>
       </button>
 
-      {/* Popover Dropdown Panel */}
+      {/* Popover Dropdown Panel — bottom sheet on phones (viewport-safe), absolute popover on sm+ */}
       {isOpen && (
-        <div
-          id="d1-health-popover-panel"
-          className="absolute right-0 mt-2 top-full w-80 sm:w-96 p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl z-50 animate-in fade-in zoom-in-95 duration-150 text-slate-800 dark:text-slate-100"
-        >
+        <>
+          <div
+            className="fixed inset-0 z-40 bg-slate-950/40 sm:hidden"
+            onClick={() => setIsOpen(false)}
+            onTouchStart={() => setIsOpen(false)}
+            aria-hidden="true"
+          />
+          <div
+            id="d1-health-popover-panel"
+            role="dialog"
+            aria-label="Cloudflare D1 network health"
+            className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-t-2xl sm:rounded-2xl shadow-2xl z-50 animate-in fade-in zoom-in-95 duration-150 text-slate-800 dark:text-slate-100 fixed left-2 right-2 bottom-2 top-auto max-h-[80dvh] overflow-y-auto overscroll-contain sm:absolute sm:left-auto sm:right-0 sm:bottom-auto sm:mt-2 sm:top-full sm:w-96 sm:max-h-[85vh] w-auto max-w-[calc(100vw-1rem)]"
+            style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}
+          >
           {/* Header */}
           <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
             <div className="flex items-center gap-2">
@@ -316,14 +343,14 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
             </div>
           )}
 
-          {/* Action Buttons */}
+          {/* Action Buttons — 44px touch targets on mobile */}
           <div className="pt-1 space-y-1.5">
             {onSync && (
               <button
                 type="button"
                 onClick={() => onSync()}
                 disabled={isSyncing || isOffline}
-                className="w-full py-2 px-3 text-xs font-bold rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-sm"
+                className="w-full py-2.5 sm:py-2 px-3 min-h-[44px] sm:min-h-0 text-xs font-bold rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-sm"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
                 <span>{isSyncing ? 'Synchronizing with D1...' : 'Sync with D1 Now'}</span>
@@ -336,7 +363,7 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
                 await onPing();
               }}
               disabled={isChecking}
-              className="w-full py-2 px-3 text-xs font-bold rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+              className="w-full py-2.5 sm:py-2 px-3 min-h-[44px] sm:min-h-0 text-xs font-bold rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isChecking ? 'animate-spin' : ''}`} />
               <span>{isChecking ? 'Pinging D1 Endpoint...' : 'Ping D1 Endpoint Now'}</span>
@@ -345,7 +372,8 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
               Auto-monitors every 5 minutes. Pulls and synchronizes authoritative data on-demand.
             </p>
           </div>
-        </div>
+          </div>
+        </>
       )}
     </div>
   );
