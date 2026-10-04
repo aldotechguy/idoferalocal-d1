@@ -410,9 +410,41 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
   stmts.push({sql:'INSERT INTO mall_returns(order_id,disposition,receipt_reference,reason,actor_id,created_at) VALUES (?,?,?,?,?,?)',params:[id,returnStock?'restocked':'not_restocked',s(body?.returnReference).trim().slice(0,120),reason,actor.id,at]});
   stmts.push({sql:"UPDATE delivery_orders SET status=?,updated_at=?,notes=COALESCE(notes,'') || ? WHERE sale_id=?",params:[returnStock?'Returned':'Cancelled',at,` | Mall refund: ${reason}`,row.linked_sale_id]});
   stmts.push({ sql: `UPDATE payments SET status = 'refunded', raw_json = ? WHERE order_id = ?`, params: [JSON.stringify({ orderNo: row.order_no, refundedBy: actor.displayName, refundedAt: at, reason, returnStock }), id] });
-  stmts.push({ sql: `UPDATE sales SET status = 'Refunded', notes = COALESCE(notes, '') || ? WHERE id = ?`, params: [` | Refunded from Mall: ${reason}`, row.linked_sale_id] });
+  // Parity with the client-side refundSale(). A Mall refund is a FULL refund, so it
+  // has to settle the relational finance fields too: writing only `status` left
+  // total_refunded_kobo at 0, refunds_json NULL and sale_items.returned_qty at 0,
+  // which is exactly the shape ProcessSaleRefundModal reads as "nothing returned
+  // yet" — the sale stayed refundable from POS and could be refunded and restocked
+  // a second time.
+  const refundedItems = items.map((item) => ({
+    productId: s(item.product_id), productName: s(item.product_name), sku: s(item.sku),
+    quantityReturned: n(item.qty), unitPrice: n(item.unit_price_kobo) / 100,
+    costPrice: n(item.cost_price_kobo) / 100,
+    condition: returnStock ? 'Restock' : 'Damaged',
+    subtotal: n(item.total_kobo) / 100,
+  }));
+  const refundRecord = {
+    id: `ref-mall-${id}`, refundNo: `REF-${s(row.order_no)}-1`, refundDate: at,
+    performedBy: actor.displayName, reason, items: refundedItems,
+    itemsSubtotal: refundedItems.reduce((sum, it) => sum + it.subtotal, 0),
+    discountDeducted: 0, taxDeducted: 0, deliveryFeeRefunded: 0,
+    netRefundAmount: n(row.total_kobo) / 100,
+    // Settled back through the business account rather than a cash drawer.
+    settlementMethod: 'Biz Account',
+    notes: `Refunded from Mall order ${s(row.order_no)}.`,
+  };
+  stmts.push({
+    sql: `UPDATE sales SET status = 'Refunded', total_refunded_kobo = ?, refunds_json = ?, notes = COALESCE(notes, '') || ? WHERE id = ?`,
+    params: [n(row.total_kobo), JSON.stringify([refundRecord]), ` | Refunded from Mall: ${reason}`, row.linked_sale_id],
+  });
+  // Mark every line fully returned so a later POS refund sees zero remaining qty.
+  for (const item of items) {
+    stmts.push({ sql: `UPDATE sale_items SET returned_qty = qty WHERE sale_id = ? AND product_id = ?`, params: [row.linked_sale_id, item.product_id] });
+  }
   stmts.push({ sql: `INSERT INTO money_movements (id, date, type, subtype, source_account, dest_account, amount_kobo, notes, ref_no, ref_id, performed_by, created_at) VALUES (?, ?, 'Refund Outflow', ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params: [`mm-refund-${row.linked_sale_id}`, at, s(row.payment_provider), paymentDestination(s(row.payment_provider)), s(row.payment_provider), row.total_kobo, reason, row.order_no, row.linked_sale_id, actor.displayName, at] });
-  if (row.customer_id) stmts.push({ sql: `UPDATE customers SET purchase_history_count = MAX(0, purchase_history_count - 1), lifetime_value_kobo = MAX(0, lifetime_value_kobo - ?), loyalty_points = MAX(0, loyalty_points - ?) WHERE id = ?`, params: [row.total_kobo, Math.floor(n(row.total_kobo) / 10_000), row.customer_id] });
+  // Also claw back any store credit this sale created, mirroring refundSale():
+  // otherwise a refunded order leaves spendable credit behind on the customer.
+  if (row.customer_id) stmts.push({ sql: `UPDATE customers SET purchase_history_count = MAX(0, purchase_history_count - 1), lifetime_value_kobo = MAX(0, lifetime_value_kobo - ?), loyalty_points = MAX(0, loyalty_points - ?), overage_balance_kobo = MAX(0, overage_balance_kobo - COALESCE((SELECT overage_created_kobo FROM sales WHERE id = ?), 0)) WHERE id = ?`, params: [row.total_kobo, Math.floor(n(row.total_kobo) / 10_000), row.linked_sale_id, row.customer_id] });
   if (returnStock) for (const item of items) {
     stmts.push({ sql: 'UPDATE products SET stock_qty = stock_qty + ?, updated_at = ? WHERE id = ?', params: [item.qty, at, item.product_id] });
     stmts.push({

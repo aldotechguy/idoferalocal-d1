@@ -148,6 +148,8 @@ export function purchaseRow(r: any, itemsByPo: Map<string, any[]>, recvByPo: Map
     productId: it.product_id, productName: it.product_name, sku: it.sku,
     quantity: n(it.qty), unitCost: KoboToNaira(it.unit_cost_kobo), total: KoboToNaira(it.total_kobo),
     receivedQuantity: n(it.received_qty), acceptedQuantity: n(it.accepted_qty), damagedQuantity: n(it.damaged_qty),
+    // GRN variance (main c75f81e): ordered-vs-delivered shortfall / surplus.
+    shortageQuantity: n(it.shortage_qty) || undefined, excessQuantity: n(it.excess_qty) || undefined,
   }));
   const receivingHistory = (recvByPo.get(String(r.id)) || []).map((g) => ({
     id: g.id, grnNumber: g.grn_number, receivedAt: g.received_at, receivedBy: g.received_by,

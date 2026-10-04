@@ -35,21 +35,30 @@ const product = {
   currentStock: 42, minimumStockLevel: 5, unit: 'pcs', status: 'Active',
   images: ['data:image/png;base64,AAA', 'https://cdn.example.com/bag.png'], createdAt: now, updatedAt: now,
 };
-const customer = { id: 'cust-1', name: 'Ada', phone: '08030000000', outstandingBalance: 2500, loyaltyPoints: 12 };
+const customer = { id: 'cust-1', name: 'Ada', phone: '08030000000', outstandingBalance: 2500, loyaltyPoints: 12, overageBalance: 750.5 };
 const supplier = { id: 'sup-1', name: 'Acme', contactPerson: 'Ngozi', outstandingBalance: 9000, openingBalance: 5000 };
 const sale = {
   id: 'sale-1', invoiceNo: 'INV-TEST-1', customerId: 'cust-1', status: 'Completed',
   subtotal: 300.5, discount: 0.5, tax: 0, totalAmount: 300, paidAmount: 300, paymentMethod: 'Cash',
+  // Store credit applied to this sale, credit it created, and a partial refund.
+  overageApplied: 50, overageCreated: 25, totalRefunded: 150.25,
+  refunds: [{
+    id: 'ref-1', refundNo: 'REF-INV-TEST-1-1', refundDate: now, performedBy: 'Admin',
+    reason: 'Customer returned item',
+    items: [{ productId: 'prod-1', productName: 'Test Bag', sku: 'SKU-1', quantityReturned: 1, unitPrice: 150.25, costPrice: 100.5, condition: 'Restock', subtotal: 150.25 }],
+    itemsSubtotal: 150.25, discountDeducted: 0, taxDeducted: 0, deliveryFeeRefunded: 0,
+    netRefundAmount: 150.25, settlementMethod: 'Cash',
+  }],
   createdAt: now,
   items: [
-    { productId: 'prod-1', qty: 2, unitPrice: 150.25, costPrice: 100.5, total: 300.5 },
+    { productId: 'prod-1', qty: 2, unitPrice: 150.25, costPrice: 100.5, total: 300.5, returnedQuantity: 1 },
     { productId: 'missing-prod', qty: 1, unitPrice: 10, costPrice: 5, total: 10 },
   ],
 };
 const purchase = {
   id: 'po-1', poNumber: 'PO-TEST-1', supplierId: 'sup-1', status: 'Received', paymentStatus: 'Partial',
   subtotal: 1000, totalAmount: 1000, paidAmount: 400, createdAt: now,
-  items: [{ productId: 'prod-1', qty: 10, unitCost: 100, total: 1000, received: 10 }],
+  items: [{ productId: 'prod-1', qty: 10, unitCost: 100, total: 1000, received: 10, shortageQuantity: 2, excessQuantity: 1 }],
   receivingHistory: [{ id: 'rh-1', receivedAt: now, receivedBy: 'Admin', items: [] }],
 };
 
@@ -85,6 +94,38 @@ console.log('sale total/paid:', roundSale.totalAmount, roundSale.paidAmount, 'it
 if (roundProduct.currentStock !== 42) throw new Error('product stock mismatch');
 if (Math.abs(roundSale.totalAmount - 300) > 0.001) throw new Error(`sale total mismatch: ${roundSale.totalAmount}`);
 if (roundSale.items.length !== 2) throw new Error('sale items not preserved');
+
+// Store credit, partial refunds and GRN variance (main c75f81e) must survive a full
+// write -> snapshot round trip in BOTH directions. Before these columns existed the
+// mapper dropped them on the way in and on the way out, so a customer's credit
+// silently reset to 0 on every pull (re-charging a sale that had applied it) and a
+// refunded sale looked un-refunded, allowing a second refund and double restock.
+const roundCustomer = (snap.customers as any[])[0];
+const roundPurchase = (snap.purchases as any[])[0];
+if (Math.abs((roundCustomer.overageBalance ?? 0) - 750.5) > 0.001) {
+  throw new Error(`customers.overage_balance_kobo lost on round trip: ${roundCustomer.overageBalance}`);
+}
+if (Math.abs((roundSale.overageApplied ?? 0) - 50) > 0.001) throw new Error(`sales.overage_applied_kobo lost: ${roundSale.overageApplied}`);
+if (Math.abs((roundSale.overageCreated ?? 0) - 25) > 0.001) throw new Error(`sales.overage_created_kobo lost: ${roundSale.overageCreated}`);
+if (Math.abs((roundSale.totalRefunded ?? 0) - 150.25) > 0.001) throw new Error(`sales.total_refunded_kobo lost: ${roundSale.totalRefunded}`);
+if (!Array.isArray(roundSale.refunds) || roundSale.refunds.length !== 1) {
+  throw new Error(`sales.refunds_json lost: ${JSON.stringify(roundSale.refunds)}`);
+}
+if (roundSale.refunds[0].refundNo !== 'REF-INV-TEST-1-1' || roundSale.refunds[0].items[0].quantityReturned !== 1) {
+  throw new Error('refund record did not survive refunds_json intact');
+}
+const returnedLine = roundSale.items.find((it: any) => it.productId === 'prod-1');
+if (returnedLine?.returnedQuantity !== 1) throw new Error(`sale_items.returned_qty lost: ${returnedLine?.returnedQuantity}`);
+const roundPoLine = roundPurchase.items.find((it: any) => it.productId === 'prod-1');
+if (roundPoLine?.shortageQuantity !== 2 || roundPoLine?.excessQuantity !== 1) {
+  throw new Error(`purchase_items GRN variance lost: shortage=${roundPoLine?.shortageQuantity} excess=${roundPoLine?.excessQuantity}`);
+}
+console.log(
+  'finance round trip: customer credit', roundCustomer.overageBalance,
+  '| sale overage applied/created', roundSale.overageApplied, roundSale.overageCreated,
+  '| refunded', roundSale.totalRefunded, '| returnedQty', returnedLine.returnedQuantity,
+  '| GRN shortage/excess', roundPoLine.shortageQuantity, roundPoLine.excessQuantity,
+);
 
 // Image policy (single-sourced in relationalMapper.cleanImageList):
 // `data:` base64 uploads CANNOT enter relational storage â€” D1 rejects oversized

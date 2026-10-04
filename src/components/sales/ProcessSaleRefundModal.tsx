@@ -91,8 +91,17 @@ export const ProcessSaleRefundModal: React.FC<ProcessSaleRefundModalProps> = ({
       return;
     }
 
+    // Defensive parity guard: a refund written by the Mall admin API — or by any
+    // build predating the returned_qty columns — can set status='Refunded' without
+    // per-line return records. Reading that as "nothing returned yet" would let POS
+    // refund and restock the same goods a second time, so a fully-Refunded sale
+    // with no refund records is treated as having returned every line.
+    const legacyFullRefund = sale.status === 'Refunded' && !(sale.refunds && sale.refunds.length > 0);
+
     const initial = sale.items.map((it) => {
-      const alreadyReturned = Number(it.returnedQuantity) || 0;
+      const alreadyReturned = legacyFullRefund
+        ? Number(it.quantity) || 0
+        : Number(it.returnedQuantity) || 0;
       const remaining = Math.max(0, it.quantity - alreadyReturned);
       return {
         productId: it.productId,
