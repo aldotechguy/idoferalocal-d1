@@ -1,11 +1,12 @@
 import React from 'react';
-import { User, Zap, Check } from 'lucide-react';
+import { User, Zap, Check, CheckCircle2 } from 'lucide-react';
 import { useNavigateMall } from '../hooks/useRoute';
 import { formatNaira } from './mallUi';
 import { MallCartLines } from './MallCartLines';
 import { useBuyerForm, validateBuyer, MALL_EMAIL_PATTERN, persistBuyer, useCheckoutSubmit } from './useBuyerForm';
 import { FormField } from '../components/common/FormField';
 import { MALL_DELIVERY_ZONES, mallDeliveryFeeKobo } from '../shared/mallDelivery';
+import { normalizeMallPhone } from '../shared/mallPhone';
 
 const input = 'w-full h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-blue-500/60';
 export const MallCheckout: React.FC = () => {
@@ -16,6 +17,17 @@ export const MallCheckout: React.FC = () => {
   const subtotal = c.cart?.subtotalKobo ?? 0;
   const deliveryFee = mallDeliveryFeeKobo(f.deliveryZone);
   const [fieldErrors, setFieldErrors] = React.useState<{ name?: string; phone?: string; email?: string; address?: string }>({});
+  // Debounce the phone lookup so a buyer typing a number fires one request, not
+  // one per keystroke. The phone is field #1, so recognition lands before they
+  // reach the name/address fields and those arrive already filled.
+  const debounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handlePhoneChange = (value: string) => {
+    f.setPhone(value);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (!normalizeMallPhone(value)) { f.clearRecognition(); return; }
+    debounceRef.current = setTimeout(() => { void f.lookupCustomer(value); }, 400);
+  };
+  React.useEffect(() => () => { if (debounceRef.current) clearTimeout(debounceRef.current); }, []);
   const submit = async () => {
     const v = validateBuyer(f.name, f.phone, f.email);
     if (!items.length) { c.setErr('Your cart is empty.'); return; }
@@ -56,8 +68,20 @@ export const MallCheckout: React.FC = () => {
         {/* Not sticky: a sticky customer card scrolled over the Payment method
             fieldset below it on large screens. */}
         <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-3">
+          {f.recognized && (
+            <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 px-3 py-2" role="status">
+              <span className="text-sm font-extrabold text-emerald-800 dark:text-emerald-300">Welcome back, {f.recognized.firstName}</span>
+            </div>
+          )}
+          <FormField label="Phone number (WhatsApp)" required error={fieldErrors.phone}>
+            <input name="phone" type="tel" inputMode="tel" autoComplete="tel" value={f.phone} onChange={(e) => handlePhoneChange(e.target.value)} placeholder="0803…" className={input} />
+          </FormField>
+          {f.recognized && (
+            <p className="flex items-center gap-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 -mt-1">
+              <CheckCircle2 className="w-3.5 h-3.5" /> Recognised returning customer
+            </p>
+          )}
           <FormField label="Full name" required error={fieldErrors.name}><input name="name" autoComplete="name" value={f.name} onChange={(e) => f.setName(e.target.value)} placeholder="e.g. Mfoniso Okon" className={input} /></FormField>
-          <FormField label="Phone number" required error={fieldErrors.phone}><input name="phone" type="tel" inputMode="tel" autoComplete="tel" value={f.phone} onChange={(e) => f.setPhone(e.target.value)} placeholder="0803…" className={input} /></FormField>
           <FormField label="Email (for order updates)" required error={fieldErrors.email} hint="We email your order confirmation and status updates here."><input name="email" type="email" inputMode="email" autoComplete="email" value={f.email} onChange={(e) => f.setEmail(e.target.value)} placeholder="you@example.com" className={input} /></FormField>
           <fieldset>
             <legend className="text-sm font-black">Delivery zone</legend>

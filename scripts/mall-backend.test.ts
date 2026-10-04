@@ -65,6 +65,38 @@ test('checkout validates and stores the optional customer email', async () => {
   assert.equal(bare.body.customerEmail, undefined);
 });
 
+test('customer lookup recognises a returning buyer by phone and leaks no PII', async () => {
+  const { db, exec, session } = fixture();
+  const lookup = (phone: string, headers: Record<string, string> = { 'x-mall-session': session }) =>
+    handleMallApi(new Request(`http://test/api/mall/customer/lookup?phone=${encodeURIComponent(phone)}`, { headers }), exec);
+  db.prepare(`INSERT INTO customers (id, name, phone, email, address, purchase_history_count, outstanding_balance_kobo, loyalty_points, lifetime_value_kobo, created_at)
+    VALUES ('cust-known', 'Idongesit Michael', '+2348063766861', 'buyer@example.com', '16 Atakpo Street, Uyo', 3, 50000, 1055, 10550000, '2026-01-01')`).run();
+
+  // A known number, matched with the same normalization the fulfilment path uses.
+  const hit = await lookup('08063766861');
+  assert.equal(hit.status, 200);
+  const body = await hit.json() as any;
+  assert.equal(body.known, true);
+  assert.equal(body.firstName, 'Idongesit');
+  assert.equal(body.address, '16 Atakpo Street, Uyo');
+  // Privacy contract: hints only. No id, no phone echo, no email, no balances.
+  assert.deepEqual(Object.keys(body).sort(), ['address', 'firstName', 'known']);
+
+  // An unknown number is a legitimate "not recognised", never an error.
+  const miss = await lookup('08030000000');
+  assert.equal(miss.status, 200);
+  assert.deepEqual(await miss.json(), { known: false });
+
+  // A malformed number must not 5xx and must not match.
+  const junk = await lookup('not-a-phone');
+  assert.equal(junk.status, 200);
+  assert.deepEqual(await junk.json(), { known: false });
+
+  // It is session-bound like the other money/session routes.
+  const noSession = await handleMallApi(new Request('http://test/api/mall/customer/lookup?phone=08063766861'), exec);
+  assert.equal(noSession.status, 400);
+});
+
 test('fixed delivery zones are server-priced and require an address', async () => {
   const central = fixture();
   assert.equal((await checkout(central.exec, central.session, { deliveryZone: 'invented_free_zone' })).response.status, 400);

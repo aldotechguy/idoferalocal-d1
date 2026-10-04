@@ -909,6 +909,10 @@ test('tracking limit is stricter than checkout and only the 6th request is rejec
   assert.ok(MALL_RATE_LIMITS.tracking < MALL_RATE_LIMITS.checkout);
   assert.equal(mallRateLimitGroup('/api/mall/orders'), 'tracking');
   assert.equal(mallRateLimitFor('/api/mall/orders'), MALL_RATE_LIMITS.tracking);
+  // The checkout recognition lookup answers "does this phone exist?", the same
+  // enumeration class as /orders, so it must share the strict bucket.
+  assert.equal(mallRateLimitGroup('/api/mall/customer/lookup'), 'tracking');
+  assert.equal(mallRateLimitFor('/api/mall/customer/lookup'), MALL_RATE_LIMITS.tracking);
   const f = await fixture('node'); t.after(() => f.db.close()); f.exec.clientIp = 'tracking-client';
   const url = 'http://test/api/mall/orders?phone=08031234567&orderNo=ORD-TEST';
   // First five requests within the window must not be rate-limited.
@@ -920,6 +924,26 @@ test('tracking limit is stricter than checkout and only the 6th request is rejec
   const limited = await f.send(new Request(url));
   assert.equal(limited.status, 429);
   assert.equal(limited.headers.get('retry-after'), '60');
+});
+
+test('customer lookup is session-bound, uncacheable and stores no phone in the response', async (t) => {
+  const f = await fixture('node'); t.after(() => f.db.close());
+  f.db.prepare(`INSERT INTO customers (id, name, phone, email, address, purchase_history_count, outstanding_balance_kobo, loyalty_points, lifetime_value_kobo, created_at)
+    VALUES ('cust-x', 'Idongesit Michael', '+2348063766861', 'buyer@example.com', 'Uyo', 1, 0, 0, 0, '2026-01-01')`).run();
+  const url = 'http://test/api/mall/customer/lookup?phone=08063766861';
+  // Session is required, exactly like /cart and /checkout.
+  assert.equal((await f.send(new Request(url))).status, 400);
+  const ok = await f.send(new Request(url, { headers: { 'x-mall-session': session } }));
+  assert.equal(ok.status, 200);
+  // A phone-keyed payload must never be cached by an intermediary.
+  assert.equal(ok.headers.get('cache-control'), 'no-store');
+  const body = await ok.json() as any;
+  assert.equal(body.known, true);
+  // The raw phone is never echoed back, and no PII beyond the name/address hint.
+  assert.equal(JSON.stringify(body).includes('8063766861'), false);
+  assert.equal('email' in body, false);
+  assert.equal('id' in body, false);
+  assert.equal('outstandingBalanceKobo' in body, false);
 });
 
 test('administrator bootstrap is disabled without explicit secrets and rejects incomplete/short credentials', () => {

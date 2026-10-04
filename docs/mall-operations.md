@@ -244,6 +244,15 @@ is behind a proxy, configure/verify trusted-proxy behavior carefully to avoid al
 customers sharing one limit. Add perimeter Cloudflare abuse controls before high-volume
 launch; database rate limiting itself consumes database operations.
 
+Checkout recognition (`GET /api/mall/customer/lookup?phone=…`) is the same
+phone-enumeration class as order tracking, so it shares the strict `tracking` bucket
+and is session-bound like `/cart` and `/checkout`. It returns hints only — a first
+name and a saved address, and never an id, email, phone echo or balance — purely so
+the storefront can greet a returning buyer and pre-fill those fields. It uses the same
+`normalizeMallPhone` + `normalizedPhoneSql` matching as fulfilment, so the storefront
+and the back office always agree on who a customer is. A miss, a malformed number or a
+network failure leaves checkout behaving exactly as a guest order.
+
 Enforcement is sampled to keep that cost bounded: each isolate keeps a caller-keyed
 counter in memory (`group:window:hashed-IP`) and only writes the durable
 `mall_rate_limits` row every Nth hit (checkout/tracking 1, cart 5, catalog 10; the

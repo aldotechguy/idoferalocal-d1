@@ -8,6 +8,7 @@ import type {
   MallHealth,
   MallProductsResponse,
   MallBuyerProfile,
+  MallCustomerHint,
   MallOrderLookup,
 } from '../types/mall';
 
@@ -21,6 +22,7 @@ export type {
   MallHealth,
   MallProductsResponse,
   MallBuyerProfile,
+  MallCustomerHint,
   MallOrderLookup,
 };
 const SESSION_KEY = 'idofera_mall_session';
@@ -403,6 +405,17 @@ export const mallClient = {
       orders: MallOrderLookup[];
       total: number;
     }>;
+  },
+
+  /**
+   * Storefront recognition for checkout. Strictly network-only: it is keyed by a
+   * phone number and answers with a name hint, so it is never cached or mirrored
+   * (unlike the catalog reads) and it never touches Cache Storage. Callers treat
+   * a thrown error as "not recognised" and let checkout proceed as a guest.
+   */
+  customerLookup: (phone: string) => {
+    const qs = new URLSearchParams({ phone });
+    return fetchMall(`/customer/lookup?${qs.toString()}`) as Promise<MallCustomerHint>;
   },
 
   ensureSession: () => {

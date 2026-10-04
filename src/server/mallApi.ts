@@ -458,6 +458,38 @@ async function getProduct(exec: MallExecutor, id: string) {
   if (!rows.length) return json({ error: 'Product not available' }, 404);
   return json({ product: publicProduct(rows[0]) });
 }
+
+/**
+ * Returning-customer recognition for the storefront checkout.
+ *
+ * The buyer's phone is the recognition key the fulfilment path already trusts
+ * (see mallOrderAdminApi's convert-to-sale), so this reuses the exact same
+ * matching contract -- normalizeMallPhone + normalizedPhoneSql -- so the
+ * storefront and the back office always agree on who a customer is.
+ *
+ * Privacy contract: this is a phone-enumeration vector, so it deliberately
+ * returns HINTS ONLY. Never an id, never the phone back, never an email and
+ * never any balance or counter. It only ever echoes a first name and a saved
+ * address so the checkout can pre-fill them; the buyer remains in full control.
+ * The route is session-bound and rate-limited under the 'tracking' bucket
+ * (mallOperations.mallRateLimitGroup) so it can't be scripted as a phone scanner.
+ */
+async function getCustomerHint(exec: MallExecutor, request: Request) {
+  const phone = normalizeMallPhone(new URL(request.url, 'http://localhost').searchParams.get('phone'));
+  // A malformed or missing number is a legitimate "not recognised" answer, not
+  // an error: the guest checkout path must never be blocked by recognition.
+  if (!phone) return json({ known: false });
+  const rows = await exec.queryAll(
+    `SELECT name, address FROM customers WHERE ${normalizedPhoneSql('phone')} = ? ORDER BY created_at, id LIMIT 1`,
+    [phone],
+  );
+  const customer = rows[0];
+  if (!customer) return json({ known: false });
+  const name = s(customer.name).trim();
+  const firstName = name.split(/\s+/)[0] || '';
+  const address = s(customer.address).trim();
+  return json({ known: true, firstName, ...(address ? { address } : {}) });
+}
 // ===SEAM-B===
 
 async function getOrCreateCartId(exec: MallExecutor, sessionId: string): Promise<string> {
@@ -907,6 +939,13 @@ async function routeMallApi(request: Request, exec: MallExecutor): Promise<Respo
       return await addToCart(exec, session, await parseMallBody(request));
     }
     return json({ error: 'Only GET or POST is supported.' }, 405);
+  }
+
+  if (pathname.startsWith('/customer/lookup')) {
+    if (methodName !== 'GET') return json({ error: 'Only GET is supported.' }, 405);
+    const session = sessionFrom(request);
+    if (!session) return json({ error: 'Session is required. Send x-mall-session header or cookie.' }, 400);
+    return await getCustomerHint(exec, request);
   }
 
   if (pathname.startsWith('/checkout')) {

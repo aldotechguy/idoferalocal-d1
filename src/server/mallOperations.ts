@@ -255,10 +255,16 @@ export const MALL_RATE_LIMITS = { checkout: 10, tracking: 5, cart: 60, catalog: 
 /**
  * Tracking serves `GET /api/mall/orders` — a phone+order-number lookup and a
  * phone-enumeration vector — so its cap is intentionally stricter than checkout.
+ * `GET /api/mall/customer/lookup` is the same class of vector (it answers
+ * "does this phone exist?"), so it shares the strict 'tracking' bucket rather
+ * than the loose catalog cap.
  * @returns the route group name for a given pathname (the caller looks up `MALL_RATE_LIMITS[group]`).
  */
 export function mallRateLimitGroup(pathname: string): keyof typeof MALL_RATE_LIMITS {
-  return pathname.includes('/checkout') ? 'checkout' : pathname.includes('/orders') ? 'tracking' : pathname.includes('/cart') ? 'cart' : 'catalog';
+  return pathname.includes('/checkout') ? 'checkout'
+    : pathname.includes('/orders') || pathname.includes('/customer/lookup') ? 'tracking'
+    : pathname.includes('/cart') ? 'cart'
+    : 'catalog';
 }
 
 /**

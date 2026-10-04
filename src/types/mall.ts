@@ -93,6 +93,17 @@ export type MallBuyerProfile = {
   savedAt: string;
 };
 
+/**
+ * A deliberately minimal recognition hint for the storefront checkout. The
+ * server never returns an id, an email or any balance here — only enough to
+ * greet a returning buyer and pre-fill name/address. See mallApi.getCustomerHint.
+ */
+export type MallCustomerHint = {
+  known: boolean;
+  firstName?: string;
+  address?: string;
+};
+
 export type MallOrderLookup = {
   paymentStatus?: string;
   updatedAt?: string;
