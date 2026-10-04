@@ -36,7 +36,7 @@ import { useToast } from '../../context/ToastContext';
 import { NairaSign } from '../common/NairaSign';
 import { Pagination } from '../common/Pagination';
 import { ConfirmModal } from '../common/ConfirmModal';
-import { PurchaseOrder, PaymentMethod, PriceAdjustmentItem } from '../../types';
+import { PurchaseOrder, PaymentMethod, PriceAdjustmentItem, Supplier, Product } from '../../types';
 import { InspectStockModal } from './InspectStockModal';
 import { GRNModal } from './GRNModal';
 import { POPaymentModal } from './POPaymentModal';
@@ -46,6 +46,8 @@ import { ConfirmPlaceOrderModal } from './ConfirmPlaceOrderModal';
 import { ProductSearchPicker, POItemFormState } from './ProductSearchPicker';
 import { useInteractions } from '../../context/InteractionContext';
 import { localIsoDate } from '../../shared/localDate';
+import { QuickAddSupplierModal } from './QuickAddSupplierModal';
+import { AddProductModal } from '../modals/AddProductModal';
 
 type DeliveryTab = 'All' | 'Draft' | 'Pending' | 'Partial' | 'Received' | 'Cancelled';
 
@@ -64,6 +66,7 @@ export const PurchasesView: React.FC = () => {
     settings,
     treasuryBalances,
     addMoneyMovement,
+    addSupplier,
   } = useApp();
   const { currentUser, isSuperAdmin } = useAuth();
   const { showToast } = useToast();
@@ -76,6 +79,9 @@ export const PurchasesView: React.FC = () => {
 
   // Modals State
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showQuickAddSupplier, setShowQuickAddSupplier] = useState(false);
+  const [showQuickAddProduct, setShowQuickAddProduct] = useState(false);
+  const [quickProductSearchTerm, setQuickProductSearchTerm] = useState('');
   const [inspectingPo, setInspectingPo] = useState<PurchaseOrder | null>(null);
   const [grnPo, setGrnPo] = useState<PurchaseOrder | null>(null);
   const [priceReportPo, setPriceReportPo] = useState<PurchaseOrder | null>(null);
@@ -155,7 +161,7 @@ export const PurchasesView: React.FC = () => {
     if (activeTab === 'Draft' && po.deliveryStatus !== 'Draft') return false;
     if (activeTab === 'Pending' && po.deliveryStatus !== 'Pending') return false;
     if (activeTab === 'Partial' && po.deliveryStatus !== 'Partial') return false;
-    if (activeTab === 'Received' && po.deliveryStatus !== 'Received') return false;
+    if (activeTab === 'Received' && po.deliveryStatus !== 'Received' && po.deliveryStatus !== 'Received with Shortage') return false;
     if (activeTab === 'Cancelled' && po.deliveryStatus !== 'Cancelled') return false;
 
     // Payment status filter
@@ -314,6 +320,32 @@ export const PurchasesView: React.FC = () => {
     setPoItems((prev) =>
       prev.map((i) => (i.productId === prodId ? { ...i, updateCatalogRetailPrice: val } : i))
     );
+  };
+
+  // Quick addition of Product or Supplier from inside the active PO Modal
+  const handleOpenQuickAddProduct = (suggestedName: string = '') => {
+    setQuickProductSearchTerm(suggestedName);
+    setShowQuickAddProduct(true);
+  };
+
+  const handleQuickProductCreated = (newProd: Product) => {
+    handleAddItem(newProd.id, 10);
+    setShowQuickAddProduct(false);
+    showToast({
+      title: 'Product Added to PO',
+      message: `"${newProd.name}" (${newProd.sku}) was created and added to your purchase order.`,
+      type: 'success',
+    });
+  };
+
+  const handleQuickSupplierCreated = (newSup: Supplier) => {
+    setSelectedSupplierId(newSup.id);
+    setShowQuickAddSupplier(false);
+    showToast({
+      title: 'Supplier Selected',
+      message: `Supplier "${newSup.name}" registered and assigned to this PO.`,
+      type: 'success',
+    });
   };
 
   // Save changes to existing draft PO
@@ -1076,6 +1108,8 @@ export const PurchasesView: React.FC = () => {
                               ? 'bg-amber-50 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-200 dark:border-amber-800/80'
                               : po.deliveryStatus === 'Received'
                               ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
+                              : po.deliveryStatus === 'Received with Shortage'
+                              ? 'bg-amber-100 text-amber-900 dark:bg-amber-950/90 dark:text-amber-200 border border-amber-300 dark:border-amber-700/80'
                               : po.deliveryStatus === 'Partial'
                               ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
                               : po.deliveryStatus === 'Cancelled'
@@ -1085,6 +1119,7 @@ export const PurchasesView: React.FC = () => {
                         >
                           {po.deliveryStatus === 'Draft' && <FileText className="w-3 h-3 text-amber-600 dark:text-amber-400" />}
                           {po.deliveryStatus === 'Received' && <CheckCircle className="w-3 h-3" />}
+                          {po.deliveryStatus === 'Received with Shortage' && <AlertCircle className="w-3 h-3 text-amber-600 dark:text-amber-400" />}
                           {po.deliveryStatus === 'Partial' && <Clock className="w-3 h-3" />}
                           {po.deliveryStatus === 'Pending' && <Clock className="w-3 h-3" />}
                           <span>{po.deliveryStatus === 'Draft' ? 'Draft Inquiry' : po.deliveryStatus}</span>
@@ -1195,7 +1230,7 @@ export const PurchasesView: React.FC = () => {
                               </button>
 
                               {/* Inspect & Receive Button */}
-                              {po.deliveryStatus !== 'Received' && (
+                              {po.deliveryStatus !== 'Received' && po.deliveryStatus !== 'Received with Shortage' && (
                                 <button
                                   onClick={() => setInspectingPo(po)}
                                   className="flex items-center gap-1 px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] rounded-xl shadow-2xs transition-colors"
@@ -1207,7 +1242,7 @@ export const PurchasesView: React.FC = () => {
                               )}
 
                               {/* View GRN Button */}
-                              {(po.deliveryStatus === 'Received' || po.inspectionStatus) && (
+                              {(po.deliveryStatus === 'Received' || po.deliveryStatus === 'Received with Shortage' || po.inspectionStatus) && (
                                 <button
                                   onClick={() => setGrnPo(po)}
                                   className="p-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl transition-colors"
@@ -1218,7 +1253,7 @@ export const PurchasesView: React.FC = () => {
                               )}
 
                               {/* Price Adjustment Report Button */}
-                              {(po.deliveryStatus === 'Received' || po.inspectionStatus) && (
+                              {(po.deliveryStatus === 'Received' || po.deliveryStatus === 'Received with Shortage' || po.inspectionStatus) && (
                                 <button
                                   onClick={() => setPriceReportPo(po)}
                                   className="p-1.5 bg-amber-50 dark:bg-amber-950/80 hover:bg-amber-100 dark:hover:bg-amber-900/60 text-amber-700 dark:text-amber-300 rounded-xl transition-colors border border-amber-200/60 dark:border-amber-800/60"
@@ -1433,10 +1468,28 @@ export const PurchasesView: React.FC = () => {
               
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
-                  <label className="block font-bold mb-1 text-slate-700 dark:text-slate-300">Select Vendor Supplier *</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block font-bold text-slate-700 dark:text-slate-300">
+                      Select Vendor Supplier *
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowQuickAddSupplier(true)}
+                      className="text-[11px] font-bold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 flex items-center gap-1 hover:underline"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>New Supplier</span>
+                    </button>
+                  </div>
                   <select
                     value={selectedSupplierId}
-                    onChange={(e) => setSelectedSupplierId(e.target.value)}
+                    onChange={(e) => {
+                      if (e.target.value === '__ADD_NEW__') {
+                        setShowQuickAddSupplier(true);
+                      } else {
+                        setSelectedSupplierId(e.target.value);
+                      }
+                    }}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     {suppliers.map((s) => (
@@ -1444,6 +1497,9 @@ export const PurchasesView: React.FC = () => {
                         {s.name}
                       </option>
                     ))}
+                    <option value="__ADD_NEW__" className="text-blue-600 font-bold">
+                      + Add New Supplier...
+                    </option>
                   </select>
                 </div>
 
@@ -1514,15 +1570,26 @@ export const PurchasesView: React.FC = () => {
 
               {/* Interactive Searchable Product Picker */}
               <div>
-                <label className="block font-bold mb-1.5 text-slate-800 dark:text-slate-200">
-                  Search & Add Product Line Items
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block font-bold text-slate-800 dark:text-slate-200">
+                    Search & Add Product Line Items
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => handleOpenQuickAddProduct('')}
+                    className="text-xs font-bold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 flex items-center gap-1.5 hover:underline"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>New Product to Catalog</span>
+                  </button>
+                </div>
                 <ProductSearchPicker
                   products={products}
                   sales={sales}
                   poItems={poItems}
                   onAddItem={handleAddItem}
                   currencySymbol={settings.currencySymbol}
+                  onOpenNewProductModal={(name) => handleOpenQuickAddProduct(name)}
                 />
               </div>
 
@@ -2172,6 +2239,24 @@ export const PurchasesView: React.FC = () => {
           onClose={() => setDiscardDraftPo(null)}
         />
       )}
+
+      {/* SUB-MODAL: Quick Add Supplier */}
+      <QuickAddSupplierModal
+        isOpen={showQuickAddSupplier}
+        onClose={() => setShowQuickAddSupplier(false)}
+        onSupplierCreated={handleQuickSupplierCreated}
+        zIndexClass="z-[70]"
+      />
+
+      {/* SUB-MODAL: Quick Add Product */}
+      <AddProductModal
+        isOpen={showQuickAddProduct}
+        onClose={() => setShowQuickAddProduct(false)}
+        onProductCreated={handleQuickProductCreated}
+        initialSupplierId={selectedSupplierId}
+        initialName={quickProductSearchTerm}
+        zIndexClass="z-[70]"
+      />
 
     </div>
   );

@@ -70,6 +70,7 @@ export const CustomersView: React.FC = () => {
       const outstandingBalance = isNaN(rawBalance)
         ? calculatedUnpaid
         : rawBalance;
+      const overageBalance = Math.max(0, Number(cust.overageBalance) || 0);
 
       return {
         ...cust,
@@ -77,6 +78,7 @@ export const CustomersView: React.FC = () => {
         lifetimeValue,
         loyaltyPoints,
         outstandingBalance,
+        overageBalance,
       };
     }).filter(Boolean);
   }, [customers, sales, settings.pointsPerDollar]);
@@ -334,9 +336,15 @@ export const CustomersView: React.FC = () => {
                       {settings.currencySymbol}{(cust.lifetimeValue || 0).toFixed(2)}
                     </td>
                     <td className="py-3 px-3">
-                      <span className={`font-bold ${(cust.outstandingBalance || 0) > 0 ? 'text-rose-600' : 'text-slate-500'}`}>
-                        {settings.currencySymbol}{(cust.outstandingBalance || 0).toFixed(2)}
-                      </span>
+                      {(cust.overageBalance || 0) > 0 ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 font-bold text-[11px]">
+                          Store Credit: +{settings.currencySymbol}{(cust.overageBalance || 0).toFixed(2)}
+                        </span>
+                      ) : (
+                        <span className={`font-bold ${(cust.outstandingBalance || 0) > 0 ? 'text-rose-600' : 'text-slate-500'}`}>
+                          {settings.currencySymbol}{(cust.outstandingBalance || 0).toFixed(2)}
+                        </span>
+                      )}
                     </td>
                   <td className="py-3 px-4 text-right">
                     <div className="flex items-center justify-end gap-1.5">

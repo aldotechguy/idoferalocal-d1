@@ -55,6 +55,7 @@ import { ReceiptModal } from '../common/ReceiptModal';
 import { Pagination } from '../common/Pagination';
 import { InvoiceWorkshopModal } from './InvoiceWorkshopModal';
 import { useInteractions } from '../../context/InteractionContext';
+import { ProcessSaleRefundModal } from './ProcessSaleRefundModal';
 
 interface SalesViewProps {
   onNavigate?: (page: string) => void;
@@ -1170,6 +1171,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                               className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
                                 isRefunded
                                   ? 'bg-rose-100 dark:bg-rose-900/60 text-rose-700 dark:text-rose-300'
+                                  : s.status === 'Partially Refunded'
+                                  ? 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800'
                                   : 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300'
                               }`}
                             >
@@ -1252,7 +1255,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                                     onClick={() => setRefundSaleTarget(s)}
                                     className="w-full px-3 py-2 text-left hover:bg-amber-50 dark:hover:bg-amber-950/50 text-amber-800 dark:text-amber-200 font-bold text-[10px] rounded-lg flex items-center gap-2"
                                   >
-                                    <RotateCcw className="w-3.5 h-3.5" /> Refund
+                                    <RotateCcw className="w-3.5 h-3.5" />
+                                    <span>{s.status === 'Partially Refunded' ? 'Refund Remaining Items' : 'Process Return / Refund'}</span>
                                   </button>
                                 )}
                                 {canEditSale(s) ? (
@@ -1530,6 +1534,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
             >
               <option value="All">All Statuses</option>
               <option value="Completed">Completed</option>
+              <option value="Partially Refunded">Partially Refunded</option>
               <option value="Refunded">Refunded</option>
             </select>
           </div>
@@ -1662,6 +1667,11 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                             Disc: -{settings.currencySymbol}{(Number(sale.discount) || 0).toFixed(2)}
                           </div>
                         )}
+                        {sale.totalRefunded && sale.totalRefunded > 0 && !isRefunded && (
+                          <div className="text-[10px] text-amber-600 dark:text-amber-400 font-bold">
+                            Returned: -{settings.currencySymbol}{(Number(sale.totalRefunded) || 0).toFixed(2)}
+                          </div>
+                        )}
                       </td>
 
                       {/* Payment Method */}
@@ -1685,6 +1695,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                           className={`px-2 py-0.5 rounded-lg text-[10px] font-black inline-flex items-center gap-1 ${
                             isRefunded
                               ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                              : sale.status === 'Partially Refunded'
+                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-800'
                               : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
                           }`}
                         >
@@ -1692,6 +1704,11 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                             <>
                               <RotateCcw className="w-3 h-3" />
                               <span>Refunded</span>
+                            </>
+                          ) : sale.status === 'Partially Refunded' ? (
+                            <>
+                              <RotateCcw className="w-3 h-3" />
+                              <span>Partially Refunded</span>
                             </>
                           ) : (
                             <>
@@ -1726,8 +1743,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                           {hasPermission(['Administrator', 'Accountant']) && !isRefunded && (
                             <button
                               onClick={() => setRefundSaleTarget(sale)}
-                              className="p-1.5 text-slate-500 hover:text-amber-600 dark:hover:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/60 rounded-xl transition-colors"
-                              title="Process Refund & Restock Items"
+                              className="p-1.5 text-slate-500 hover:text-amber-600 dark:hover:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/60 rounded-xl transition-colors cursor-pointer"
+                              title={sale.status === 'Partially Refunded' ? 'Process Additional Return / Refund' : 'Process Refund & Restock Items'}
                             >
                               <RotateCcw className="w-4 h-4" />
                             </button>
@@ -1806,75 +1823,12 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
         />
       )}
 
-      {/* Refund Confirmation Modal */}
+      {/* Enhanced Process Sale Refund Modal (Itemized Partial & Full Returns) */}
       {refundSaleTarget && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-200">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl max-w-md w-full p-6 space-y-4 my-auto max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-800 pb-3">
-              <div className="flex items-center gap-2 text-amber-600 dark:text-amber-400 font-extrabold text-base">
-                <RotateCcw className="w-5 h-5" />
-                <span>Process Sale Refund</span>
-              </div>
-              <button
-                onClick={() => setRefundSaleTarget(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="p-3 bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-900 rounded-2xl text-xs space-y-1">
-              <p className="font-extrabold text-amber-900 dark:text-amber-200">
-                Invoice: {refundSaleTarget.invoiceNo}
-              </p>
-              <p className="text-amber-800 dark:text-amber-300">
-                Total Amount: {settings.currencySymbol}{(Number(refundSaleTarget.totalAmount) || 0).toFixed(2)} ({(refundSaleTarget.items || []).length} items)
-              </p>
-              <p className="text-[11px] text-amber-700 dark:text-amber-400 pt-1">
-                ⚠️ Processing a refund will change status to "Refunded" and automatically return inventory quantities back to stock!
-              </p>
-            </div>
-
-            <div>
-              <label className="block font-bold text-xs text-slate-700 dark:text-slate-300 mb-1">
-                Reason for Refund:
-              </label>
-              <input
-                type="text"
-                value={refundReason}
-                onChange={(e) => setRefundReason(e.target.value)}
-                placeholder="e.g. Returned by customer, Incorrect pricing, Defective item"
-                className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-semibold text-slate-900 dark:text-white"
-                autoFocus
-              />
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
-              <button
-                onClick={() => setRefundSaleTarget(null)}
-                className="px-4 py-2 font-bold text-slate-600 dark:text-slate-400 hover:text-slate-900 text-xs rounded-xl"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  if (refundSaleTarget) {
-                    refundSale(
-                      refundSaleTarget.id,
-                      refundReason || 'Customer return',
-                      currentUser?.displayName || 'Admin'
-                    );
-                    setRefundSaleTarget(null);
-                  }
-                }}
-                className="px-4 py-2.5 bg-amber-600 hover:bg-amber-700 text-white font-extrabold text-xs rounded-xl shadow-md transition-all flex items-center gap-1.5"
-              >
-                <RotateCcw className="w-4 h-4" />
-                <span>Confirm & Restock</span>
-              </button>
-            </div>
-          </div>
-        </div>
+        <ProcessSaleRefundModal
+          sale={refundSaleTarget}
+          onClose={() => setRefundSaleTarget(null)}
+        />
       )}
 
       {/* Delete Confirmation Modal */}

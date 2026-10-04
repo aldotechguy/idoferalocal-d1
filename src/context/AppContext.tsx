@@ -16,6 +16,12 @@ import {
   StoreSettings,
   SaleItem,
   PaymentMethod,
+  SaleStatus,
+  RestockCondition,
+  RefundSettlementMethod,
+  SaleRefundItem,
+  SaleRefundRecord,
+  ProcessRefundOptions,
   WhatsAppPreOrder,
   PreOrderStatus,
   DeliveryOrder,
@@ -158,7 +164,7 @@ interface AppContextType {
   heldOrders: { id: string; name: string; items: SaleItem[]; customerId?: string; date: string }[];
 
   // Product actions
-  addProduct: (p: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>) => void;
+  addProduct: (p: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>) => Product;
   updateProduct: (id: string, p: Partial<Product>, reason?: string) => void;
   deleteProduct: (id: string) => void;
   archiveProduct: (id: string) => void;
@@ -206,7 +212,8 @@ interface AppContextType {
     convertedBy?: string,
     customInvoiceNo?: string,
     paymentBreakdown?: Record<string, number>,
-    isExplicitHistorical?: boolean
+    isExplicitHistorical?: boolean,
+    overageApplied?: number
   ) => Sale;
   generateUniqueInvoiceNo: (salesList?: Sale[], whatsappList?: WhatsAppPreOrder[]) => string;
   holdOrder: (name: string, items: SaleItem[], customerId?: string) => void;
@@ -214,7 +221,12 @@ interface AppContextType {
   deleteHeldOrder: (id: string) => void;
   deleteHeldOrderItem: (heldOrderId: string, productId: string) => void;
   clearAllHeldOrders: () => void;
-  refundSale: (saleId: string, reason: string, performedBy: string) => void;
+  refundSale: (
+    saleId: string,
+    reason: string,
+    performedBy: string,
+    options?: ProcessRefundOptions
+  ) => void;
   updateSale: (
     saleId: string,
     updates: Partial<Sale> & {
@@ -242,7 +254,7 @@ interface AppContextType {
   deleteCustomer: (id: string) => void;
 
   // Supplier actions
-  addSupplier: (s: Omit<Supplier, 'id' | 'createdAt' | 'productsCount'> & { outstandingBalance?: number }) => void;
+  addSupplier: (s: Omit<Supplier, 'id' | 'createdAt' | 'productsCount'> & { outstandingBalance?: number }) => Supplier;
   updateSupplier: (id: string, updates: Partial<Supplier>) => void;
   deleteSupplier: (id: string) => void;
 
@@ -257,8 +269,12 @@ interface AppContextType {
         receivingQty: number;
         acceptedQty: number;
         damagedQty: number;
+        shortageQty?: number;
+        excessQty?: number;
         unitCost?: number;
+        oldUnitCost?: number;
         customRetailPrice?: number;
+        oldRetailPrice?: number;
         updateCatalogCost?: boolean;
         updateCatalogRetail?: boolean;
         conditionNotes?: string;
@@ -269,6 +285,7 @@ interface AppContextType {
       deliveryFee?: number;
       deliveryFeePaymentMethod?: PaymentMethod;
       receivedDate?: string;
+      closeShortage?: boolean;
     }
   ) => void;
   updatePOPayment: (
@@ -1044,6 +1061,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     saveDocument('products', newProd);
     logAudit('CREATE_PRODUCT', 'Product', id, 'System User', `Created product ${p.name} (SKU: ${p.sku}).`);
     showToast({ title: 'New Product Added', message: `Product "${p.name}" (SKU: ${p.sku}) added to catalog.`, type: 'success' });
+    return newProd;
   };
 
   const updateProduct = (id: string, updates: Partial<Product>, reason?: string) => {
@@ -1559,10 +1577,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     convertedBy?: string,
     customInvoiceNo?: string,
     paymentBreakdown?: Record<string, number>,
-    isExplicitHistorical?: boolean
+    isExplicitHistorical?: boolean,
+    overageApplied: number = 0
   ): Sale => {
+    // Resolve customer record first so overage can be validated and applied accurately
+    let targetCustomer = customer ? (customers.find((c) => c.id === customer.id) || customer) : null;
+    if (!targetCustomer) {
+      const matchedName = customer ? customer.name : '';
+      if (matchedName && matchedName !== 'Walk-in Customer') {
+        targetCustomer = customers.find((c) => c.name && c.name.toLowerCase() === matchedName.toLowerCase()) || null;
+      }
+    }
+
     const subtotal = items.reduce((acc, item) => acc + item.total, 0);
-    const totalAmount = Math.max(0, subtotal - discount + tax + (deliveryFee || 0));
+    const baseTotalAmount = Math.max(0, subtotal - discount + tax + (deliveryFee || 0));
+    const availableOverage = targetCustomer ? Math.max(0, Number(targetCustomer.overageBalance) || 0) : 0;
+    const validOverageApplied = Math.min(
+      availableOverage,
+      Math.max(0, Number(overageApplied) || 0),
+      baseTotalAmount
+    );
+    const totalAmount = Math.max(0, Math.round((baseTotalAmount - validOverageApplied) * 100) / 100);
+    const overageCreated = targetCustomer
+      ? Math.max(0, Math.round((paidAmount - totalAmount) * 100) / 100)
+      : 0;
+
     const isHistorical = isExplicitHistorical !== undefined
       ? isExplicitHistorical
       : (notes ? (notes.includes('Historical') || notes.includes('Past Sale Entry') || notes.includes('Past Entry')) : false);
@@ -1573,8 +1612,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newSale: Sale = {
       id: generateUniqueId('sale'),
       invoiceNo,
-      customerId: customer?.id,
-      customerName: customer ? customer.name : 'Walk-in Customer',
+      customerId: targetCustomer?.id || customer?.id,
+      customerName: targetCustomer ? targetCustomer.name : (customer ? customer.name : 'Walk-in Customer'),
       type,
       items,
       subtotal,
@@ -1583,6 +1622,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       deliveryFee: deliveryFee || 0,
       totalAmount,
       paidAmount,
+      overageApplied: validOverageApplied,
+      overageCreated,
       paymentMethod,
       paymentBreakdown: paymentMethod === 'Split' ? paymentBreakdown : undefined,
       status: 'Completed',
@@ -1603,31 +1644,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    // Update customer metrics if attached or matched by name
-    let targetCustomer = customer;
-    if (!targetCustomer) {
-      // Check if matching customer exists by name
-      const matchedName = customer ? customer.name : '';
-      if (matchedName && matchedName !== 'Walk-in Customer') {
-        targetCustomer = customers.find((c) => c.name && c.name.toLowerCase() === matchedName.toLowerCase()) || null;
-      }
-    }
-
     if (targetCustomer) {
-      const outstanding = Math.max(0, totalAmount - paidAmount);
+      const outstanding = Math.max(0, Math.round((totalAmount - paidAmount) * 100) / 100);
       const pointsEarned = Math.floor(totalAmount * (settings.pointsPerDollar || 0.01));
 
       setCustomers((prev) =>
         prev.map((c) => {
           if (c.id === targetCustomer!.id) {
+            const prevOutstanding = Math.max(0, Number(c.outstandingBalance) || 0);
+            const prevOverage = Math.max(0, Number(c.overageBalance) || 0);
+            const remainingOverage = Math.max(0, prevOverage - validOverageApplied);
+            const netCredit = (remainingOverage + overageCreated) - (prevOutstanding + outstanding);
+            const nextOverageBalance = netCredit > 0 ? Math.round(netCredit * 100) / 100 : 0;
+            const nextOutstandingBalance = netCredit < 0 ? Math.round(Math.abs(netCredit) * 100) / 100 : 0;
+
             const updated: Customer = {
               ...c,
               purchaseHistoryCount: (Number(c.purchaseHistoryCount) || 0) + 1,
-              outstandingBalance: Math.max(0, (Number(c.outstandingBalance) || 0) + outstanding),
+              outstandingBalance: nextOutstandingBalance,
+              overageBalance: nextOverageBalance,
               loyaltyPoints: (Number(c.loyaltyPoints) || 0) + pointsEarned,
               lifetimeValue: (Number(c.lifetimeValue) || 0) + totalAmount,
             };
             saveDocument('customers', updated);
+            putItem('customers', updated).catch(() => {});
             return updated;
           }
           return c;
@@ -1891,18 +1931,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast({ title: 'Held Queue Cleared', message: 'All held orders deleted.', type: 'error' });
   };
 
-  const refundSale = (saleId: string, reason: string, performedBy: string) => {
+  const refundSale = (
+    saleId: string,
+    reason: string,
+    performedBy: string,
+    options?: ProcessRefundOptions
+  ) => {
     const sale = sales.find((s) => s.id === saleId);
     if (!sale) return;
 
-    const updatedSale: Sale = { ...sale, status: 'Refunded' };
-
-    // 1. Update and persist refunded sale
-    setSales((prev) => prev.map((s) => (s.id === saleId ? updatedSale : s)));
-    saveDocument('sales', updatedSale);
-    putItem('sales', updatedSale).catch((e) => console.warn('IndexedDB sale put error:', e));
-
-    // 2. Restock returned items (Only if not a historical past sale entry)
+    // Check if historical sale
     const isHistoricalSale =
       sale.isHistorical ||
       sale.id.startsWith('sale-imp-') ||
@@ -1911,72 +1949,291 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           sale.notes.includes('Past Entry') ||
           sale.notes.includes('Import Wizard')));
 
+    // Build the list of returned items
+    const returnedItemsList: {
+      productId: string;
+      productName: string;
+      sku: string;
+      quantity: number;
+      unitPrice: number;
+      costPrice: number;
+      condition: RestockCondition;
+    }[] = [];
+
+    if (options?.itemsToReturn && options.itemsToReturn.length > 0) {
+      options.itemsToReturn.forEach((r) => {
+        const lineItem = sale.items.find((i) => i.productId === r.productId);
+        if (!lineItem) return;
+        const alreadyReturned = Number(lineItem.returnedQuantity) || 0;
+        const availableToReturn = Math.max(0, lineItem.quantity - alreadyReturned);
+        const qtyToReturn = Math.min(availableToReturn, Math.max(0, Number(r.quantity) || 0));
+
+        if (qtyToReturn > 0) {
+          returnedItemsList.push({
+            productId: lineItem.productId,
+            productName: lineItem.productName,
+            sku: lineItem.sku || '',
+            quantity: qtyToReturn,
+            unitPrice: Number(lineItem.unitPrice) || 0,
+            costPrice: Number(lineItem.costPrice) || 0,
+            condition: r.condition || 'Restock',
+          });
+        }
+      });
+    } else {
+      // Legacy full refund: return 100% of remaining items
+      sale.items.forEach((lineItem) => {
+        const alreadyReturned = Number(lineItem.returnedQuantity) || 0;
+        const availableToReturn = Math.max(0, lineItem.quantity - alreadyReturned);
+        if (availableToReturn > 0) {
+          returnedItemsList.push({
+            productId: lineItem.productId,
+            productName: lineItem.productName,
+            sku: lineItem.sku || '',
+            quantity: availableToReturn,
+            unitPrice: Number(lineItem.unitPrice) || 0,
+            costPrice: Number(lineItem.costPrice) || 0,
+            condition: 'Restock',
+          });
+        }
+      });
+    }
+
+    if (returnedItemsList.length === 0) {
+      showToast({
+        title: 'No Items Returned',
+        message: 'Please select at least one item quantity to return.',
+        type: 'error',
+      });
+      return;
+    }
+
+    // Financial Proration
+    const itemsSubtotal = returnedItemsList.reduce(
+      (acc, it) => acc + it.unitPrice * it.quantity,
+      0
+    );
+    const saleBaseSubtotal =
+      sale.subtotal ||
+      sale.items.reduce((acc, it) => acc + it.unitPrice * it.quantity, 0);
+
+    const discountDeducted =
+      saleBaseSubtotal > 0 && Number(sale.discount) > 0
+        ? Math.round(((itemsSubtotal / saleBaseSubtotal) * Number(sale.discount)) * 100) / 100
+        : 0;
+
+    const taxDeducted =
+      saleBaseSubtotal > 0 && Number(sale.tax) > 0
+        ? Math.round(((itemsSubtotal / saleBaseSubtotal) * Number(sale.tax)) * 100) / 100
+        : 0;
+
+    const deliveryFeeRefunded = options?.refundDeliveryFee
+      ? Number(sale.deliveryFee) || 0
+      : 0;
+
+    const netRefundAmount = Math.max(
+      0,
+      Math.round(
+        (itemsSubtotal - discountDeducted + taxDeducted + deliveryFeeRefunded) * 100
+      ) / 100
+    );
+
+    const settlementMethod: RefundSettlementMethod =
+      options?.settlementMethod || 'Cash';
+
+    const now = new Date().toISOString();
+    const refundSeq = (sale.refunds?.length || 0) + 1;
+    const refundNo = `REF-${sale.invoiceNo}-${refundSeq}`;
+
+    const refundRecord: SaleRefundRecord = {
+      id: generateUniqueId('ref'),
+      refundNo,
+      refundDate: now,
+      performedBy,
+      reason: reason || 'Customer returned item',
+      items: returnedItemsList.map((it) => ({
+        productId: it.productId,
+        productName: it.productName,
+        sku: it.sku,
+        quantityReturned: it.quantity,
+        unitPrice: it.unitPrice,
+        costPrice: it.costPrice,
+        condition: it.condition,
+        subtotal: Math.round(it.unitPrice * it.quantity * 100) / 100,
+      })),
+      itemsSubtotal: Math.round(itemsSubtotal * 100) / 100,
+      discountDeducted,
+      taxDeducted,
+      deliveryFeeRefunded,
+      netRefundAmount,
+      settlementMethod,
+      notes: options?.customNotes,
+    };
+
+    // Update sale items returned quantities
+    const updatedSaleItems: SaleItem[] = sale.items.map((lineItem) => {
+      const match = returnedItemsList.find((r) => r.productId === lineItem.productId);
+      if (!match) return lineItem;
+      const prior = Number(lineItem.returnedQuantity) || 0;
+      return {
+        ...lineItem,
+        returnedQuantity: prior + match.quantity,
+      };
+    });
+
+    const isFullyRefunded = updatedSaleItems.every(
+      (it) => (Number(it.returnedQuantity) || 0) >= it.quantity
+    );
+    const newStatus: SaleStatus = isFullyRefunded ? 'Refunded' : 'Partially Refunded';
+
+    const updatedSale: Sale = {
+      ...sale,
+      status: newStatus,
+      items: updatedSaleItems,
+      refunds: [...(sale.refunds || []), refundRecord],
+      totalRefunded:
+        Math.round(((Number(sale.totalRefunded) || 0) + netRefundAmount) * 100) / 100,
+    };
+
+    // 1. Update and persist refunded sale
+    setSales((prev) => prev.map((s) => (s.id === saleId ? updatedSale : s)));
+    saveDocument('sales', updatedSale);
+    putItem('sales', updatedSale).catch((e) => console.warn('IndexedDB sale put error:', e));
+
+    // 2. Restock returned items (Only if not historical and not clearance)
     if (!isHistoricalSale) {
-      sale.items.forEach((item) => {
-        if (item.productId && item.quantity > 0) {
-          adjustStock(
-            item.productId,
-            item.quantity,
-            'Returned',
-            `Refund for sale ${sale.invoiceNo}: ${reason}`,
-            performedBy
-          );
+      returnedItemsList.forEach((item) => {
+        if (item.productId && !item.productId.startsWith('clearance-') && item.quantity > 0) {
+          if (item.condition === 'Restock') {
+            adjustStock(
+              item.productId,
+              item.quantity,
+              'Returned',
+              `Return for sale ${sale.invoiceNo} (${refundNo}): ${reason}`,
+              performedBy
+            );
+          } else if (item.condition === 'Damaged') {
+            adjustStock(
+              item.productId,
+              item.quantity,
+              'Damaged',
+              `Damaged return for sale ${sale.invoiceNo} (${refundNo}): ${reason}`,
+              performedBy
+            );
+          }
+          // If item.condition === 'Discard', do not restore sellable stock
         }
       });
     }
 
     // 3. Cascade to Customer Metrics (Deduct outstanding debt, LTV, loyalty points, purchase count)
-    const existingPaid = sale.paidAmount !== undefined ? sale.paidAmount : (sale.totalAmount || 0);
-    const unpaidOnSale = Math.max(0, (sale.totalAmount || 0) - existingPaid);
     let targetCust = customers.find((c) => c.id === sale.customerId);
     if (!targetCust && sale.customerName && sale.customerName !== 'Walk-in Customer') {
-      targetCust = customers.find((c) => c.name && c.name.trim().toLowerCase() === sale.customerName.trim().toLowerCase());
+      targetCust = customers.find(
+        (c) =>
+          c.name && c.name.trim().toLowerCase() === sale.customerName.trim().toLowerCase()
+      );
     }
 
     if (targetCust) {
-      const pointsEarned = Math.floor((sale.totalAmount || 0) * (settings.pointsPerDollar || 0.01));
-      const newBal = Math.max(0, (Number(targetCust.outstandingBalance) || 0) - unpaidOnSale);
-      const newCount = Math.max(0, (Number(targetCust.purchaseHistoryCount) || 0) - 1);
-      const newPoints = Math.max(0, (Number(targetCust.loyaltyPoints) || 0) - pointsEarned);
-      const newLtv = Math.max(0, (Number(targetCust.lifetimeValue) || 0) - (sale.totalAmount || 0));
+      const pointsDeducted = Math.floor(
+        netRefundAmount * (settings.pointsPerDollar || 0.01)
+      );
+      let newBal = Number(targetCust.outstandingBalance) || 0;
+      let newOverage = Number(targetCust.overageBalance) || 0;
+
+      if (settlementMethod === 'Debt Reduction') {
+        const debtRelief = Math.min(newBal, netRefundAmount);
+        newBal = Math.max(0, newBal - debtRelief);
+      } else if (settlementMethod === 'Store Credit') {
+        newOverage = Math.round((newOverage + netRefundAmount) * 100) / 100;
+      }
+
+      // If customer had unpaid balance on this sale and settlement wasn't debt reduction,
+      // check if this refund offsets the remaining unpaid invoice portion
+      if (settlementMethod !== 'Debt Reduction') {
+        const originalPaid =
+          sale.paidAmount !== undefined ? sale.paidAmount : (sale.totalAmount || 0);
+        const unpaidOnSale = Math.max(0, (sale.totalAmount || 0) - originalPaid);
+        if (unpaidOnSale > 0 && isFullyRefunded) {
+          newBal = Math.max(0, newBal - unpaidOnSale);
+        }
+      }
+
+      const newCount = isFullyRefunded
+        ? Math.max(0, (Number(targetCust.purchaseHistoryCount) || 0) - 1)
+        : Number(targetCust.purchaseHistoryCount) || 0;
+      const newPoints = Math.max(
+        0,
+        (Number(targetCust.loyaltyPoints) || 0) - pointsDeducted
+      );
+      const newLtv = Math.max(
+        0,
+        Math.round(((Number(targetCust.lifetimeValue) || 0) - netRefundAmount) * 100) / 100
+      );
 
       const updatedCust: Customer = {
         ...targetCust,
         outstandingBalance: newBal,
+        overageBalance: newOverage,
         purchaseHistoryCount: newCount,
         loyaltyPoints: newPoints,
         lifetimeValue: newLtv,
       };
-      setCustomers((prev) => prev.map((c) => (c.id === updatedCust.id ? updatedCust : c)));
+      setCustomers((prev) =>
+        prev.map((c) => (c.id === updatedCust.id ? updatedCust : c))
+      );
       saveDocument('customers', updatedCust);
-      putItem('customers', updatedCust).catch((e) => console.warn('IndexedDB customer put error:', e));
+      putItem('customers', updatedCust).catch((e) =>
+        console.warn('IndexedDB customer put error:', e)
+      );
     }
 
-    // 4. Cascade to Linked Delivery Orders (mark non-delivered as Cancelled)
+    // 4. Cascade to Linked Delivery Orders
     const matchingDeliveries = deliveryOrders.filter(
       (d) => d.saleId === saleId || (sale.invoiceNo && d.invoiceNo === sale.invoiceNo)
     );
     if (matchingDeliveries.length > 0) {
-      const now = new Date().toISOString();
       setDeliveryOrders((prev) =>
         prev.map((d) => {
-          const isMatch = d.saleId === saleId || (sale.invoiceNo && d.invoiceNo === sale.invoiceNo);
-          if (!isMatch || d.status === 'Delivered') return d;
-          const updatedDel: DeliveryOrder = {
-            ...d,
-            status: 'Cancelled',
-            notes: d.notes ? `${d.notes} | Sale Refunded: ${reason}` : `Sale Refunded: ${reason}`,
-            updatedAt: now,
-          };
-          saveDocument('deliveryOrders', updatedDel);
-          putItem('deliveryOrders', updatedDel).catch((e) => console.warn('IndexedDB del put error:', e));
-          return updatedDel;
+          const isMatch =
+            d.saleId === saleId || (sale.invoiceNo && d.invoiceNo === sale.invoiceNo);
+          if (!isMatch) return d;
+          if (isFullyRefunded && d.status !== 'Delivered') {
+            const updatedDel: DeliveryOrder = {
+              ...d,
+              status: 'Cancelled',
+              notes: d.notes
+                ? `${d.notes} | Full Sale Refund: ${reason}`
+                : `Full Sale Refund: ${reason}`,
+              updatedAt: now,
+            };
+            saveDocument('deliveryOrders', updatedDel);
+            putItem('deliveryOrders', updatedDel).catch((e) =>
+              console.warn('IndexedDB del put error:', e)
+            );
+            return updatedDel;
+          } else if (!isFullyRefunded) {
+            const updatedDel: DeliveryOrder = {
+              ...d,
+              notes: d.notes
+                ? `${d.notes} | Partial Return (${refundNo}): ${returnedItemsList.length} items returned`
+                : `Partial Return (${refundNo}): ${returnedItemsList.length} items returned`,
+              updatedAt: now,
+            };
+            saveDocument('deliveryOrders', updatedDel);
+            putItem('deliveryOrders', updatedDel).catch((e) =>
+              console.warn('IndexedDB del put error:', e)
+            );
+            return updatedDel;
+          }
+          return d;
         })
       );
     }
 
-    // 5. Clean up invoice balance notifications
-    if (sale.invoiceNo) {
+    // 5. Clean up invoice balance notifications if fully refunded
+    if (isFullyRefunded && sale.invoiceNo) {
       setNotifications((prev) => {
         const removed = prev.filter((n) => n.message.includes(sale.invoiceNo));
         removed.forEach((n) => removeDocument('notifications', n.id));
@@ -1991,81 +2248,69 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         (sale.invoiceNo && po.convertedInvoiceNo === sale.invoiceNo)
     );
     if (linkedPreOrders.length > 0) {
-      const now = new Date().toISOString();
       setWhatsAppPreOrders((prev) =>
         prev.map((po) => {
           const isMatch =
             po.convertedSaleId === saleId ||
             (sale.invoiceNo && po.convertedInvoiceNo === sale.invoiceNo);
           if (!isMatch) return po;
-          const updatedPo: WhatsAppPreOrder = {
-            ...po,
-            status: 'Approved',
-            convertedSaleId: undefined,
-            convertedInvoiceNo: undefined,
-            notes: po.notes ? `${po.notes} | Sale Refunded: ${reason}` : `Sale Refunded: ${reason}`,
-            updatedAt: now,
-          };
-          saveDocument('whatsAppPreOrders', updatedPo);
-          putItem('whatsAppPreOrders', updatedPo).catch((e) => console.warn('IndexedDB po put error:', e));
-          return updatedPo;
+          if (isFullyRefunded) {
+            const updatedPo: WhatsAppPreOrder = {
+              ...po,
+              status: 'Approved',
+              convertedSaleId: undefined,
+              convertedInvoiceNo: undefined,
+              notes: po.notes
+                ? `${po.notes} | Sale Refunded: ${reason}`
+                : `Sale Refunded: ${reason}`,
+              updatedAt: now,
+            };
+            saveDocument('whatsAppPreOrders', updatedPo);
+            putItem('whatsAppPreOrders', updatedPo).catch((e) =>
+              console.warn('IndexedDB po put error:', e)
+            );
+            return updatedPo;
+          } else {
+            const updatedPo: WhatsAppPreOrder = {
+              ...po,
+              notes: po.notes
+                ? `${po.notes} | Partial Return (${refundNo})`
+                : `Partial Return (${refundNo})`,
+              updatedAt: now,
+            };
+            saveDocument('whatsAppPreOrders', updatedPo);
+            putItem('whatsAppPreOrders', updatedPo).catch((e) =>
+              console.warn('IndexedDB po put error:', e)
+            );
+            return updatedPo;
+          }
         })
       );
     }
 
-    // 7. Cascade to Money Movements (Only for real-time live sales, not historical sales)
-    const refundPaid = sale.paidAmount !== undefined ? sale.paidAmount : sale.totalAmount;
-    if (!isHistoricalSale && refundPaid > 0) {
-      const now = new Date().toISOString();
-      const refundParts = sale.paymentMethod === 'Split'
-        ? [
-            { account: 'Physical Cash' as LiquidAccountType, amount: Number(sale.paymentBreakdown?.Cash) || 0, label: 'Split - Cash Portion' },
-            {
-              account: 'Biz Account' as LiquidAccountType,
-              amount:
-                (Number(sale.paymentBreakdown?.['Mobile Transfer']) || 0) +
-                (Number(sale.paymentBreakdown?.['Bank Transfer']) || 0) +
-                (Number(sale.paymentBreakdown?.Card) || 0),
-              label: 'Split - Transfer/Card Portion',
-            },
-          ]
-        : [{
-            account: sale.paymentMethod === 'Cash' ? 'Physical Cash' as LiquidAccountType : 'Biz Account' as LiquidAccountType,
-            amount: refundPaid,
-            label: sale.paymentMethod || 'Cash',
-          }];
-
-      const validRefundParts = refundParts.filter((part) => part.amount > 0);
-      // Legacy split sales did not retain a reliable breakdown. Do not invent a
-      // Till amount; reverse their existing sale inflow ledger entries instead.
-      if (sale.paymentMethod === 'Split' && validRefundParts.length === 0) {
-        moneyMovements
-          .filter((movement) => movement.type === 'Sale Inflow' && movement.referenceId === sale.id)
-          .forEach((movement) => validRefundParts.push({
-            account: movement.destinationAccount || 'Biz Account',
-            amount: Number(movement.amount) || 0,
-            label: movement.subtype || 'Split payment',
-          }));
-      }
-
-      validRefundParts.forEach((part) => {
+    // 7. Cascade to Money Movements (Treasury) for real-time live sales
+    if (!isHistoricalSale && netRefundAmount > 0) {
+      if (settlementMethod === 'Cash' || settlementMethod === 'Biz Account') {
+        const sourceAcc: LiquidAccountType =
+          settlementMethod === 'Cash' ? 'Physical Cash' : 'Biz Account';
         const refMM: MoneyMovement = {
           id: generateUniqueId('mm'),
           date: now,
           type: 'Sale Refund',
-          subtype: `Refund - ${part.label}`,
-          sourceAccount: part.account,
-          amount: part.amount,
-          referenceNo: sale.invoiceNo,
+          subtype: `${settlementMethod} Refund (${isFullyRefunded ? 'Full' : 'Partial'})`,
+          sourceAccount: sourceAcc,
+          amount: netRefundAmount,
+          referenceNo: refundNo,
           referenceId: sale.id,
           performedBy,
-          notes: `Refund for sale ${sale.invoiceNo}: ${settings.currencySymbol}${part.amount.toFixed(2)} (${reason})`,
+          notes: `Refund for sale ${sale.invoiceNo} (${refundNo}): ${settings.currencySymbol}${netRefundAmount.toFixed(2)} (${reason})`,
           createdAt: now,
         };
         setMoneyMovements((prev) => [refMM, ...prev]);
         saveDocument('moneyMovements', refMM);
         putItem('moneyMovements', refMM).catch(() => {});
-      });
+      }
+      // If settlementMethod is 'Store Credit' or 'Debt Reduction', no liquid cash outflow is registered.
     }
 
     logAudit(
@@ -2073,11 +2318,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       'Sale',
       saleId,
       performedBy,
-      `Refunded sale ${sale.invoiceNo} (${settings.currencySymbol}${sale.totalAmount.toFixed(2)}). Restocked items, reconciled customer balance/LTV, and updated linked delivery/pre-orders. Reason: ${reason}`
+      `${isFullyRefunded ? 'Full' : 'Partial'} refund ${refundNo} for sale ${sale.invoiceNo} (${settings.currencySymbol}${netRefundAmount.toFixed(2)}). Items returned: ${returnedItemsList.reduce((acc, it) => acc + it.quantity, 0)} units across ${returnedItemsList.length} products. Settlement: ${settlementMethod}. Reason: ${reason}`
     );
+
     showToast({
-      title: 'Sale Refunded & Cascaded',
-      message: `Invoice ${sale.invoiceNo} has been refunded. Stock returned and customer metrics reconciled.`,
+      title: isFullyRefunded ? 'Sale Fully Refunded' : 'Partial Return Processed',
+      message: `${refundNo} processed (${settings.currencySymbol}${netRefundAmount.toFixed(2)} settled via ${settlementMethod}). Stock & customer ledger updated.`,
       type: 'warning',
     });
   };
@@ -2167,7 +2413,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     if (targetCust) {
       const pointsEarned = Math.floor((sale.totalAmount || 0) * (settings.pointsPerDollar || 0.01));
+      const overpaidOnSale = sale.overageCreated !== undefined
+        ? Number(sale.overageCreated) || 0
+        : Math.max(0, existingPaid - (sale.totalAmount || 0));
+      const appliedOnSale = Number(sale.overageApplied) || 0;
       const newBal = Math.max(0, (Number(targetCust.outstandingBalance) || 0) - unpaidOnSale);
+      const newOverage = Math.max(0, (Number(targetCust.overageBalance) || 0) - overpaidOnSale + appliedOnSale);
       const newCount = Math.max(0, (Number(targetCust.purchaseHistoryCount) || 0) - 1);
       const newPoints = Math.max(0, (Number(targetCust.loyaltyPoints) || 0) - pointsEarned);
       const newLtv = Math.max(0, (Number(targetCust.lifetimeValue) || 0) - (sale.totalAmount || 0));
@@ -2175,6 +2426,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const updatedCust: Customer = {
         ...targetCust,
         outstandingBalance: newBal,
+        overageBalance: newOverage,
         purchaseHistoryCount: newCount,
         loyaltyPoints: newPoints,
         lifetimeValue: newLtv,
@@ -2289,7 +2541,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const disc = updates.discount !== undefined ? updates.discount : (existing.discount || 0);
     const tx = updates.tax !== undefined ? updates.tax : (existing.tax || 0);
     const newFee = updates.deliveryFee !== undefined ? Math.max(0, Number(updates.deliveryFee)) : (existing.deliveryFee || 0);
-    const calculatedTotal = Math.max(0, subtotal - disc + tx + newFee);
+    const existingOverageApplied = Math.max(0, Number(existing.overageApplied) || 0);
+    const calculatedTotal = Math.max(0, subtotal - disc + tx + newFee - existingOverageApplied);
 
     // Accurately compute paidAmount and outstanding debt difference
     const existingPaid = existing.paidAmount !== undefined ? existing.paidAmount : (existing.totalAmount || 0);
@@ -2297,13 +2550,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const finalPaidAmount =
       updates.paidAmount !== undefined
         ? Math.max(0, Number(updates.paidAmount))
-        : wasFullyPaid
+        : wasFullyPaid && existingPaid === (existing.totalAmount || 0)
         ? calculatedTotal
-        : Math.min(existingPaid, calculatedTotal);
+        : existingPaid;
 
     const oldUnpaid = Math.max(0, (existing.totalAmount || 0) - existingPaid);
     const newUnpaid = Math.max(0, calculatedTotal - finalPaidAmount);
     const unpaidDiff = newUnpaid - oldUnpaid;
+    const oldOverageCreated = existing.overageCreated !== undefined
+      ? Math.max(0, Number(existing.overageCreated) || 0)
+      : Math.max(0, existingPaid - (existing.totalAmount || 0));
+    const newOverageCreated = Math.max(0, Math.round((finalPaidAmount - calculatedTotal) * 100) / 100);
+    const overageDiff = newOverageCreated - oldOverageCreated;
 
     const finalCustomerName = updates.customerName !== undefined ? updates.customerName : existing.customerName;
 
@@ -2318,6 +2576,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       deliveryFee: newFee,
       totalAmount: calculatedTotal,
       paidAmount: finalPaidAmount,
+      overageCreated: newOverageCreated,
     };
 
     // 1. Cascade to Inventory Stock: adjust quantity differences if items were modified (skip non-inventory clearance items)
@@ -2557,20 +2816,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           lifetimeValue: Math.max(0, (Number(oldCust.lifetimeValue) || 0) - oldTotal),
           loyaltyPoints: Math.max(0, (Number(oldCust.loyaltyPoints) || 0) - oldPoints),
           outstandingBalance: Math.max(0, (Number(oldCust.outstandingBalance) || 0) - oldUnpaid),
+          overageBalance: Math.max(0, (Number(oldCust.overageBalance) || 0) - oldOverageCreated + existingOverageApplied),
         };
       }
 
       // 5b. If linked to new registered customer, credit full transaction contribution
       if (targetCust) {
+        const prevDebt = Math.max(0, Number(targetCust.outstandingBalance) || 0);
+        const prevOverage = Math.max(0, Number(targetCust.overageBalance) || 0);
+        const netCredit = (prevOverage + newOverageCreated) - (prevDebt + newUnpaid);
         updatedTargetCust = {
           ...targetCust,
           purchaseHistoryCount: (Number(targetCust.purchaseHistoryCount) || 0) + 1,
           lifetimeValue: (Number(targetCust.lifetimeValue) || 0) + calculatedTotal,
           loyaltyPoints: (Number(targetCust.loyaltyPoints) || 0) + newPoints,
-          outstandingBalance: Math.max(0, (Number(targetCust.outstandingBalance) || 0) + newUnpaid),
+          outstandingBalance: netCredit < 0 ? Math.round(Math.abs(netCredit) * 100) / 100 : 0,
+          overageBalance: netCredit > 0 ? Math.round(netCredit * 100) / 100 : 0,
         };
-      } else if (newUnpaid > 0 && finalCustomerName && finalCustomerName.trim().toLowerCase() !== 'walk-in customer' && finalCustomerName.trim().toLowerCase() !== 'cash customer') {
-        // Auto-register new customer in directory if they owe an outstanding balance
+      } else if ((newUnpaid > 0 || newOverageCreated > 0) && finalCustomerName && finalCustomerName.trim().toLowerCase() !== 'walk-in customer' && finalCustomerName.trim().toLowerCase() !== 'cash customer') {
+        // Auto-register new customer in directory if they owe an outstanding balance or have an overage
         const newCust: Customer = {
           id: generateUniqueId('cust'),
           name: finalCustomerName,
@@ -2580,6 +2844,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           createdAt: now,
           purchaseHistoryCount: 1,
           outstandingBalance: newUnpaid,
+          overageBalance: newOverageCreated,
           loyaltyPoints: newPoints,
           lifetimeValue: calculatedTotal,
         };
@@ -2597,16 +2862,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } else {
       // 5c. Customer ownership unchanged: apply standard metric diffs
       if (targetCust) {
-        const currentBal = Number(targetCust.outstandingBalance) || 0;
-        const newBal = Math.max(0, currentBal + unpaidDiff);
+        const currentBal = Math.max(0, Number(targetCust.outstandingBalance) || 0);
+        const currentOverage = Math.max(0, Number(targetCust.overageBalance) || 0);
+        const netCredit = (currentOverage + overageDiff) - (currentBal + unpaidDiff);
         updatedTargetCust = {
           ...targetCust,
           name: finalCustomerName || targetCust.name,
           lifetimeValue: Math.max(0, (targetCust.lifetimeValue || 0) + totalDiff),
           loyaltyPoints: Math.max(0, (Number(targetCust.loyaltyPoints) || 0) + pointsDiff),
-          outstandingBalance: newBal,
+          outstandingBalance: netCredit < 0 ? Math.round(Math.abs(netCredit) * 100) / 100 : 0,
+          overageBalance: netCredit > 0 ? Math.round(netCredit * 100) / 100 : 0,
         };
-      } else if (newUnpaid > 0 && finalCustomerName && finalCustomerName.trim().toLowerCase() !== 'walk-in customer' && finalCustomerName.trim().toLowerCase() !== 'cash customer') {
+      } else if ((newUnpaid > 0 || newOverageCreated > 0) && finalCustomerName && finalCustomerName.trim().toLowerCase() !== 'walk-in customer' && finalCustomerName.trim().toLowerCase() !== 'cash customer') {
         const newCust: Customer = {
           id: generateUniqueId('cust'),
           name: finalCustomerName,
@@ -2616,6 +2883,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           createdAt: now,
           purchaseHistoryCount: 1,
           outstandingBalance: newUnpaid,
+          overageBalance: newOverageCreated,
           loyaltyPoints: newPoints,
           lifetimeValue: calculatedTotal,
         };
@@ -2888,6 +3156,65 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { purgedCount };
   }, [sales, isHistoricalSaleRecord, moneyMovements]);
 
+  const reconcileCustomerOverageBalances = React.useCallback(() => {
+    const legacyOverpaidSales = sales.filter(
+      (s) =>
+        s &&
+        s.status !== 'Refunded' &&
+        s.overageCreated === undefined &&
+        (Number(s.paidAmount) || 0) > (Number(s.totalAmount) || 0)
+    );
+
+    if (legacyOverpaidSales.length === 0) return;
+
+    const overageByCustomerId = new Map<string, number>();
+
+    setSales((prev) =>
+      prev.map((s) => {
+        if (
+          !s ||
+          s.status === 'Refunded' ||
+          s.overageCreated !== undefined ||
+          (Number(s.paidAmount) || 0) <= (Number(s.totalAmount) || 0)
+        ) {
+          return s;
+        }
+        const overpaid = Math.max(0, Math.round(((Number(s.paidAmount) || 0) - (Number(s.totalAmount) || 0)) * 100) / 100);
+        let cust = customers.find((c) => c.id === s.customerId);
+        if (!cust && s.customerName && s.customerName !== 'Walk-in Customer') {
+          cust = customers.find((c) => c.name && c.name.trim().toLowerCase() === s.customerName.trim().toLowerCase());
+        }
+        if (cust && overpaid > 0) {
+          overageByCustomerId.set(cust.id, (overageByCustomerId.get(cust.id) || 0) + overpaid);
+        }
+        const updatedSale: Sale = { ...s, overageCreated: overpaid };
+        saveDocument('sales', updatedSale);
+        putItem('sales', updatedSale).catch(() => {});
+        return updatedSale;
+      })
+    );
+
+    if (overageByCustomerId.size > 0) {
+      setCustomers((prev) =>
+        prev.map((c) => {
+          const addedOverage = overageByCustomerId.get(c.id);
+          if (!addedOverage) return c;
+          const prevDebt = Math.max(0, Number(c.outstandingBalance) || 0);
+          const prevOverage = Math.max(0, Number(c.overageBalance) || 0);
+          const netCredit = prevOverage + addedOverage - prevDebt;
+          const updatedCust: Customer = {
+            ...c,
+            outstandingBalance: netCredit < 0 ? Math.round(Math.abs(netCredit) * 100) / 100 : 0,
+            overageBalance: netCredit > 0 ? Math.round(netCredit * 100) / 100 : 0,
+          };
+          saveDocument('customers', updatedCust);
+          putItem('customers', updatedCust).catch(() => {});
+          return updatedCust;
+        })
+      );
+    }
+  }, [sales, customers]);
+
   // Automatically reconcile historical delivery fee expenses and purge historical movements when storage is ready
   const hasAutoReconciledRef = useRef(false);
   useEffect(() => {
@@ -2897,10 +3224,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         hasAutoReconciledRef.current = true;
         reconcileHistoricalDeliveryExpenses();
         purgeHistoricalMoneyMovements();
+        reconcileCustomerOverageBalances();
       }
     }, 400);
     return () => clearTimeout(timer);
-  }, [isStorageReady, sales.length, reconcileHistoricalDeliveryExpenses, purgeHistoricalMoneyMovements]);
+  }, [isStorageReady, sales.length, reconcileHistoricalDeliveryExpenses, purgeHistoricalMoneyMovements, reconcileCustomerOverageBalances]);
 
   // Customer Management
   const addCustomer = (c: Omit<Customer, 'id' | 'createdAt' | 'purchaseHistoryCount' | 'outstandingBalance' | 'loyaltyPoints' | 'lifetimeValue'>) => {
@@ -2909,12 +3237,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: generateUniqueId('cust'),
       purchaseHistoryCount: 0,
       outstandingBalance: 0,
+      overageBalance: 0,
       loyaltyPoints: 0,
       lifetimeValue: 0,
       createdAt: new Date().toISOString(),
     };
     setCustomers((prev) => [newCust, ...prev]);
     saveDocument('customers', newCust);
+    putItem('customers', newCust).catch((e) => console.warn('IndexedDB customer put error:', e));
     showToast({ title: 'New Customer Added', message: `Customer "${c.name}" registered successfully.`, type: 'success' });
     return newCust;
   };
@@ -3002,8 +3332,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!cust) return;
 
     const currentBal = Number(cust.outstandingBalance) || 0;
-    const newBal = Math.max(0, currentBal + amountChange);
-    const updatedCust = { ...cust, outstandingBalance: newBal };
+    const currentOverage = Number(cust.overageBalance) || 0;
+    const rawNextBal = currentBal + amountChange;
+    const newBal = Math.max(0, rawNextBal);
+    const excessPayment = rawNextBal < 0 ? Math.round(Math.abs(rawNextBal) * 100) / 100 : 0;
+    const newOverage = Math.round((currentOverage + excessPayment) * 100) / 100;
+    const updatedCust = { ...cust, outstandingBalance: newBal, overageBalance: newOverage };
 
     setCustomers((prev) =>
       prev.map((c) => (c.id === id ? updatedCust : c))
@@ -3129,6 +3463,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     saveDocument('suppliers', newSup);
     putItem('suppliers', newSup).catch((e) => console.warn('IndexedDB supplier put error:', e));
     showToast({ title: 'New Supplier Added', message: `Supplier "${s.name}" added to database.`, type: 'success' });
+    return newSup;
   };
 
   const updateSupplier = (id: string, updates: Partial<Supplier>) => {
@@ -3248,6 +3583,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         receivingQty: number;
         acceptedQty: number;
         damagedQty: number;
+        shortageQty?: number;
+        excessQty?: number;
         unitCost?: number;
         oldUnitCost?: number;
         customRetailPrice?: number;
@@ -3262,6 +3599,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       deliveryFee?: number;
       deliveryFeePaymentMethod?: PaymentMethod;
       receivedDate?: string;
+      closeShortage?: boolean;
     }
   ) => {
     const po = purchases.find((p) => p.id === poId);
@@ -3276,6 +3614,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     let totalAcceptedUnits = 0;
     let totalDamagedUnits = 0;
+    let totalShortageUnits = 0;
+    let totalExcessUnits = 0;
 
     const updatedItems = po.items.map((item) => {
       const inspectItem = inspectionData.items.find((i) => i.productId === item.productId);
@@ -3285,8 +3625,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const newAccepted = (item.acceptedQuantity || 0) + inspectItem.acceptedQty;
       const newDamaged = (item.damagedQuantity || 0) + inspectItem.damagedQty;
 
+      const shortageQuantity = inspectItem.shortageQty !== undefined
+        ? inspectItem.shortageQty
+        : Math.max(0, item.quantity - newReceived);
+      const excessQuantity = inspectItem.excessQty !== undefined
+        ? inspectItem.excessQty
+        : Math.max(0, newReceived - item.quantity);
+
       totalAcceptedUnits += inspectItem.acceptedQty;
       totalDamagedUnits += inspectItem.damagedQty;
+      totalShortageUnits += shortageQuantity;
+      totalExcessUnits += excessQuantity;
 
       const prod = products.find((p) => p.id === item.productId);
 
@@ -3322,11 +3671,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       // Adjust stock for accepted quantity with backdated receiving timestamp
       if (inspectItem.acceptedQty > 0) {
+        const excessNote = excessQuantity > 0 ? ` (+${excessQuantity} excess units)` : '';
         adjustStock(
           item.productId,
           inspectItem.acceptedQty,
           'Incoming',
-          `GRN #${grnNumber} PO #${po.poNumber} Inspected (${inspectItem.conditionNotes || 'Accepted'})`,
+          `GRN #${grnNumber} PO #${po.poNumber} Inspected (${inspectItem.conditionNotes || 'Accepted'}${excessNote})`,
           inspectionData.inspectorName,
           finalReceivedAt
         );
@@ -3361,6 +3711,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         receivedQuantity: newReceived,
         acceptedQuantity: newAccepted,
         damagedQuantity: newDamaged,
+        shortageQuantity,
+        excessQuantity,
         lastInspectedAt: finalReceivedAt,
         lastInspectionNotes: inspectItem.conditionNotes,
       };
@@ -3370,7 +3722,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const isFullyReceived = updatedItems.every(
       (item) => (item.receivedQuantity || 0) >= item.quantity
     );
-    const newDeliveryStatus: PurchaseOrder['deliveryStatus'] = isFullyReceived ? 'Received' : 'Partial';
+    let newDeliveryStatus: PurchaseOrder['deliveryStatus'] = isFullyReceived ? 'Received' : 'Partial';
+    if (inspectionData.closeShortage && !isFullyReceived) {
+      newDeliveryStatus = 'Received with Shortage';
+    }
 
     // Auto-create expense record if delivery fee is provided (>0)
     const recvDeliveryFee = inspectionData.deliveryFee && inspectionData.deliveryFee > 0 ? inspectionData.deliveryFee : undefined;
@@ -3425,12 +3780,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       itemsReceived: inspectionData.items.map((i) => {
         const p = updatedItems.find((pi) => pi.productId === i.productId);
         const prod = products.find((pr) => pr.id === i.productId);
+        const cumRecv = p?.receivedQuantity || 0;
+        const itemShortage = i.shortageQty !== undefined ? i.shortageQty : Math.max(0, (p?.quantity || 0) - cumRecv);
+        const itemExcess = i.excessQty !== undefined ? i.excessQty : Math.max(0, cumRecv - (p?.quantity || 0));
         return {
           productId: i.productId,
           productName: p?.productName || 'Item',
           receivingQty: i.receivingQty,
           acceptedQty: i.acceptedQty,
           damagedQty: i.damagedQty,
+          shortageQty: itemShortage,
+          excessQty: itemExcess,
           unitCost: i.unitCost !== undefined ? i.unitCost : (p?.unitCost || 0),
           oldUnitCost: i.oldUnitCost !== undefined ? i.oldUnitCost : (p?.oldUnitCost !== undefined ? p.oldUnitCost : (prod?.costPrice || p?.unitCost || 0)),
           customRetailPrice: i.customRetailPrice !== undefined ? i.customRetailPrice : (p?.customRetailPrice || prod?.retailPrice),
@@ -3457,17 +3817,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPurchases((prev) => prev.map((p) => (p.id === poId ? updatedPO : p)));
     saveDocument('purchases', updatedPO);
 
+    const shortageSummary = totalShortageUnits > 0 ? `, Shortage: ${totalShortageUnits}` : '';
+    const excessSummary = totalExcessUnits > 0 ? `, Excess: +${totalExcessUnits}` : '';
+    const closedShortageNote = inspectionData.closeShortage ? ' (Closed order with shortage)' : '';
+
     logAudit(
       'INSPECT_STOCK',
       'PurchaseOrder',
       poId,
       inspectionData.inspectorName,
-      `Inspected PO #${po.poNumber} (${grnNumber}). Accepted: ${totalAcceptedUnits}, Damaged: ${totalDamagedUnits}.${recvDeliveryFee ? ` Delivery Fee Charge: ${settings.currencySymbol}${recvDeliveryFee.toFixed(2)} (Logged as Logistics Expense)` : ''} Status: ${inspectionData.inspectionStatus}`
+      `Inspected PO #${po.poNumber} (${grnNumber}). Accepted: ${totalAcceptedUnits}, Damaged: ${totalDamagedUnits}${shortageSummary}${excessSummary}${closedShortageNote}.${recvDeliveryFee ? ` Delivery Fee Charge: ${settings.currencySymbol}${recvDeliveryFee.toFixed(2)} (Logged as Logistics Expense)` : ''} Status: ${inspectionData.inspectionStatus}`
     );
 
     showToast({
       title: 'Inspection & Receiving Recorded',
-      message: `${grnNumber} issued. Restocked ${totalAcceptedUnits} units into inventory${recvDeliveryFee ? ` & recorded ${settings.currencySymbol}${recvDeliveryFee.toFixed(2)} under Logistics Expense` : ''}.`,
+      message: `${grnNumber} issued. Restocked ${totalAcceptedUnits} units into inventory${shortageSummary}${excessSummary}${recvDeliveryFee ? ` & recorded ${settings.currencySymbol}${recvDeliveryFee.toFixed(2)} under Logistics Expense` : ''}.`,
       type: 'success',
     });
   };

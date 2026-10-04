@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
 import {
   ShoppingCart,
   Search,
@@ -13,6 +13,7 @@ import {
   Smartphone,
   Building,
   User,
+  Phone,
   Tag,
   Printer,
   CheckCircle,
@@ -27,21 +28,29 @@ import {
   ChevronDown,
   ChevronUp,
   SlidersHorizontal,
+  Award,
+  AlertCircle,
+  Wallet,
+  Package,
+  UserPlus,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { Product, SaleItem, PaymentMethod, Customer, Sale } from '../../types';
 import { ReceiptModal } from '../common/ReceiptModal';
 import { EditSaleModal } from '../sales/EditSaleModal';
+import { AddProductModal } from '../modals/AddProductModal';
 import { useAuth } from '../../context/AuthContext';
 import { useInteractions } from '../../context/InteractionContext';
 import { navigateStaff } from '../../hooks/useRoute';
 import { localIsoDate } from '../../shared/localDate';
+import { useToast } from '../../context/ToastContext';
 
 export const PosView: React.FC = () => {
   const {
     products,
     sales,
     customers,
+    addCustomer,
     processSale,
     holdOrder,
     heldOrders,
@@ -55,12 +64,27 @@ export const PosView: React.FC = () => {
   } = useApp();
   const { currentUser } = useAuth();
   const { notify, confirm } = useInteractions();
+  const { showToast } = useToast();
+
+  const [showAddProductModal, setShowAddProductModal] = useState(false);
+  const [quickProductInitialName, setQuickProductInitialName] = useState('');
+  const [quickProductInitialBarcode, setQuickProductInitialBarcode] = useState('');
+
+  const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
+  const [newCustomerForm, setNewCustomerForm] = useState({
+    name: '',
+    phone: '',
+    email: '',
+    address: '',
+  });
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [cart, setCart] = useState<SaleItem[]>([]);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [customerSearch, setCustomerSearch] = useState('');
+  const [isCustomerDropdownOpen, setIsCustomerDropdownOpen] = useState(false);
+  const customerDropdownRef = useRef<HTMLDivElement>(null);
   const [discountAmount, setDiscountAmount] = useState<number>(0);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('Mobile Transfer');
   const [paidAmountInput, setPaidAmountInput] = useState<string>('');
@@ -93,6 +117,7 @@ export const PosView: React.FC = () => {
   const [noTax, setNoTax] = useState<boolean>(true);
   const [showMoreSettings, setShowMoreSettings] = useState<boolean>(false);
   const [isCreditSaleMode, setIsCreditSaleMode] = useState<boolean>(false);
+  const [applyOverage, setApplyOverage] = useState<boolean>(false);
   const [resumedOrderMeta, setResumedOrderMeta] = useState<{
     id: string;
     name: string;
@@ -346,6 +371,82 @@ export const PosView: React.FC = () => {
     addToCart(product);
   };
 
+  const handleOpenAddProductModal = (query: string = '') => {
+    const trimmed = query.trim();
+    // Check if query looks like a barcode (mostly digits between 6 and 18 chars)
+    const isBarcodeLike = /^\d{6,18}$/.test(trimmed);
+    if (isBarcodeLike) {
+      setQuickProductInitialBarcode(trimmed);
+      setQuickProductInitialName('');
+    } else {
+      setQuickProductInitialBarcode('');
+      setQuickProductInitialName(trimmed);
+    }
+    setShowAddProductModal(true);
+  };
+
+  const handleProductCreated = (newProd: Product) => {
+    addToCart(newProd);
+    setShowAddProductModal(false);
+    setSearchQuery('');
+    showToast({
+      title: 'Product Added to Register',
+      message: `"${newProd.name}" (${newProd.sku}) created and added to active cart.`,
+      type: 'success',
+    });
+  };
+
+  const handleOpenAddCustomerModal = (query: string = '') => {
+    const trimmed = query.trim();
+    // Detect if the search query is primarily a phone number (e.g. digits, +, spaces, hyphens)
+    const isPhoneLike = /^[+\d][\d\s\-()]{4,}$/.test(trimmed);
+    setNewCustomerForm({
+      name: isPhoneLike ? '' : trimmed,
+      phone: isPhoneLike ? trimmed : '',
+      email: '',
+      address: '',
+    });
+    setIsCustomerDropdownOpen(false);
+    setShowAddCustomerModal(true);
+  };
+
+  const handleCreateCustomerFromPos = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedName = newCustomerForm.name.trim();
+    if (!trimmedName) return;
+
+    const existingMatch = customers.find(
+      (c) =>
+        (newCustomerForm.phone.trim() && c.phone && c.phone.trim() === newCustomerForm.phone.trim()) ||
+        c.name.trim().toLowerCase() === trimmedName.toLowerCase()
+    );
+
+    if (existingMatch) {
+      setSelectedCustomer(existingMatch);
+      setApplyOverage(false);
+      setShowAddCustomerModal(false);
+      setCustomerSearch('');
+      showToast({
+        title: 'Existing Customer Selected',
+        message: `"${existingMatch.name}" already exists in the directory and has been selected on the register.`,
+        type: 'info',
+      });
+      return;
+    }
+
+    const created = addCustomer({
+      name: trimmedName,
+      phone: newCustomerForm.phone.trim(),
+      email: newCustomerForm.email.trim(),
+      address: newCustomerForm.address.trim(),
+    });
+
+    setSelectedCustomer(created);
+    setApplyOverage(false);
+    setShowAddCustomerModal(false);
+    setCustomerSearch('');
+  };
+
   const updateCartItemUnitPrice = (productId: string, newUnitPrice: number) => {
     setCart((prevCart) =>
       prevCart.map((item) => {
@@ -494,10 +595,47 @@ export const PosView: React.FC = () => {
     });
   };
 
+  const activeCustomer = useMemo(() => {
+    if (!selectedCustomer) return null;
+    return customers.find((c) => c.id === selectedCustomer.id) || selectedCustomer;
+  }, [customers, selectedCustomer]);
+
+  const filteredDropdownCustomers = useMemo(() => {
+    const query = (customerSearch || '').trim().toLowerCase();
+    const digits = query.replace(/\D/g, '');
+    return customers.filter((c) => {
+      if (!c) return false;
+      if (!query) return true;
+      const nameMatch = (c.name || '').toLowerCase().includes(query);
+      const phoneMatch = Boolean(c.phone && c.phone.toLowerCase().includes(query));
+      const phoneDigitsMatch = Boolean(digits && c.phone && c.phone.replace(/\D/g, '').includes(digits));
+      return nameMatch || phoneMatch || phoneDigitsMatch;
+    });
+  }, [customers, customerSearch]);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (customerDropdownRef.current && !customerDropdownRef.current.contains(event.target as Node)) {
+        setIsCustomerDropdownOpen(false);
+        setCustomerSearch('');
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const customerOverage = activeCustomer ? Math.max(0, Number(activeCustomer.overageBalance) || 0) : 0;
+  const customerDebt = activeCustomer ? Math.max(0, Number(activeCustomer.outstandingBalance) || 0) : 0;
+  const customerLoyaltyPoints = activeCustomer ? Math.max(0, Number(activeCustomer.loyaltyPoints) || 0) : 0;
+
   const subtotal = cart.reduce((acc, item) => acc + item.total, 0);
   const tax = noTax ? 0 : Math.round(((subtotal - discountAmount) * (settings.taxRatePct / 100)) * 100) / 100;
   const deliveryFee = hasDeliveryFee ? (parseFloat(deliveryFeeInput) || 0) : 0;
-  const grandTotal = Math.max(0, Math.round((subtotal - discountAmount + tax + deliveryFee) * 100) / 100);
+  const baseGrandTotal = Math.max(0, Math.round((subtotal - discountAmount + tax + deliveryFee) * 100) / 100);
+  const overageApplied = applyOverage && customerOverage > 0
+    ? Math.min(customerOverage, baseGrandTotal)
+    : 0;
+  const grandTotal = Math.max(0, Math.round((baseGrandTotal - overageApplied) * 100) / 100);
 
   const totalSplitPaid: number = (Object.values(splitAmounts) as number[]).reduce((a: number, b: number) => a + b, 0);
   const remainingToSplit: number = Math.max(0, Math.round((grandTotal - totalSplitPaid) * 100) / 100);
@@ -579,7 +717,7 @@ export const PosView: React.FC = () => {
 
     const completedSale = processSale(
         cart,
-        selectedCustomer,
+        activeCustomer,
         discountAmount,
         tax,
         paymentMethod,
@@ -593,7 +731,8 @@ export const PosView: React.FC = () => {
         undefined,
         undefined,
         paymentMethod === 'Split' ? { ...splitAmounts } : undefined,
-        isHistoricalSale
+        isHistoricalSale,
+        overageApplied
       );
 
     if (!completedSale?.isHistorical && !isBackdateMode) {
@@ -601,6 +740,7 @@ export const PosView: React.FC = () => {
     }
     setCart([]);
     setSelectedCustomer(null);
+    setApplyOverage(false);
     setResumedOrderMeta(null);
     setIsCreditSaleMode(false);
     setDiscountAmount(0);
@@ -702,29 +842,54 @@ export const PosView: React.FC = () => {
         <div className="order-2 lg:order-1 lg:col-span-7 space-y-4">
           {/* Search & Category Tabs */}
           <div className="bg-white dark:bg-slate-900 p-4 rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-3">
-            <div className="relative">
-              <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                type="text"
-                placeholder="Scan barcode or search products..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && searchQuery.trim()) {
-                    const q = searchQuery.trim().toLowerCase();
-                    const match = products.find(
-                      (p) => p.status !== 'Archived' && (((p.barcode || '').toLowerCase() === q) || ((p.sku || '').toLowerCase() === q))
-                    ) || (filteredProducts.length === 1 ? filteredProducts[0] : undefined);
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Scan barcode or search products..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && searchQuery.trim()) {
+                      const q = searchQuery.trim().toLowerCase();
+                      const match = products.find(
+                        (p) => p.status !== 'Archived' && (((p.barcode || '').toLowerCase() === q) || ((p.sku || '').toLowerCase() === q))
+                      ) || (filteredProducts.length === 1 ? filteredProducts[0] : undefined);
 
-                    if (match) {
-                      addToCart(match);
-                      setSearchQuery('');
+                      if (match) {
+                        addToCart(match);
+                        setSearchQuery('');
+                      } else {
+                        handleOpenAddProductModal(searchQuery.trim());
+                      }
                     }
-                  }
-                }}
-                className="w-full pl-10 pr-10 py-2.5 bg-slate-100 dark:bg-slate-800 border border-transparent focus:border-blue-500 text-slate-900 dark:text-slate-100 text-xs rounded-xl focus:outline-none"
-              />
-              <Barcode className="w-5 h-5 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  }}
+                  className="w-full pl-10 pr-10 py-2.5 bg-slate-100 dark:bg-slate-800 border border-transparent focus:border-blue-500 text-slate-900 dark:text-slate-100 text-xs rounded-xl focus:outline-none font-medium"
+                />
+                {searchQuery ? (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-9 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-0.5"
+                    title="Clear search"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                ) : null}
+                <Barcode className="w-5 h-5 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              </div>
+
+              {/* Quick Add Product to POS */}
+              <button
+                type="button"
+                onClick={() => handleOpenAddProductModal(searchQuery.trim())}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs transition-all hover:scale-[1.02] shrink-0"
+                title="Add a new product to catalog and active register"
+              >
+                <Plus className="w-4 h-4" />
+                <span className="hidden sm:inline">New Product</span>
+              </button>
             </div>
 
             {/* Category Pills */}
@@ -747,7 +912,30 @@ export const PosView: React.FC = () => {
 
           {/* Product Cards Grid */}
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-[580px] overflow-y-auto pr-1">
-            {filteredProducts.map((p) => {
+            {filteredProducts.length === 0 ? (
+              <div className="col-span-2 sm:col-span-3 p-8 text-center bg-white dark:bg-slate-900 rounded-3xl border border-slate-200/80 dark:border-slate-800 space-y-3">
+                <Package className="w-10 h-10 mx-auto text-slate-300 dark:text-slate-600" />
+                <div>
+                  <p className="font-extrabold text-sm text-slate-800 dark:text-slate-200">
+                    {searchQuery ? `No products match "${searchQuery}"` : 'No products available in this category'}
+                  </p>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    {searchQuery
+                      ? 'Customer has an unlisted item? Quickly register it to catalog and ring it up directly!'
+                      : 'Try switching the category filter or create a new product.'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleOpenAddProductModal(searchQuery.trim())}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-xs transition-all hover:scale-[1.02]"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Create & Ring Up &quot;{searchQuery.trim() || 'New Product'}&quot;</span>
+                </button>
+              </div>
+            ) : (
+              filteredProducts.map((p) => {
               const inStock = p.currentStock > 0;
               const canSelect = inStock || isBackdateMode;
               const isInRegister = cart.some((item) => item.productId === p.id);
@@ -829,58 +1017,294 @@ export const PosView: React.FC = () => {
                   </div>
                 </div>
               );
-            })}
+            }))}
           </div>
         </div>
 
         {/* Right Column: Checkout Cart Terminal (5 Cols) */}
         <div className="order-1 lg:order-2 lg:col-span-5 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-3xl p-5 shadow-lg space-y-4 flex flex-col h-full min-h-[580px]">
-          {/* Customer Selection */}
-          <div className="flex items-start justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-3">
-            <div className="flex min-w-0 flex-1 items-start gap-2">
-              <User className="w-4 h-4 text-blue-600" />
-              <div className="grid min-w-0 flex-1 gap-1.5 sm:grid-cols-2">
-                <div className="relative">
-                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
-                  <input value={customerSearch} onChange={(e) => setCustomerSearch(e.target.value)} placeholder="Search name or phone" className="w-full bg-slate-100 dark:bg-slate-800 border border-transparent focus:border-blue-500 text-slate-900 dark:text-white text-xs font-semibold rounded-xl pl-8 pr-2.5 py-1.5" />
-                </div>
-                <select
-                  value={selectedCustomer?.id || ''}
+          {/* Customer Selection - Unified Searchable Dropdown Box */}
+          <div className="flex items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-3">
+            <div ref={customerDropdownRef} className="relative flex-1 min-w-0">
+              <div
+                onClick={() => setIsCustomerDropdownOpen(true)}
+                className={`flex items-center gap-2 w-full bg-slate-100 dark:bg-slate-800 border rounded-xl px-3 py-2 transition-all cursor-text ${
+                  isCustomerDropdownOpen
+                    ? 'border-blue-500 ring-2 ring-blue-500/20 bg-white dark:bg-slate-900'
+                    : 'border-transparent hover:border-slate-300 dark:hover:border-slate-700'
+                }`}
+              >
+                <User className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                <input
+                  type="text"
+                  value={
+                    isCustomerDropdownOpen
+                      ? customerSearch
+                      : activeCustomer
+                      ? `${activeCustomer.name}${activeCustomer.phone ? ` (${activeCustomer.phone})` : ''}`
+                      : ''
+                  }
+                  onFocus={() => setIsCustomerDropdownOpen(true)}
                   onChange={(e) => {
-                    const cust = customers.find((c) => c.id === e.target.value);
-                    setSelectedCustomer(cust || null);
-                    if (!cust) setIsCreditSaleMode(false);
+                    setCustomerSearch(e.target.value);
+                    if (!isCustomerDropdownOpen) setIsCustomerDropdownOpen(true);
                   }}
-                  className="min-w-0 bg-slate-100 dark:bg-slate-800 border border-transparent focus:border-blue-500 text-slate-900 dark:text-white text-xs font-bold rounded-xl px-2.5 py-1.5"
-                >
-                  <option value="">Walk-in Customer</option>
-                  {customers.filter((c) => {
-                    if (!c) return false;
-                    const query = (customerSearch || '').trim().toLowerCase();
-                    if (!query || c.id === selectedCustomer?.id) return true;
-                    const digits = query.replace(/\D/g, '');
-                    return (
-                      (c.name || '').toLowerCase().includes(query) ||
-                      (c.phone && c.phone.toLowerCase().includes(query)) ||
-                      Boolean(digits && c.phone && c.phone.replace(/\D/g, '').includes(digits))
-                    );
-                  }).map((c) => (
-                    <option key={c.id} value={c.id}>{c.name} ({c.phone})</option>
-                  ))}
-                </select>
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      setIsCustomerDropdownOpen(false);
+                      setCustomerSearch('');
+                    } else if (e.key === 'Enter' && isCustomerDropdownOpen) {
+                      e.preventDefault();
+                      if (customerSearch.trim() && filteredDropdownCustomers.length > 0) {
+                        const firstMatch = filteredDropdownCustomers[0];
+                        setSelectedCustomer(firstMatch);
+                        setApplyOverage(false);
+                        setCustomerSearch('');
+                        setIsCustomerDropdownOpen(false);
+                      } else if (customerSearch.trim()) {
+                        handleOpenAddCustomerModal(customerSearch);
+                      }
+                    }
+                  }}
+                  placeholder={
+                    activeCustomer
+                      ? `${activeCustomer.name}${activeCustomer.phone ? ` (${activeCustomer.phone})` : ''}`
+                      : 'Walk-in Customer — Search name or phone...'
+                  }
+                  className="w-full min-w-0 bg-transparent text-slate-900 dark:text-white placeholder:text-slate-500 dark:placeholder:text-slate-400 text-xs font-bold focus:outline-none"
+                />
+                <div className="flex items-center gap-1 shrink-0">
+                  {(activeCustomer || customerSearch) && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (customerSearch) {
+                          setCustomerSearch('');
+                        } else {
+                          setSelectedCustomer(null);
+                          setApplyOverage(false);
+                          setIsCreditSaleMode(false);
+                          setIsCustomerDropdownOpen(false);
+                        }
+                      }}
+                      title={customerSearch ? 'Clear search' : 'Reset to Walk-in Customer'}
+                      className="p-0.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-700/70 transition-colors cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsCustomerDropdownOpen((prev) => !prev);
+                      if (isCustomerDropdownOpen) setCustomerSearch('');
+                    }}
+                    className="p-0.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors cursor-pointer"
+                    aria-label="Toggle customer dropdown"
+                  >
+                    {isCustomerDropdownOpen ? (
+                      <ChevronUp className="w-4 h-4" />
+                    ) : (
+                      <ChevronDown className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
               </div>
+
+              {/* Unified Dropdown Menu */}
+              {isCustomerDropdownOpen && (
+                <div className="absolute left-0 right-0 top-full mt-1.5 z-40 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-xl max-h-64 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/80 animate-in fade-in duration-150">
+                  {/* Walk-in Customer Option */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedCustomer(null);
+                      setApplyOverage(false);
+                      setIsCreditSaleMode(false);
+                      setCustomerSearch('');
+                      setIsCustomerDropdownOpen(false);
+                    }}
+                    className={`w-full px-3.5 py-2.5 text-left flex items-center justify-between gap-2 text-xs transition-colors cursor-pointer ${
+                      !activeCustomer
+                        ? 'bg-blue-50/80 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 font-extrabold'
+                        : 'hover:bg-slate-50 dark:hover:bg-slate-800/70 text-slate-700 dark:text-slate-200 font-bold'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <User className="w-3.5 h-3.5 text-slate-400" />
+                      <span>Walk-in Customer</span>
+                    </div>
+                    {!activeCustomer && <Check className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />}
+                  </button>
+
+                  {/* Filtered Customer Results */}
+                  {filteredDropdownCustomers.length === 0 ? (
+                    <div className="px-3.5 py-4 text-center space-y-2.5">
+                      <p className="text-xs text-slate-400">
+                        No customer found matching "{customerSearch}"
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenAddCustomerModal(customerSearch)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-xs transition-all cursor-pointer"
+                      >
+                        <UserPlus className="w-3.5 h-3.5" />
+                        <span>Register "{customerSearch.trim() || 'New Customer'}"</span>
+                      </button>
+                    </div>
+                  ) : (
+                    filteredDropdownCustomers.map((c) => {
+                      const isSelected = activeCustomer?.id === c.id;
+                      const cOverage = Math.max(0, Number(c.overageBalance) || 0);
+                      const cDebt = Math.max(0, Number(c.outstandingBalance) || 0);
+                      const cPts = Math.max(0, Number(c.loyaltyPoints) || 0);
+
+                      return (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedCustomer(c);
+                            setApplyOverage(false);
+                            setCustomerSearch('');
+                            setIsCustomerDropdownOpen(false);
+                          }}
+                          className={`w-full px-3.5 py-2.5 text-left flex items-center justify-between gap-2 text-xs transition-colors cursor-pointer ${
+                            isSelected
+                              ? 'bg-blue-50/80 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300'
+                              : 'hover:bg-slate-50 dark:hover:bg-slate-800/70 text-slate-800 dark:text-slate-100'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <p className="font-extrabold truncate">{c.name}</p>
+                            <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium flex items-center gap-1 mt-0.5">
+                              <Phone className="w-2.5 h-2.5 shrink-0" />
+                              <span>{c.phone || 'No phone'}</span>
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            {cOverage > 0 ? (
+                              <span className="px-1.5 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 text-[10px] font-black">
+                                +{settings.currencySymbol}{cOverage.toFixed(0)}
+                              </span>
+                            ) : cDebt > 0 ? (
+                              <span className="px-1.5 py-0.5 rounded-md bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 text-[10px] font-black">
+                                -{settings.currencySymbol}{cDebt.toFixed(0)}
+                              </span>
+                            ) : (
+                              <span className="px-1.5 py-0.5 rounded-md bg-amber-100 dark:bg-amber-950/80 text-amber-700 dark:text-amber-300 text-[10px] font-bold">
+                                {cPts} pts
+                              </span>
+                            )}
+                            {isSelected && <Check className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />}
+                          </div>
+                        </button>
+                      );
+                    })
+                  )}
+
+                  {/* Sticky Footer: Add New Customer */}
+                  <button
+                    type="button"
+                    onClick={() => handleOpenAddCustomerModal(customerSearch)}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800/90 hover:bg-blue-50 dark:hover:bg-blue-950/50 text-blue-600 dark:text-blue-400 font-extrabold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer sticky bottom-0 border-t border-slate-200/80 dark:border-slate-700/80"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>+ Add New Customer</span>
+                  </button>
+                </div>
+              )}
             </div>
+
+            {/* Quick Add Customer Button */}
+            <button
+              type="button"
+              onClick={() => handleOpenAddCustomerModal(customerSearch)}
+              className="flex items-center gap-1.5 px-3 py-2 bg-blue-50 dark:bg-blue-950/60 hover:bg-blue-100 dark:hover:bg-blue-900/70 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-800/80 rounded-xl text-xs font-extrabold transition-all shrink-0 cursor-pointer"
+              title="Register a new customer directly from the POS"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">New</span>
+            </button>
 
             {cart.length > 0 && (
               <button
                 onClick={handleHoldCurrentCart}
-                className="flex items-center gap-1 text-xs font-bold text-amber-600 dark:text-amber-400 hover:underline"
+                className="flex items-center gap-1 text-xs font-bold text-amber-600 dark:text-amber-400 hover:underline shrink-0"
               >
                 <Pause className="w-3.5 h-3.5" />
                 <span>Hold</span>
               </button>
             )}
           </div>
+
+          {/* Customer Status Reflection on POS Register */}
+          {activeCustomer && (
+            <div
+              className={`px-3.5 py-2.5 rounded-2xl border flex items-center justify-between gap-2 transition-all animate-in fade-in duration-200 ${
+                customerOverage > 0
+                  ? 'bg-emerald-50/90 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800/80'
+                  : customerDebt > 0
+                  ? 'bg-rose-50/90 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800/80'
+                  : 'bg-amber-50/80 dark:bg-amber-950/30 border-amber-200/80 dark:border-amber-800/70'
+              }`}
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <div
+                  className={`p-1.5 rounded-xl shrink-0 ${
+                    customerOverage > 0
+                      ? 'bg-emerald-100 dark:bg-emerald-900/70 text-emerald-700 dark:text-emerald-300'
+                      : customerDebt > 0
+                      ? 'bg-rose-100 dark:bg-rose-900/70 text-rose-700 dark:text-rose-300'
+                      : 'bg-amber-100 dark:bg-amber-900/70 text-amber-700 dark:text-amber-300'
+                  }`}
+                >
+                  {customerOverage > 0 ? (
+                    <Wallet className="w-3.5 h-3.5" />
+                  ) : customerDebt > 0 ? (
+                    <AlertCircle className="w-3.5 h-3.5" />
+                  ) : (
+                    <Award className="w-3.5 h-3.5" />
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 dark:text-slate-400 block">
+                    Customer Status
+                  </span>
+                  <p className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
+                    {activeCustomer.name}
+                  </p>
+                </div>
+              </div>
+
+              <div className="text-right shrink-0">
+                {customerOverage > 0 ? (
+                  <div>
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-emerald-600 text-white text-xs font-black shadow-xs">
+                      <span>Store Credit: {settings.currencySymbol}{customerOverage.toFixed(2)}</span>
+                    </span>
+                    {overageApplied > 0 && (
+                      <p className="text-[10px] font-bold text-emerald-700 dark:text-emerald-300 mt-0.5">
+                        -{settings.currencySymbol}{overageApplied.toFixed(2)} applied to total
+                      </p>
+                    )}
+                  </div>
+                ) : customerDebt > 0 ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-rose-600 text-white text-xs font-black shadow-xs">
+                    <span>Owing Us: {settings.currencySymbol}{customerDebt.toFixed(2)}</span>
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-amber-500 text-white text-xs font-black shadow-xs">
+                    <Award className="w-3 h-3" />
+                    <span>{customerLoyaltyPoints.toLocaleString()} Loyalty Pts</span>
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Cart Header with Credit Pricing Indicator */}
           <div className="flex items-center justify-between">
@@ -1653,17 +2077,19 @@ export const PosView: React.FC = () => {
                         ))}
                       </div>
 
-                      {/* Live Change / Debt calculation */}
+                      {/* Live Change / Store Credit / Debt calculation */}
                       {paidAmountInput !== '' && !isNaN(parseFloat(paidAmountInput)) && (
                         <div className="text-[11px] pt-1">
                           {parseFloat(paidAmountInput) > grandTotal ? (
                             <span className="font-extrabold text-emerald-600 dark:text-emerald-400">
-                              Change Due: {settings.currencySymbol}{(parseFloat(paidAmountInput) - grandTotal).toFixed(2)}
+                              {activeCustomer
+                                ? `Store Credit to Track: ${settings.currencySymbol}${(parseFloat(paidAmountInput) - grandTotal).toFixed(2)} (Saved to ${activeCustomer.name}'s Store Credit)`
+                                : `Change Due: ${settings.currencySymbol}${(parseFloat(paidAmountInput) - grandTotal).toFixed(2)} (Walk-in Customer)`}
                             </span>
                           ) : parseFloat(paidAmountInput) < grandTotal ? (
                             <span className="font-extrabold text-amber-600 dark:text-amber-400">
                               Remaining Debt: {settings.currencySymbol}{(grandTotal - parseFloat(paidAmountInput)).toFixed(2)}
-                              {selectedCustomer ? ` (Charged to ${selectedCustomer.name})` : ' (Walk-in Customer)'}
+                              {activeCustomer ? ` (Charged to ${activeCustomer.name})` : ' (Walk-in Customer)'}
                             </span>
                           ) : null}
                         </div>
@@ -1696,8 +2122,44 @@ export const PosView: React.FC = () => {
                   <span>+{settings.currencySymbol}{deliveryFee.toFixed(2)}</span>
                 </div>
               )}
-              <div className="flex justify-between font-extrabold text-base text-slate-900 dark:text-white border-t border-slate-200 dark:border-slate-700 pt-1">
-                <span>Grand Total:</span>
+              {overageApplied > 0 && (
+                <div className="flex justify-between text-emerald-600 dark:text-emerald-400 font-bold">
+                  <span>Customer Store Credit Applied:</span>
+                  <span>-{settings.currencySymbol}{overageApplied.toFixed(2)}</span>
+                </div>
+              )}
+              <div className="flex items-center justify-between font-extrabold text-base text-slate-900 dark:text-white border-t border-slate-200 dark:border-slate-700 pt-1.5 gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span>Purchase Total:</span>
+                  <label
+                    className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold border transition-all select-none ${
+                      customerOverage > 0
+                        ? applyOverage
+                          ? 'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-800 dark:text-emerald-300 border-emerald-400 dark:border-emerald-700 cursor-pointer shadow-2xs'
+                          : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700 hover:border-emerald-400 cursor-pointer'
+                        : 'bg-slate-100/70 dark:bg-slate-800/40 text-slate-400 dark:text-slate-500 border-slate-200 dark:border-slate-800 opacity-60 cursor-not-allowed'
+                    }`}
+                    title={
+                      customerOverage > 0
+                        ? `Toggle to apply ${activeCustomer?.name}'s store credit (${settings.currencySymbol}${customerOverage.toFixed(2)}) toward Purchase Total`
+                        : 'Select a customer with a store credit balance to apply store credit'
+                    }
+                  >
+                    <input
+                      type="checkbox"
+                      checked={applyOverage && customerOverage > 0}
+                      disabled={customerOverage <= 0}
+                      onChange={(e) => setApplyOverage(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="relative w-6 h-3.5 bg-slate-300 dark:bg-slate-700 rounded-full peer peer-checked:bg-emerald-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-2.5 after:w-2.5 after:transition-all peer-checked:after:translate-x-2.5"></div>
+                    <span>
+                      {customerOverage > 0
+                        ? `Apply Store Credit (${settings.currencySymbol}${customerOverage.toFixed(2)})`
+                        : 'Apply Store Credit'}
+                    </span>
+                  </label>
+                </div>
                 <span className="text-emerald-600 dark:text-emerald-400">{settings.currencySymbol}{grandTotal.toFixed(2)}</span>
               </div>
             </div>
@@ -2280,6 +2742,120 @@ export const PosView: React.FC = () => {
           sale={editingCompletedSale}
           onClose={() => setEditingCompletedSale(null)}
         />
+      )}
+
+      {/* Quick Add Product Modal from POS */}
+      <AddProductModal
+        isOpen={showAddProductModal}
+        onClose={() => setShowAddProductModal(false)}
+        onProductCreated={handleProductCreated}
+        initialName={quickProductInitialName}
+        initialBarcode={quickProductInitialBarcode}
+        initialStock={20}
+        zIndexClass="z-[70]"
+      />
+
+      {/* Quick Add Customer Modal from POS */}
+      {showAddCustomerModal && (
+        <div className="fixed inset-0 z-[70] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-150">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl max-w-md w-full p-6 space-y-4 my-auto max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-blue-100 dark:bg-blue-950/70 text-blue-600 dark:text-blue-400 rounded-2xl">
+                  <UserPlus className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-slate-900 dark:text-white text-base">
+                    Add New Customer
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-medium">
+                    Register & attach directly to active POS checkout
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAddCustomerModal(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateCustomerFromPos} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  Customer Full Name *
+                </label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  placeholder="e.g., Chinedu Okafor"
+                  value={newCustomerForm.name}
+                  onChange={(e) => setNewCustomerForm({ ...newCustomerForm, name: e.target.value })}
+                  className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 border border-transparent focus:border-blue-500 rounded-xl text-slate-900 dark:text-white font-semibold focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  Phone Number
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g., 0803 123 4567"
+                  value={newCustomerForm.phone}
+                  onChange={(e) => setNewCustomerForm({ ...newCustomerForm, phone: e.target.value })}
+                  className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 border border-transparent focus:border-blue-500 rounded-xl text-slate-900 dark:text-white font-semibold focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  Email Address (Optional)
+                </label>
+                <input
+                  type="email"
+                  placeholder="customer@example.com"
+                  value={newCustomerForm.email}
+                  onChange={(e) => setNewCustomerForm({ ...newCustomerForm, email: e.target.value })}
+                  className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 border border-transparent focus:border-blue-500 rounded-xl text-slate-900 dark:text-white font-semibold focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  Street / Delivery Address (Optional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="Street, Area, City..."
+                  value={newCustomerForm.address}
+                  onChange={(e) => setNewCustomerForm({ ...newCustomerForm, address: e.target.value })}
+                  className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 border border-transparent focus:border-blue-500 rounded-xl text-slate-900 dark:text-white font-semibold focus:outline-none"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setShowAddCustomerModal(false)}
+                  className="px-4 py-2 font-bold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-extrabold rounded-xl shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+                >
+                  <CheckCircle className="w-4 h-4" />
+                  <span>Save & Select Customer</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -49,6 +49,7 @@ export const InspectStockModal: React.FC<InspectStockModalProps> = ({
   const [deliveryFee, setDeliveryFee] = useState<number>(0);
   const [deliveryFeePaymentMethod, setDeliveryFeePaymentMethod] = useState<PaymentMethod>('Cash');
   const [promptPriceAdjustment, setPromptPriceAdjustment] = useState<boolean>(true);
+  const [closeShortage, setCloseShortage] = useState<boolean>(false);
 
   useEffect(() => {
     if (po && po.items) {
@@ -89,6 +90,7 @@ export const InspectStockModal: React.FC<InspectStockModalProps> = ({
       setInspectionStatus('Passed');
       setDeliveryFee(po.deliveryFee || 0);
       setDeliveryFeePaymentMethod('Cash');
+      setCloseShortage(false);
     }
   }, [po, currentUserName, products]);
 
@@ -157,6 +159,14 @@ export const InspectStockModal: React.FC<InspectStockModalProps> = ({
   const totalReceiving = itemsState.reduce((sum, i) => sum + i.receivingQty, 0);
   const totalAccepted = itemsState.reduce((sum, i) => sum + i.acceptedQty, 0);
   const totalDamaged = itemsState.reduce((sum, i) => sum + i.damagedQty, 0);
+  const totalShortage = itemsState.reduce(
+    (sum, i) => sum + Math.max(0, i.orderedQty - (i.prevReceivedQty + i.receivingQty)),
+    0
+  );
+  const totalExcess = itemsState.reduce(
+    (sum, i) => sum + Math.max(0, (i.prevReceivedQty + i.receivingQty) - i.orderedQty),
+    0
+  );
 
   // Gross Profit Impact Calculations for Delivery Fee and Unit Cost Changes
   const totalAcceptedGoodsCost = itemsState.reduce((sum, item) => {
@@ -186,25 +196,33 @@ export const InspectStockModal: React.FC<InspectStockModalProps> = ({
     }
 
     receiveAndInspectPO(po.id, {
-      items: itemsState.map((i) => ({
-        productId: i.productId,
-        receivingQty: i.receivingQty,
-        acceptedQty: i.acceptedQty,
-        damagedQty: i.damagedQty,
-        unitCost: i.unitCost,
-        oldUnitCost: i.oldUnitCost,
-        customRetailPrice: i.customRetailPrice,
-        oldRetailPrice: i.oldRetailPrice,
-        updateCatalogCost: i.updateCatalogCost,
-        updateCatalogRetail: i.updateCatalogRetail,
-        conditionNotes: i.conditionNotes,
-      })),
+      items: itemsState.map((i) => {
+        const cumRecv = i.prevReceivedQty + i.receivingQty;
+        const itemShortage = Math.max(0, i.orderedQty - cumRecv);
+        const itemExcess = Math.max(0, cumRecv - i.orderedQty);
+        return {
+          productId: i.productId,
+          receivingQty: i.receivingQty,
+          acceptedQty: i.acceptedQty,
+          damagedQty: i.damagedQty,
+          shortageQty: itemShortage,
+          excessQty: itemExcess,
+          unitCost: i.unitCost,
+          oldUnitCost: i.oldUnitCost,
+          customRetailPrice: i.customRetailPrice,
+          oldRetailPrice: i.oldRetailPrice,
+          updateCatalogCost: i.updateCatalogCost,
+          updateCatalogRetail: i.updateCatalogRetail,
+          conditionNotes: i.conditionNotes,
+        };
+      }),
       inspectionStatus,
       inspectorName,
       generalNotes,
       deliveryFee,
       deliveryFeePaymentMethod,
       receivedDate,
+      closeShortage,
     });
 
     // Trigger Price Adjustment Recommendation Modal if cost increased or delivery fee impacts profit
@@ -307,124 +325,160 @@ export const InspectStockModal: React.FC<InspectStockModalProps> = ({
                       <th className="py-3 px-2 text-center w-24">Receiving Now</th>
                       <th className="py-3 px-2 text-center w-24">Accepted Qty</th>
                       <th className="py-3 px-2 text-center w-24">Damaged Qty</th>
+                      <th className="py-3 px-2 text-center w-20">Shortage</th>
+                      <th className="py-3 px-2 text-center w-20">Excess</th>
                       <th className="py-3 px-3">Condition / Remarks</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-medium">
-                    {itemsState.map((item) => (
-                      <tr key={item.productId} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
-                        <td className="py-3 px-3">
-                          <p className="font-bold text-slate-900 dark:text-white">{item.productName}</p>
-                          <p className="text-[10px] font-mono text-slate-400">{item.sku}</p>
-                        </td>
-                        <td className="py-3 px-2 text-center font-bold text-slate-700 dark:text-slate-300">
-                          {item.orderedQty}
-                        </td>
-                        <td className="py-3 px-2 text-center font-mono text-slate-500">
-                          {item.prevReceivedQty}
-                        </td>
+                    {itemsState.map((item) => {
+                      const cumRecv = item.prevReceivedQty + item.receivingQty;
+                      const shortageQty = Math.max(0, item.orderedQty - cumRecv);
+                      const excessQty = Math.max(0, cumRecv - item.orderedQty);
 
-                        {/* Unit Cost */}
-                        <td className="py-3 px-2 text-center">
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={item.unitCost}
-                            onChange={(e) => handleUnitCostChange(item.productId, parseFloat(e.target.value) || 0)}
-                            className="w-24 px-2 py-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-center font-bold text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                          />
-                          {item.unitCost !== item.oldUnitCost && (
-                            <span className="block text-[9px] font-bold text-amber-600 dark:text-amber-400 mt-0.5">
-                              Was {settings.currencySymbol}{(Number(item.oldUnitCost) || 0).toFixed(2)}
+                      return (
+                        <tr key={item.productId} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
+                          <td className="py-3 px-3">
+                            <p className="font-bold text-slate-900 dark:text-white">{item.productName}</p>
+                            <p className="text-[10px] font-mono text-slate-400">{item.sku}</p>
+                          </td>
+                          <td className="py-3 px-2 text-center font-bold text-slate-700 dark:text-slate-300">
+                            {item.orderedQty}
+                          </td>
+                          <td className="py-3 px-2 text-center font-mono text-slate-500">
+                            {item.prevReceivedQty}
+                          </td>
+
+                          {/* Unit Cost */}
+                          <td className="py-3 px-2 text-center">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={item.unitCost}
+                              onChange={(e) => handleUnitCostChange(item.productId, parseFloat(e.target.value) || 0)}
+                              className="w-24 px-2 py-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-center font-bold text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                            />
+                            {item.unitCost !== item.oldUnitCost && (
+                              <span className="block text-[9px] font-bold text-amber-600 dark:text-amber-400 mt-0.5">
+                                Was {settings.currencySymbol}{(Number(item.oldUnitCost) || 0).toFixed(2)}
+                              </span>
+                            )}
+                          </td>
+
+                          {/* Custom Retail Price */}
+                          <td className="py-3 px-2 text-center">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={item.customRetailPrice}
+                              onChange={(e) => handleRetailPriceChange(item.productId, parseFloat(e.target.value) || 0)}
+                              className="w-24 px-2 py-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-center font-bold text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-none text-emerald-700 dark:text-emerald-400"
+                            />
+                            {item.customRetailPrice !== item.oldRetailPrice && (
+                              <span className="block text-[9px] font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
+                                Was {settings.currencySymbol}{(Number(item.oldRetailPrice) || 0).toFixed(2)}
+                              </span>
+                            )}
+                          </td>
+                          
+                          {/* Receiving Now */}
+                          <td className="py-3 px-2 text-center">
+                            <input
+                              type="number"
+                              min="0"
+                              value={item.receivingQty}
+                              onChange={(e) => handleReceivingQtyChange(item.productId, parseInt(e.target.value) || 0)}
+                              className="w-18 px-2 py-1 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-center font-bold focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                            />
+                          </td>
+
+                          {/* Accepted Qty */}
+                          <td className="py-3 px-2 text-center">
+                            <span className="inline-block w-18 py-1 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 font-black rounded-lg text-center border border-emerald-200/50 dark:border-emerald-800">
+                              {item.acceptedQty}
                             </span>
-                          )}
-                        </td>
+                          </td>
 
-                        {/* Custom Retail Price */}
-                        <td className="py-3 px-2 text-center">
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={item.customRetailPrice}
-                            onChange={(e) => handleRetailPriceChange(item.productId, parseFloat(e.target.value) || 0)}
-                            className="w-24 px-2 py-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-center font-bold text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-none text-emerald-700 dark:text-emerald-400"
-                          />
-                          {item.customRetailPrice !== item.oldRetailPrice && (
-                            <span className="block text-[9px] font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
-                              Was {settings.currencySymbol}{(Number(item.oldRetailPrice) || 0).toFixed(2)}
-                            </span>
-                          )}
-                        </td>
-                        
-                        {/* Receiving Now */}
-                        <td className="py-3 px-2 text-center">
-                          <input
-                            type="number"
-                            min="0"
-                            value={item.receivingQty}
-                            onChange={(e) => handleReceivingQtyChange(item.productId, parseInt(e.target.value) || 0)}
-                            className="w-18 px-2 py-1 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-center font-bold focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                          />
-                        </td>
+                          {/* Damaged Qty */}
+                          <td className="py-3 px-2 text-center">
+                            <input
+                              type="number"
+                              min="0"
+                              max={item.receivingQty}
+                              value={item.damagedQty}
+                              onChange={(e) => handleDamagedQtyChange(item.productId, parseInt(e.target.value) || 0)}
+                              className={`w-18 px-2 py-1 rounded-lg text-center font-bold focus:ring-2 focus:outline-none border ${
+                                item.damagedQty > 0
+                                  ? 'bg-rose-50 dark:bg-rose-950/80 border-rose-300 text-rose-600 focus:ring-rose-500'
+                                  : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700'
+                              }`}
+                            />
+                          </td>
 
-                        {/* Accepted Qty */}
-                        <td className="py-3 px-2 text-center">
-                          <span className="inline-block w-18 py-1 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 font-black rounded-lg text-center border border-emerald-200/50 dark:border-emerald-800">
-                            {item.acceptedQty}
-                          </span>
-                        </td>
+                          {/* Shortage Qty */}
+                          <td className="py-3 px-2 text-center">
+                            {shortageQty > 0 ? (
+                              <span
+                                className="inline-flex items-center justify-center px-2 py-0.5 rounded-lg text-xs font-black bg-amber-100 text-amber-900 dark:bg-amber-950/80 dark:text-amber-300 border border-amber-300 dark:border-amber-800"
+                                title={`${shortageQty} units unfulfilled against ordered quantity (${item.orderedQty})`}
+                              >
+                                -{shortageQty}
+                              </span>
+                            ) : (
+                              <span className="text-slate-300 dark:text-slate-600 font-bold">-</span>
+                            )}
+                          </td>
 
-                        {/* Damaged Qty */}
-                        <td className="py-3 px-2 text-center">
-                          <input
-                            type="number"
-                            min="0"
-                            max={item.receivingQty}
-                            value={item.damagedQty}
-                            onChange={(e) => handleDamagedQtyChange(item.productId, parseInt(e.target.value) || 0)}
-                            className={`w-18 px-2 py-1 rounded-lg text-center font-bold focus:ring-2 focus:outline-none border ${
-                              item.damagedQty > 0
-                                ? 'bg-rose-50 dark:bg-rose-950/80 border-rose-300 text-rose-600 focus:ring-rose-500'
-                                : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700'
-                            }`}
-                          />
-                        </td>
+                          {/* Excess Qty */}
+                          <td className="py-3 px-2 text-center">
+                            {excessQty > 0 ? (
+                              <span
+                                className="inline-flex items-center justify-center px-2 py-0.5 rounded-lg text-xs font-black bg-blue-100 text-blue-900 dark:bg-blue-950/80 dark:text-blue-300 border border-blue-300 dark:border-blue-800"
+                                title={`+${excessQty} excess units received beyond ordered quantity (${item.orderedQty})`}
+                              >
+                                +{excessQty}
+                              </span>
+                            ) : (
+                              <span className="text-slate-300 dark:text-slate-600 font-bold">-</span>
+                            )}
+                          </td>
 
-                        {/* Condition Notes */}
-                        <td className="py-3 px-3">
-                          <input
-                            type="text"
-                            value={item.conditionNotes}
-                            onChange={(e) => handleNotesChange(item.productId, e.target.value)}
-                            placeholder="e.g. Good condition / Outer box dented..."
-                            className="w-full px-2.5 py-1 text-xs bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                          />
-                        </td>
-                      </tr>
-                    ))}
+                          {/* Condition Notes */}
+                          <td className="py-3 px-3">
+                            <input
+                              type="text"
+                              value={item.conditionNotes}
+                              onChange={(e) => handleNotesChange(item.productId, e.target.value)}
+                              placeholder="e.g. Good condition / Outer box dented..."
+                              className="w-full px-2.5 py-1 text-xs bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                            />
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
             </div>
           </div>
 
-          {/* Receiving & Damage Summary Bar */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 bg-slate-50 dark:bg-slate-800/50 rounded-2xl border border-slate-200/80 dark:border-slate-800">
-            <div className="flex items-center gap-3">
+          {/* Receiving, Damage, Shortage & Excess Summary Bar */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 p-3.5 bg-slate-50 dark:bg-slate-800/50 rounded-2xl border border-slate-200/80 dark:border-slate-800">
+            <div className="flex items-center gap-2.5">
               <div className="p-2 bg-blue-100 dark:bg-blue-900/50 text-blue-600 rounded-xl">
-                <Truck className="w-5 h-5" />
+                <Truck className="w-4 h-4" />
               </div>
               <div>
-                <p className="text-[10px] uppercase font-bold text-slate-400">Total Shipment Units</p>
+                <p className="text-[10px] uppercase font-bold text-slate-400">Total Shipment</p>
                 <p className="text-sm font-black text-slate-900 dark:text-white">{totalReceiving} units</p>
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2.5">
               <div className="p-2 bg-emerald-100 dark:bg-emerald-900/50 text-emerald-600 rounded-xl">
-                <CheckCircle className="w-5 h-5" />
+                <CheckCircle className="w-4 h-4" />
               </div>
               <div>
                 <p className="text-[10px] uppercase font-bold text-slate-400">Accepted Restock</p>
@@ -432,16 +486,70 @@ export const InspectStockModal: React.FC<InspectStockModalProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2.5">
               <div className="p-2 bg-rose-100 dark:bg-rose-900/50 text-rose-600 rounded-xl">
-                <AlertTriangle className="w-5 h-5" />
+                <AlertTriangle className="w-4 h-4" />
               </div>
               <div>
                 <p className="text-[10px] uppercase font-bold text-slate-400">Damaged / Rejected</p>
                 <p className="text-sm font-black text-rose-600 dark:text-rose-400">{totalDamaged} units</p>
               </div>
             </div>
+
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 bg-amber-100 dark:bg-amber-900/50 text-amber-600 rounded-xl">
+                <AlertCircle className="w-4 h-4" />
+              </div>
+              <div>
+                <p className="text-[10px] uppercase font-bold text-slate-400">Total Shortage</p>
+                <p className={`text-sm font-black ${totalShortage > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500'}`}>
+                  {totalShortage} units
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 rounded-xl">
+                <TrendingUp className="w-4 h-4" />
+              </div>
+              <div>
+                <p className="text-[10px] uppercase font-bold text-slate-400">Total Excess</p>
+                <p className={`text-sm font-black ${totalExcess > 0 ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-500'}`}>
+                  +{totalExcess} units
+                </p>
+              </div>
+            </div>
           </div>
+
+          {/* Shortage & Excess Action Callouts */}
+          {totalShortage > 0 && (
+            <div className="p-3.5 bg-amber-50/80 dark:bg-amber-950/30 rounded-2xl border border-amber-200 dark:border-amber-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2 text-amber-900 dark:text-amber-200">
+                <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                <span>
+                  Shortage of <strong className="font-black">{totalShortage} units</strong> remaining unfulfilled on this order.
+                </span>
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer text-amber-950 dark:text-amber-200 font-bold select-none bg-white dark:bg-slate-900 px-3 py-1.5 rounded-xl border border-amber-300 dark:border-amber-700/80 shadow-2xs hover:bg-amber-50/50 dark:hover:bg-amber-950/50 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={closeShortage}
+                  onChange={(e) => setCloseShortage(e.target.checked)}
+                  className="w-4 h-4 text-amber-600 rounded border-amber-300 focus:ring-amber-500"
+                />
+                <span>Close PO Delivery (Supplier will not ship remaining shortage)</span>
+              </label>
+            </div>
+          )}
+
+          {totalExcess > 0 && (
+            <div className="p-3.5 bg-indigo-50/80 dark:bg-indigo-950/30 rounded-2xl border border-indigo-200 dark:border-indigo-800/60 flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-200">
+              <TrendingUp className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+              <span>
+                Excess surplus of <strong className="font-black">+{totalExcess} units</strong> received. Accepted surplus units will be stocked into active catalog inventory.
+              </span>
+            </div>
+          )}
 
           {/* Quality Assessment & Sign-Off Section */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

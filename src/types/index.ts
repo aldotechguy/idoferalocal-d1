@@ -98,6 +98,7 @@ export interface SaleItem {
   productName: string;
   sku: string;
   quantity: number;
+  returnedQuantity?: number;
   unitPrice: number;
   costPrice: number;
   total: number;
@@ -108,7 +109,53 @@ export interface SaleItem {
 }
 
 export type PaymentMethod = 'Cash' | 'Card' | 'Mobile Transfer' | 'Bank Transfer' | 'Store Credit' | 'Split';
-export type SaleStatus = 'Completed' | 'Draft' | 'Held' | 'Refunded';
+export type SaleStatus = 'Completed' | 'Draft' | 'Held' | 'Refunded' | 'Partially Refunded';
+
+export type RestockCondition = 'Restock' | 'Damaged' | 'Discard';
+
+export type RefundSettlementMethod = 'Cash' | 'Biz Account' | 'Store Credit' | 'Debt Reduction';
+
+export interface SaleRefundItem {
+  productId: string;
+  productName: string;
+  sku: string;
+  quantityReturned: number;
+  unitPrice: number;
+  costPrice?: number;
+  condition: RestockCondition;
+  subtotal: number;
+}
+
+export interface SaleRefundRecord {
+  id: string;
+  refundNo: string;
+  refundDate: string;
+  performedBy: string;
+  reason: string;
+  items: SaleRefundItem[];
+  itemsSubtotal: number;
+  discountDeducted: number;
+  taxDeducted: number;
+  deliveryFeeRefunded: number;
+  netRefundAmount: number;
+  settlementMethod: RefundSettlementMethod;
+  notes?: string;
+}
+
+export interface ProcessRefundOptions {
+  itemsToReturn?: {
+    productId: string;
+    productName?: string;
+    sku?: string;
+    quantity: number;
+    unitPrice?: number;
+    costPrice?: number;
+    condition: RestockCondition;
+  }[];
+  refundDeliveryFee?: boolean;
+  settlementMethod?: RefundSettlementMethod;
+  customNotes?: string;
+}
 
 export interface Sale {
   id: string;
@@ -123,10 +170,14 @@ export interface Sale {
   deliveryFee?: number;
   totalAmount: number;
   paidAmount: number;
+  overageApplied?: number;
+  overageCreated?: number;
   paymentMethod: PaymentMethod;
   paymentBreakdown?: Record<string, number>;
   status: SaleStatus;
   notes?: string;
+  refunds?: SaleRefundRecord[];
+  totalRefunded?: number;
   createdBy: string;
   orderTakenBy?: string;
   convertedBy?: string;
@@ -143,6 +194,7 @@ export interface Customer {
   address?: string;
   purchaseHistoryCount: number;
   outstandingBalance: number;
+  overageBalance?: number;
   loyaltyPoints: number;
   lifetimeValue: number;
   createdAt: string;
@@ -174,6 +226,8 @@ export interface ReceivingHistoryEntry {
     receivingQty: number;
     acceptedQty: number;
     damagedQty: number;
+    shortageQty?: number;
+    excessQty?: number;
     unitCost: number;
     oldUnitCost?: number;
     customRetailPrice?: number;
@@ -195,6 +249,8 @@ export interface PurchaseItem {
   receivedQuantity?: number;
   acceptedQuantity?: number;
   damagedQuantity?: number;
+  shortageQuantity?: number;
+  excessQuantity?: number;
   lastInspectedAt?: string;
   lastInspectionNotes?: string;
 }
@@ -210,7 +266,7 @@ export interface PurchaseOrder {
   totalAmount: number;
   paidAmount: number;
   paymentStatus: 'Paid' | 'Partial' | 'Overdue' | 'Unpaid';
-  deliveryStatus: 'Received' | 'Partial' | 'Pending' | 'Cancelled' | 'Draft';
+  deliveryStatus: 'Received' | 'Partial' | 'Pending' | 'Cancelled' | 'Draft' | 'Received with Shortage';
   expectedDelivery: string;
   createdBy: string;
   createdAt: string;
