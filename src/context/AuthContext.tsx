@@ -46,6 +46,10 @@ interface AuthContextType {
   ssoUnregistered: boolean;
   /** Re-prove the account password. Privileged changes require it (docs/staff-access.md). */
   stepUp: (password: string) => Promise<boolean>;
+  isPrivacyMode: boolean;
+  enablePrivacyMode: () => void;
+  disablePrivacyMode: (password: string) => Promise<boolean>;
+  verifyUserPassword: (password: string) => Promise<boolean>;
   switchUser: (userId: string) => void;
   switchDemoRole: (role: UserRole) => void;
   addUser: (userData: Omit<UserProfile, 'id' | 'createdAt'>) => UserProfile;
@@ -654,6 +658,74 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [currentUser]);
 
   const isSuperAdmin = isSuperUser(currentUser);
+  const [isPrivacyMode, setIsPrivacyMode] = useState<boolean>(() => !isSuperUser(currentUser));
+  const lastTrackedUserIdRef = React.useRef<string | null>(null);
+
+  // Sync default Privacy Mode whenever active user account changes:
+  // Deactivated (false) by default for Super-Admin, Activated (true) by default for every other user
+  useEffect(() => {
+    const currentId = currentUser?.id || null;
+    if (currentId !== lastTrackedUserIdRef.current) {
+      lastTrackedUserIdRef.current = currentId;
+      setIsPrivacyMode(!isSuperUser(currentUser));
+    }
+  }, [currentUser]);
+
+  const verifyUserPassword = async (password: string): Promise<boolean> => {
+    if (!currentUser || !password) return false;
+    try {
+      const token = localStorage.getItem('idofera_session_token') || sessionStorage.getItem('idofera_session_token');
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      if (token) {
+        headers['authorization'] = `Bearer ${token}`;
+        headers['x-session-token'] = token;
+      }
+      const response = await fetch('/api/auth/verify-password', {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: JSON.stringify({ password, userId: currentUser.id }),
+      });
+      if (response.ok) {
+        return true;
+      }
+    } catch (err) {
+      console.warn('Server password verification fallback:', err);
+    }
+
+    // Fallback to local user record password check if offline or local account
+    const matchedUser =
+      users.find((u) => u.id === currentUser.id) ||
+      INITIAL_USERS.find((u) => u.id === currentUser.id) ||
+      currentUser;
+    if (matchedUser?.password && matchedUser.password === password) {
+      return true;
+    }
+    return false;
+  };
+
+  const enablePrivacyMode = () => {
+    setIsPrivacyMode(true);
+    showToast({
+      title: 'Privacy Mode Activated',
+      message: 'Sensitive financial metrics, costs, margins, and internal records are now masked.',
+      type: 'info',
+    });
+  };
+
+  const disablePrivacyMode = async (password: string): Promise<boolean> => {
+    const isValid = await verifyUserPassword(password);
+    if (!isValid) {
+      return false;
+    }
+    setIsPrivacyMode(false);
+    showToast({
+      title: 'Privacy Mode Deactivated',
+      message: 'Full financial and internal system data is now visible.',
+      type: 'success',
+    });
+    return true;
+  };
 
   const switchUser = (userId: string) => {
     if (!isSuperUser(currentUser)) {
@@ -667,6 +739,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const user = users.find((u) => u.id === userId);
     if (user) {
       const updatedUser = { ...user, lastLogin: new Date().toISOString() };
+      lastTrackedUserIdRef.current = updatedUser.id;
+      setIsPrivacyMode(!isSuperUser(updatedUser));
       setCurrentUser(updatedUser);
       setUsers((prev) => prev.map((u) => (u.id === userId ? updatedUser : u)));
     }
@@ -1030,6 +1104,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         ssoEmail,
         ssoUnregistered,
         stepUp,
+        isPrivacyMode,
+        enablePrivacyMode,
+        disablePrivacyMode,
+        verifyUserPassword,
         switchUser,
         switchDemoRole,
         addUser,

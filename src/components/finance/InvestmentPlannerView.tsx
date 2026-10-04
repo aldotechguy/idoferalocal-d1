@@ -39,6 +39,7 @@ import {
   CartesianGrid,
 } from 'recharts';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../context/AuthContext';
 import {
   AllocatedProduct,
   AllocationStrategy,
@@ -53,6 +54,7 @@ import { SwapProductModal } from '../modals/SwapProductModal';
 
 export const InvestmentPlannerView: React.FC = () => {
   const { products, sales, settings } = useApp();
+  const { isPrivacyMode } = useAuth();
   const cs = settings.currencySymbol || '₦';
 
   // --- Input Parameters State ---
@@ -754,13 +756,13 @@ export const InvestmentPlannerView: React.FC = () => {
               <div className="flex items-center justify-between text-xs">
                 <span className="text-slate-300 font-medium">Projected Gross Profit:</span>
                 <span className="font-bold text-emerald-400 font-mono">
-                  +{cs}{simulation.projectedGrossProfit.toLocaleString()}
+                  {isPrivacyMode ? `${cs}••••••` : `+${cs}${simulation.projectedGrossProfit.toLocaleString()}`}
                 </span>
               </div>
               <div className="border-t border-slate-700 pt-2 flex items-center justify-between text-xs">
                 <span className="text-slate-200 font-bold">Net Retained Profit for Biz:</span>
                 <span className="font-black text-emerald-300 font-mono text-sm">
-                  {cs}{simulation.netBusinessProfit.toLocaleString()}
+                  {isPrivacyMode ? `${cs}••••••` : `${cs}${simulation.netBusinessProfit.toLocaleString()}`}
                 </span>
               </div>
             </div>
@@ -1070,13 +1072,13 @@ export const InvestmentPlannerView: React.FC = () => {
                       </div>
                     </td>
                     <td className="py-3 px-3 text-slate-600 dark:text-slate-300 font-mono">
-                      {cs}{item.costPrice.toLocaleString()}
+                      {isPrivacyMode ? `${cs}••••` : `${cs}${item.costPrice.toLocaleString()}`}
                     </td>
                     <td className="py-3 px-3 text-slate-600 dark:text-slate-300 font-mono">
                       {cs}{item.retailPrice.toLocaleString()}
                     </td>
                     <td className="py-3 px-3 font-semibold text-emerald-600 dark:text-emerald-400 font-mono">
-                      {item.marginPct}%
+                      {isPrivacyMode ? '••%' : `${item.marginPct}%`}
                     </td>
                     <td className="py-3 px-3 text-slate-600 dark:text-slate-300">
                       <span className="font-bold text-slate-800 dark:text-slate-200">
@@ -1115,7 +1117,7 @@ export const InvestmentPlannerView: React.FC = () => {
                       </span>
                     </td>
                     <td className="py-3 px-3 text-right font-bold text-emerald-600 dark:text-emerald-400 font-mono">
-                      +{cs}{item.projectedGrossProfit.toLocaleString()}
+                      {isPrivacyMode ? `${cs}••••••` : `+${cs}${item.projectedGrossProfit.toLocaleString()}`}
                     </td>
                     <td className="py-3 px-3 text-center">
                       <div className="flex items-center justify-center gap-1">
@@ -1154,7 +1156,7 @@ export const InvestmentPlannerView: React.FC = () => {
                   Revenue: {cs}{simulation.projectedGrossRevenue.toLocaleString()}
                 </td>
                 <td className="py-3 px-3 text-right text-emerald-600 dark:text-emerald-400 font-mono">
-                  +{cs}{simulation.projectedGrossProfit.toLocaleString()}
+                  {isPrivacyMode ? `${cs}••••••` : `+${cs}${simulation.projectedGrossProfit.toLocaleString()}`}
                 </td>
                 <td className="py-3 px-3 text-center text-slate-400 text-[10px]">
                   {simulation.allocatedProducts.length} items

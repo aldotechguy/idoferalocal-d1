@@ -1,5 +1,6 @@
 import React from 'react';
-import { LucideIcon } from 'lucide-react';
+import { LucideIcon, EyeOff } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
 
 interface StatCardProps {
   title: string;
@@ -11,6 +12,7 @@ interface StatCardProps {
   colorScheme?: 'blue' | 'emerald' | 'amber' | 'indigo' | 'rose' | 'violet';
   onClick?: () => void;
   actionLabel?: string;
+  isPrivate?: boolean;
 }
 
 export const StatCard: React.FC<StatCardProps> = ({
@@ -23,7 +25,10 @@ export const StatCard: React.FC<StatCardProps> = ({
   colorScheme = 'blue',
   onClick,
   actionLabel,
+  isPrivate = false,
 }) => {
+  const { isPrivacyMode } = useAuth();
+  const masked = isPrivate && isPrivacyMode;
   const colorMap = {
     blue: 'bg-blue-500/10 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400 border-blue-500/20 backdrop-blur-sm shadow-xs',
     emerald: 'bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400 border-emerald-500/20 backdrop-blur-sm shadow-xs',
@@ -60,27 +65,36 @@ export const StatCard: React.FC<StatCardProps> = ({
       </div>
 
       <div className="flex items-baseline justify-between">
-        <div className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-          {value}
+        <div className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight flex items-center gap-2">
+          {masked ? (
+            <span className="font-mono tracking-widest text-slate-400 dark:text-slate-500 select-none flex items-center gap-1.5" title="Hidden in Privacy Mode">
+              ••••••
+              <EyeOff className="w-4 h-4 text-amber-500/80 inline" />
+            </span>
+          ) : (
+            value
+          )}
         </div>
         {change && (
           <span
             className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-              changeType === 'positive'
+              masked
+                ? 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'
+                : changeType === 'positive'
                 ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/80 dark:text-emerald-400'
                 : changeType === 'negative'
                 ? 'bg-rose-100 text-rose-700 dark:bg-rose-950/80 dark:text-rose-400'
                 : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
             }`}
           >
-            {change}
+            {masked ? '•••' : change}
           </span>
         )}
       </div>
 
       {subtitle && (
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          {subtitle}
+          {masked ? 'Protected in Privacy Mode' : subtitle}
         </p>
       )}
 

@@ -61,8 +61,9 @@ interface DashboardViewProps {
 
 export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const { products, sales, purchases, expenses, settings, treasuryBalances } = useApp();
-  const { currentUser, hasPermission } = useAuth();
+  const { currentUser, hasPermission, isPrivacyMode } = useAuth();
   const isSalesStaff = currentUser?.role === 'Sales Staff';
+  const hideFinancials = isSalesStaff || isPrivacyMode;
   const canAccessLiquidCash = hasPermission(['Administrator', 'Store Manager', 'Accountant']);
 
   // Quick Add Modal States
@@ -87,7 +88,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const priorMonthShort = priorMonthDate.toLocaleDateString('en-US', { month: 'short' });
 
   // Local calendar day key: createdAt is a UTC ISO timestamp, and Nigeria runs
-  // UTC+1, so a 00:30 WAT sale carries the previous UTC date — toISOString()
+  // UTC+1, so a 00:30 WAT sale carries the previous UTC date â€” toISOString()
   // would drop it from Today's Sales.
   const todayStr = localIsoDate(now);
   const todaySales = validSales
@@ -415,6 +416,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
               colorScheme="emerald"
               onClick={() => onNavigate('sales')}
               actionLabel="View Today's Sales"
+              isPrivate
             />
             <StatCard
               title={`Monthly Revenue (${currentMonthShort})`}
@@ -430,6 +432,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                 onNavigate('reports');
               }}
               actionLabel="Monthly Biz Report"
+              isPrivate
             />
             <StatCard
               title="Gross / Net Profit"
@@ -445,6 +448,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                 onNavigate('reports');
               }}
               actionLabel="View Profit & Loss"
+              isPrivate
             />
             <StatCard
               title="Inventory Valuation"
@@ -459,6 +463,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                 onNavigate('reports');
               }}
               actionLabel="View Valuation Report"
+              isPrivate
             />
           </>
         )}
@@ -531,16 +536,20 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                 <p className="text-xs text-slate-400 font-medium">Monthly Scoped Total</p>
                 <div className="flex items-center gap-2">
                   <span className="text-base font-black text-slate-900 dark:text-white">
-                    {settings.currencySymbol}{monthlyRevenue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    {isPrivacyMode
+                      ? 'â€¢â€¢â€¢â€¢â€¢â€¢'
+                      : `${settings.currencySymbol}${monthlyRevenue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                   </span>
                   <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
-                    monthlyChangeType === 'positive'
+                    isPrivacyMode
+                      ? 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'
+                      : monthlyChangeType === 'positive'
                       ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400'
                       : monthlyChangeType === 'negative'
                       ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-400'
                       : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
                   }`}>
-                    {monthlyChangeStr}
+                    {isPrivacyMode ? 'â€¢â€¢â€¢' : monthlyChangeStr}
                   </span>
                 </div>
               </div>
@@ -555,7 +564,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                     <stop offset="5%" stopColor="#2563eb" stopOpacity={0.4} />
                     <stop offset="95%" stopColor="#2563eb" stopOpacity={0} />
                   </linearGradient>
-                  {!isSalesStaff && (
+                  {!hideFinancials && (
                     <linearGradient id="colorRev" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
                       <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
@@ -574,7 +583,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                   }}
                 />
                 <Area type="monotone" dataKey="sales" name="Orders / Sales Units" stroke="#2563eb" strokeWidth={3} fillOpacity={1} fill="url(#colorSales)" />
-                {!isSalesStaff && (
+                {!hideFinancials && (
                   <Area type="monotone" dataKey="revenue" name={`Revenue (${settings.currencySymbol})`} stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorRev)" />
                 )}
               </AreaChart>
@@ -619,7 +628,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                     </div>
                   </div>
                   <p className="text-xs font-black text-slate-900 dark:text-white">
-                    {settings.currencySymbol}{treasuryBalances.totalLiquidCash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    {isPrivacyMode
+                      ? 'â€¢â€¢â€¢â€¢â€¢â€¢'
+                      : `${settings.currencySymbol}${treasuryBalances.totalLiquidCash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                   </p>
                 </div>
 
@@ -635,7 +646,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                     </div>
                   </div>
                   <p className="text-xs font-bold text-slate-900 dark:text-white">
-                    {settings.currencySymbol}{treasuryBalances.bizAccountBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    {isPrivacyMode
+                      ? 'â€¢â€¢â€¢â€¢â€¢â€¢'
+                      : `${settings.currencySymbol}${treasuryBalances.bizAccountBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                   </p>
                 </div>
 
@@ -651,7 +664,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                     </div>
                   </div>
                   <p className="text-xs font-bold text-slate-900 dark:text-white">
-                    {settings.currencySymbol}{treasuryBalances.physicalCashBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    {isPrivacyMode
+                      ? 'â€¢â€¢â€¢â€¢â€¢â€¢'
+                      : `${settings.currencySymbol}${treasuryBalances.physicalCashBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                   </p>
                 </div>
 
@@ -668,7 +683,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                       </div>
                     </div>
                     <p className="text-xs font-bold text-purple-600 dark:text-purple-400">
-                      {settings.currencySymbol}{treasuryBalances.totalOwnerDrawings.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      {isPrivacyMode
+                        ? 'â€¢â€¢â€¢â€¢â€¢â€¢'
+                        : `${settings.currencySymbol}${treasuryBalances.totalOwnerDrawings.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                     </p>
                   </div>
                 )}
@@ -763,9 +780,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                         <div>
                           {isSalesStaff
                             ? `${sale.items.reduce((a, b) => a + b.quantity, 0)} items`
+                            : isPrivacyMode
+                            ? 'â€¢â€¢â€¢â€¢â€¢â€¢'
                             : `${settings.currencySymbol}${sale.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                         </div>
-                        {!isSalesStaff && (
+                        {!hideFinancials && (
                           <div className="w-16 h-1 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden mt-1">
                             <div
                               className="h-full bg-emerald-500/70 dark:bg-emerald-400/70 rounded-full transition-all duration-300"
@@ -821,7 +840,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                       <p className="text-xs font-bold text-slate-900 dark:text-white truncate max-w-[140px]">
                         {p.name}
                       </p>
-                      <p className="text-[10px] text-slate-500">{p.category} • SKU: {p.sku}</p>
+                      <p className="text-[10px] text-slate-500">{p.category} â€¢ SKU: {p.sku}</p>
                     </div>
                   </div>
 

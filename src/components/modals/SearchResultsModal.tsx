@@ -21,6 +21,7 @@ import {
   Database,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../context/AuthContext';
 import { NairaSign } from '../common/NairaSign';
 import { Product, Sale, Customer, Supplier, PurchaseOrder, Expense } from '../../types';
 
@@ -50,6 +51,7 @@ export const SearchResultsModal: React.FC<SearchResultsModalProps> = ({
     expenses,
     settings,
   } = useApp();
+  const { isPrivacyMode } = useAuth();
 
   const [query, setQuery] = useState(initialQuery);
   const [activeTab, setActiveTab] = useState<TabCategory>('all');
@@ -72,11 +74,11 @@ export const SearchResultsModal: React.FC<SearchResultsModalProps> = ({
         (p.barcode || '').toLowerCase().includes(cleanQuery) ||
         (p.category || '').toLowerCase().includes(cleanQuery) ||
         (p.brand || '').toLowerCase().includes(cleanQuery) ||
-        (p.supplierName || '').toLowerCase().includes(cleanQuery) ||
+        (!isPrivacyMode && (p.supplierName || '').toLowerCase().includes(cleanQuery)) ||
         (p.description && p.description.toLowerCase().includes(cleanQuery))
       );
     });
-  }, [products, cleanQuery]);
+  }, [products, cleanQuery, isPrivacyMode]);
 
   const matchingSales = useMemo(() => {
     if (!cleanQuery) return [];
@@ -102,15 +104,15 @@ export const SearchResultsModal: React.FC<SearchResultsModalProps> = ({
       if (!c) return false;
       return (
         (c.name || '').toLowerCase().includes(cleanQuery) ||
-        (c.phone || '').toLowerCase().includes(cleanQuery) ||
-        (c.email || '').toLowerCase().includes(cleanQuery) ||
-        (c.address && c.address.toLowerCase().includes(cleanQuery))
+        (!isPrivacyMode && (c.phone || '').toLowerCase().includes(cleanQuery)) ||
+        (!isPrivacyMode && (c.email || '').toLowerCase().includes(cleanQuery)) ||
+        (!isPrivacyMode && c.address && c.address.toLowerCase().includes(cleanQuery))
       );
     });
-  }, [customers, cleanQuery]);
+  }, [customers, cleanQuery, isPrivacyMode]);
 
   const matchingSuppliers = useMemo(() => {
-    if (!cleanQuery) return [];
+    if (!cleanQuery || isPrivacyMode) return [];
     return suppliers.filter((sup) => {
       if (!sup) return false;
       return (
@@ -120,10 +122,10 @@ export const SearchResultsModal: React.FC<SearchResultsModalProps> = ({
         (sup.phone || '').toLowerCase().includes(cleanQuery)
       );
     });
-  }, [suppliers, cleanQuery]);
+  }, [suppliers, cleanQuery, isPrivacyMode]);
 
   const matchingPurchases = useMemo(() => {
-    if (!cleanQuery) return [];
+    if (!cleanQuery || isPrivacyMode) return [];
     return purchases.filter((po) => {
       if (!po) return false;
       const matchPo = (po.poNumber || '').toLowerCase().includes(cleanQuery);
@@ -132,10 +134,10 @@ export const SearchResultsModal: React.FC<SearchResultsModalProps> = ({
       const matchItems = (po.items || []).some((i) => (i.productName || '').toLowerCase().includes(cleanQuery));
       return matchPo || matchSupplier || matchUser || matchItems;
     });
-  }, [purchases, cleanQuery]);
+  }, [purchases, cleanQuery, isPrivacyMode]);
 
   const matchingExpenses = useMemo(() => {
-    if (!cleanQuery) return [];
+    if (!cleanQuery || isPrivacyMode) return [];
     return expenses.filter((e) => {
       if (!e) return false;
       return (
@@ -146,7 +148,7 @@ export const SearchResultsModal: React.FC<SearchResultsModalProps> = ({
         (e.description && e.description.toLowerCase().includes(cleanQuery))
       );
     });
-  }, [expenses, cleanQuery]);
+  }, [expenses, cleanQuery, isPrivacyMode]);
 
   const totalResultsCount =
     matchingProducts.length +
@@ -473,11 +475,11 @@ export const SearchResultsModal: React.FC<SearchResultsModalProps> = ({
                           <div className="flex items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
                             <span className="flex items-center gap-1">
                               <Phone className="w-3 h-3" />
-                              {highlightMatch(c.phone)}
+                              {isPrivacyMode ? '••••••' : highlightMatch(c.phone)}
                             </span>
                             <span className="flex items-center gap-1">
                               <Mail className="w-3 h-3" />
-                              {highlightMatch(c.email)}
+                              {isPrivacyMode ? '••••••' : highlightMatch(c.email)}
                             </span>
                           </div>
                         </div>

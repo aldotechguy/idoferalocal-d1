@@ -71,7 +71,7 @@ const isGuestCustomerName = (name?: string): boolean => {
 
 export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
   const { sales, products, customers, deliveryOrders, settings, refundSale, updateSale, deleteSale } = useApp();
-  const { currentUser, isSuperAdmin, hasPermission } = useAuth();
+  const { currentUser, isSuperAdmin, hasPermission, isPrivacyMode } = useAuth();
   const { notify } = useInteractions();
 
   // Active view tab: 'calendar' (Daily Calendar History) or 'list' (Table list)
@@ -810,11 +810,12 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                   Total Day Volume:
                 </span>
                 <span className="text-sm font-black text-slate-900 dark:text-white font-mono">
-                  {settings.currencySymbol}
-                  {selectedDayStats.totalRevenue.toLocaleString(undefined, {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}
+                  {isPrivacyMode
+                    ? `${settings.currencySymbol}••••••`
+                    : `${settings.currencySymbol}${selectedDayStats.totalRevenue.toLocaleString(undefined, {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}`}
                 </span>
               </div>
             </div>
@@ -837,11 +838,12 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                       </span>
                     </div>
                     <p className="text-2xl font-black text-emerald-950 dark:text-emerald-100 font-mono mt-1">
-                      {settings.currencySymbol}
-                      {selectedDayStats.cashTotal.toLocaleString(undefined, {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })}
+                      {isPrivacyMode
+                        ? `${settings.currencySymbol}••••••`
+                        : `${settings.currencySymbol}${selectedDayStats.cashTotal.toLocaleString(undefined, {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}`}
                     </p>
                     <p className="text-[11px] text-emerald-700/90 dark:text-emerald-400/90 font-medium mt-0.5">
                       Physical cash tendered and collected at register
@@ -866,11 +868,12 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                       </span>
                     </div>
                     <p className="text-2xl font-black text-amber-950 dark:text-amber-100 font-mono mt-1">
-                      {settings.currencySymbol}
-                      {selectedDayStats.mobileTransferTotal.toLocaleString(undefined, {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })}
+                      {isPrivacyMode
+                        ? `${settings.currencySymbol}••••••`
+                        : `${settings.currencySymbol}${selectedDayStats.mobileTransferTotal.toLocaleString(undefined, {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}`}
                     </p>
                     <p className="text-[11px] text-amber-700/90 dark:text-amber-400/90 font-medium mt-0.5">
                       Direct digital mobile / bank app transfers received
@@ -1007,10 +1010,13 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                               isSelected ? 'text-blue-100' : 'text-slate-900 dark:text-slate-200'
                             }`}
                           >
-                            {settings.currencySymbol}
-                            {dayItem.totalRevenue >= 1000
-                              ? `${(dayItem.totalRevenue / 1000).toFixed(1)}k`
-                              : dayItem.totalRevenue.toLocaleString()}
+                            {isPrivacyMode
+                              ? `${settings.currencySymbol}••••`
+                              : `${settings.currencySymbol}${
+                                  dayItem.totalRevenue >= 1000
+                                    ? `${(dayItem.totalRevenue / 1000).toFixed(1)}k`
+                                    : dayItem.totalRevenue.toLocaleString()
+                                }`}
                           </p>
                         </div>
                       ) : (
@@ -1082,11 +1088,12 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                     Daily Revenue
                   </span>
                   <p className="text-lg font-black text-slate-900 dark:text-white">
-                    {settings.currencySymbol}
-                    {selectedDayStats.totalRevenue.toLocaleString(undefined, {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
+                    {isPrivacyMode
+                      ? `${settings.currencySymbol}••••••`
+                      : `${settings.currencySymbol}${selectedDayStats.totalRevenue.toLocaleString(undefined, {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}`}
                   </p>
                 </div>
 
@@ -1113,11 +1120,12 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                     Total Collected
                   </span>
                   <p className="text-lg font-black text-slate-900 dark:text-white">
-                    {settings.currencySymbol}
-                    {selectedDayStats.totalPaid.toLocaleString(undefined, {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
+                    {isPrivacyMode
+                      ? `${settings.currencySymbol}••••••`
+                      : `${settings.currencySymbol}${selectedDayStats.totalPaid.toLocaleString(undefined, {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}`}
                   </p>
                 </div>
               </div>
@@ -1365,7 +1373,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
       {/* ALL SALES RECORDS TABLE VIEW */}
       {activeTab === 'list' && (
         <div className="space-y-6 animate-in fade-in duration-300">
-          {/* KPI Stats Overview */}
+                          {/* KPI Stats Overview */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="bg-white dark:bg-slate-900 p-5 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-1">
               <div className="flex items-center justify-between text-slate-400">
@@ -1375,7 +1383,9 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                 </div>
               </div>
               <p className="text-2xl font-black text-slate-900 dark:text-white">
-                {settings.currencySymbol}{stats.totalVolume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                {isPrivacyMode
+                  ? `${settings.currencySymbol}••••••`
+                  : `${settings.currencySymbol}${stats.totalVolume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
               </p>
               <span className="text-[11px] font-semibold text-slate-500">
                 From {stats.totalCount} transaction records
@@ -1405,7 +1415,9 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                 </div>
               </div>
               <p className="text-2xl font-black text-slate-900 dark:text-white">
-                {settings.currencySymbol}{stats.avgOrderValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                {isPrivacyMode
+                  ? `${settings.currencySymbol}••••••`
+                  : `${settings.currencySymbol}${stats.avgOrderValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
               </p>
               <span className="text-[11px] font-semibold text-slate-500">
                 Average ticket per checkout
@@ -1420,7 +1432,9 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                 </div>
               </div>
               <p className="text-2xl font-black text-amber-600 dark:text-amber-400">
-                {settings.currencySymbol}{stats.totalUnpaidDebt.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                {isPrivacyMode
+                  ? `${settings.currencySymbol}••••••`
+                  : `${settings.currencySymbol}${stats.totalUnpaidDebt.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
               </p>
               <span className="text-[11px] font-semibold text-slate-500">
                 Uncollected balance on sales
@@ -1660,14 +1674,16 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                       {/* Total Amount */}
                       <td className="px-4 py-3.5">
                         <div className={`font-black text-sm ${isRefunded ? 'line-through text-slate-400' : 'text-slate-900 dark:text-white'}`}>
-                          {settings.currencySymbol}{(Number(sale.totalAmount) || 0).toFixed(2)}
+                          {isPrivacyMode
+                            ? `${settings.currencySymbol}••••••`
+                            : `${settings.currencySymbol}${(Number(sale.totalAmount) || 0).toFixed(2)}`}
                         </div>
-                        {sale.discount > 0 && (
+                        {!isPrivacyMode && sale.discount > 0 && (
                           <div className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold">
                             Disc: -{settings.currencySymbol}{(Number(sale.discount) || 0).toFixed(2)}
                           </div>
                         )}
-                        {sale.totalRefunded && sale.totalRefunded > 0 && !isRefunded && (
+                        {!isPrivacyMode && sale.totalRefunded && sale.totalRefunded > 0 && !isRefunded && (
                           <div className="text-[10px] text-amber-600 dark:text-amber-400 font-bold">
                             Returned: -{settings.currencySymbol}{(Number(sale.totalRefunded) || 0).toFixed(2)}
                           </div>
@@ -1682,7 +1698,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                             {sale.paymentMethod}
                           </span>
                         </div>
-                        {Number(sale.paidAmount || 0) < Number(sale.totalAmount || 0) && !isRefunded && (
+                        {!isPrivacyMode && Number(sale.paidAmount || 0) < Number(sale.totalAmount || 0) && !isRefunded && (
                           <div className="text-[10px] text-amber-600 dark:text-amber-400 font-bold mt-0.5">
                             Unpaid: {settings.currencySymbol}{(Number(sale.totalAmount || 0) - Number(sale.paidAmount || 0)).toFixed(2)}
                           </div>

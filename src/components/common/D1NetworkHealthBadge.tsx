@@ -168,7 +168,7 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
           </span>
         )}
 
-        {/* Sync Status Mini Pill — count only on phones (label hidden, saves ~70px) */}
+        {/* Sync Status Mini Pill Ã¢â‚¬â€ count only on phones (label hidden, saves ~70px) */}
         {unsyncedCount > 0 ? (
           <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-md bg-amber-500/20 text-amber-700 dark:text-amber-300">
             <span className="sm:hidden">{unsyncedCount}</span>
@@ -181,25 +181,7 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
         ) : null}
       </button>
 
-      {/* Quick Ping Button — hidden on narrow phones, ping lives inside the popover */}
-      <button
-        type="button"
-        id="d1-quick-ping-btn"
-        onClick={async (e) => {
-          e.stopPropagation();
-          await onPing();
-        }}
-        disabled={isChecking}
-        title="Ping Cloudflare D1 endpoint now (test connectivity & latency anytime)"
-        className="hidden min-[420px]:flex p-1.5 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-all cursor-pointer shadow-xs disabled:opacity-50 items-center gap-1"
-      >
-        <RefreshCw className={`w-3.5 h-3.5 ${isChecking ? 'animate-spin text-emerald-500' : 'text-slate-500'}`} />
-        <span className="sr-only xl:not-sr-only text-[10px] font-medium hidden xl:inline">
-          {isChecking ? 'Pinging...' : 'Ping'}
-        </span>
-      </button>
-
-      {/* Popover Dropdown Panel — bottom sheet on phones (viewport-safe), absolute popover on sm+ */}
+      {/* Popover Dropdown Panel - bottom sheet on phones (viewport-safe), absolute popover on sm+ */}
       {isOpen && (
         <>
           <div
@@ -264,7 +246,7 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
                 )}
               </div>
               <div className="text-base font-extrabold font-mono text-slate-800 dark:text-slate-100">
-                {isConnected ? `${health?.latencyMs || 0} ms` : '—'}
+                {isConnected ? `${health?.latencyMs || 0} ms` : 'Ã¢â‚¬â€'}
               </div>
             </div>
 
@@ -343,7 +325,7 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
             </div>
           )}
 
-          {/* Action Buttons — 44px touch targets on mobile */}
+          {/* Action Buttons Ã¢â‚¬â€ 44px touch targets on mobile */}
           <div className="pt-1 space-y-1.5">
             {onSync && (
               <button

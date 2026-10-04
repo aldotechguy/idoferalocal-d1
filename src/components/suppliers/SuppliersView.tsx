@@ -27,7 +27,7 @@ import { POPaymentModal } from '../purchases/POPaymentModal';
 
 export const SuppliersView: React.FC = () => {
   const { suppliers, purchases, addSupplier, updateSupplier, deleteSupplier, settings } = useApp();
-  const { currentUser } = useAuth();
+  const { currentUser, isPrivacyMode } = useAuth();
   const isAdmin = currentUser?.role === 'Administrator';
   const isSalesStaff = currentUser?.role === 'Sales Staff';
 
@@ -183,7 +183,9 @@ export const SuppliersView: React.FC = () => {
               Total Accounts Payable
             </span>
             <p className={`text-2xl font-black tracking-tight ${totalAccountsPayable > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
-              {settings.currencySymbol}{totalAccountsPayable.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {isPrivacyMode
+                ? '••••••'
+                : `${settings.currencySymbol}${totalAccountsPayable.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
             </p>
             <span className="text-[11px] text-slate-500 font-medium">
               {suppliersWithDebtCount > 0 ? `Owed across ${suppliersWithDebtCount} supplier${suppliersWithDebtCount === 1 ? '' : 's'}` : 'All supplier orders settled'}
@@ -319,11 +321,11 @@ export const SuppliersView: React.FC = () => {
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <h3 className="font-extrabold text-sm text-slate-900 dark:text-white leading-snug">
-                        {sup.name}
+                        {isPrivacyMode ? '•••••• (Vendor Masked)' : sup.name}
                       </h3>
                       {sup.contactPerson && (
                         <p className="text-[11px] text-slate-500 mt-0.5">
-                          Contact: <span className="font-semibold text-slate-700 dark:text-slate-300">{sup.contactPerson}</span>
+                          Contact: <span className="font-semibold text-slate-700 dark:text-slate-300">{isPrivacyMode ? '••••••' : sup.contactPerson}</span>
                         </p>
                       )}
                     </div>
@@ -337,13 +339,13 @@ export const SuppliersView: React.FC = () => {
                     {sup.phone && (
                       <p className="flex items-center gap-1.5">
                         <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                        <span className="truncate">{sup.phone}</span>
+                        <span className="truncate">{isPrivacyMode ? '••••••' : sup.phone}</span>
                       </p>
                     )}
                     {sup.email && (
                       <p className="flex items-center gap-1.5">
                         <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                        <span className="truncate">{sup.email}</span>
+                        <span className="truncate">{isPrivacyMode ? '••••••' : sup.email}</span>
                       </p>
                     )}
                     <p className="flex items-center gap-1.5 text-[11px] text-slate-500 pt-1">
@@ -358,14 +360,19 @@ export const SuppliersView: React.FC = () => {
                       <span className="text-[11px] text-slate-400 block">Payable Balance</span>
                       <span
                         className={`text-base font-black ${
-                          hasDebt ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'
+                          isPrivacyMode
+                            ? 'text-slate-400 font-mono'
+                            : hasDebt
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : 'text-emerald-600 dark:text-emerald-400'
                         }`}
                       >
-                        {settings.currencySymbol}
-                        {(sup.outstandingBalance || 0).toLocaleString('en-US', {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}
+                        {isPrivacyMode
+                          ? '••••••'
+                          : `${settings.currencySymbol}${(sup.outstandingBalance || 0).toLocaleString('en-US', {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}`}
                       </span>
                     </div>
 
@@ -384,7 +391,7 @@ export const SuppliersView: React.FC = () => {
                   </div>
 
                   {/* Expand Unpaid PO Breakdown */}
-                  {unpaidPOs.length > 0 && (
+                  {unpaidPOs.length > 0 && !isPrivacyMode && (
                     <div className="pt-1">
                       <button
                         onClick={() => setExpandedSupplierId(isExpanded ? null : sup.id)}

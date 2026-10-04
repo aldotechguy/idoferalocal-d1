@@ -15,7 +15,7 @@ import { useInteractions } from '../../context/InteractionContext';
 
 export const PricingView: React.FC = () => {
   const { products, changeProductPrice, pricingHistory, settings } = useApp();
-  const { currentUser } = useAuth();
+  const { currentUser, isPrivacyMode } = useAuth();
   const { notify } = useInteractions();
 
   const [selectedProductId, setSelectedProductId] = useState<string>(products[0]?.id || '');
@@ -112,7 +112,9 @@ export const PricingView: React.FC = () => {
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl">
                 <div>
                   <span className="text-slate-400 text-[10px]">Cost Price</span>
-                  <p className="font-bold text-slate-800 dark:text-slate-200">{settings.currencySymbol}{(Number(selectedProduct.costPrice) || 0).toFixed(2)}</p>
+                  <p className="font-bold text-slate-800 dark:text-slate-200">
+                    {isPrivacyMode ? '••••••' : `${settings.currencySymbol}${(Number(selectedProduct.costPrice) || 0).toFixed(2)}`}
+                  </p>
                 </div>
                 <div>
                   <span className="text-slate-400 text-[10px]">Retail Price</span>
@@ -124,7 +126,9 @@ export const PricingView: React.FC = () => {
                 </div>
                 <div>
                   <span className="text-slate-400 text-[10px]">Min Sell Price</span>
-                  <p className="font-bold text-rose-600 dark:text-rose-400">{settings.currencySymbol}{(Number(selectedProduct.minimumSellingPrice) || 0).toFixed(2)}</p>
+                  <p className="font-bold text-rose-600 dark:text-rose-400">
+                    {isPrivacyMode ? '••••••' : `${settings.currencySymbol}${(Number(selectedProduct.minimumSellingPrice) || 0).toFixed(2)}`}
+                  </p>
                 </div>
               </div>
             )}

@@ -25,7 +25,7 @@ interface ArchiveViewProps {
 
 export const ArchiveView: React.FC<ArchiveViewProps> = ({ onNavigate }) => {
   const { products, deleteProduct, unarchiveProduct, settings } = useApp();
-  const { currentUser } = useAuth();
+  const { currentUser, isPrivacyMode } = useAuth();
   const isSalesStaff = currentUser?.role === 'Sales Staff';
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -107,7 +107,9 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({ onNavigate }) => {
             <div>
               <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Archived Stock Value</p>
               <h3 className="text-2xl font-black text-slate-900 dark:text-white">
-                {settings.currencySymbol}{totalArchivedStockValue.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                {isPrivacyMode
+                  ? '••••••'
+                  : `${settings.currencySymbol}${totalArchivedStockValue.toLocaleString('en-US', { minimumFractionDigits: 2 })}`}
               </h3>
             </div>
           </div>
@@ -263,7 +265,7 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({ onNavigate }) => {
                     {/* Cost */}
                     {!isSalesStaff && (
                       <td className="py-3 px-3 font-semibold text-slate-500">
-                        {settings.currencySymbol}{(Number(product.costPrice) || 0).toFixed(2)}
+                        {isPrivacyMode ? '••••••' : `${settings.currencySymbol}${(Number(product.costPrice) || 0).toFixed(2)}`}
                       </td>
                     )}
 
@@ -387,7 +389,9 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({ onNavigate }) => {
               {!isSalesStaff && (
                 <div>
                   <span className="text-slate-400">Cost Price:</span>
-                  <p className="font-bold text-slate-700 dark:text-slate-300">{settings.currencySymbol}{(Number(viewingProduct.costPrice) || 0).toFixed(2)}</p>
+                  <p className="font-bold text-slate-700 dark:text-slate-300">
+                    {isPrivacyMode ? '••••••' : `${settings.currencySymbol}${(Number(viewingProduct.costPrice) || 0).toFixed(2)}`}
+                  </p>
                 </div>
               )}
               <div>

@@ -70,7 +70,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
 }) => {
   const { notify } = useInteractions();
   const { products, addProduct, updateProduct, suppliers, settings } = useApp();
-  const { currentUser } = useAuth();
+  const { currentUser, isPrivacyMode } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const categoryFieldRef = useRef<HTMLDivElement>(null);
 
@@ -638,7 +638,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
               2. Multi-Tier Pricing Architecture ({settings.currencySymbol})
             </h3>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              {currentUser?.role !== 'Sales Staff' && (
+              {currentUser?.role !== 'Sales Staff' && !isPrivacyMode && (
                 <div>
                   <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
                     Cost Price ({settings.currencySymbol}) *
@@ -651,6 +651,16 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
                     onChange={(e) => setFormData({ ...formData, costPrice: parseFloat(e.target.value) || 0 })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white border border-transparent focus:border-blue-500 font-bold"
                   />
+                </div>
+              )}
+              {currentUser?.role !== 'Sales Staff' && isPrivacyMode && (
+                <div>
+                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Cost Price ({settings.currencySymbol})
+                  </label>
+                  <div className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-400 font-mono font-bold select-none">
+                    •••••• (Privacy Mode)
+                  </div>
                 </div>
               )}
 
@@ -672,13 +682,19 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
                 <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
                   Minimum Floor Price ({settings.currencySymbol})
                 </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={formData.minimumSellingPrice}
-                  onChange={(e) => setFormData({ ...formData, minimumSellingPrice: parseFloat(e.target.value) || 0 })}
-                  className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white border border-transparent focus:border-blue-500 font-bold text-rose-600"
-                />
+                {isPrivacyMode ? (
+                  <div className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-400 font-mono font-bold select-none">
+                    •••••• (Privacy Mode)
+                  </div>
+                ) : (
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={formData.minimumSellingPrice}
+                    onChange={(e) => setFormData({ ...formData, minimumSellingPrice: parseFloat(e.target.value) || 0 })}
+                    className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white border border-transparent focus:border-blue-500 font-bold text-rose-600"
+                  />
+                )}
               </div>
 
               <div>
@@ -811,17 +827,23 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
                 <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
                   Primary Supplier
                 </label>
-                <select
-                  value={formData.supplierId}
-                  onChange={(e) => setFormData({ ...formData, supplierId: e.target.value })}
-                  className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white border border-transparent focus:border-blue-500"
-                >
-                  {suppliers.map((sup) => (
-                    <option key={sup.id} value={sup.id}>
-                      {sup.name}
-                    </option>
-                  ))}
-                </select>
+                {isPrivacyMode ? (
+                  <div className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-400 font-mono font-bold select-none">
+                    •••••• (Supplier Hidden in Privacy Mode)
+                  </div>
+                ) : (
+                  <select
+                    value={formData.supplierId}
+                    onChange={(e) => setFormData({ ...formData, supplierId: e.target.value })}
+                    className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white border border-transparent focus:border-blue-500"
+                  >
+                    {suppliers.map((sup) => (
+                      <option key={sup.id} value={sup.id}>
+                        {sup.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
 
               <div>

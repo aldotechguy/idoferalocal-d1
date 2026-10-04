@@ -31,7 +31,7 @@ interface ProductsViewProps {
 
 export const ProductsView: React.FC<ProductsViewProps> = ({ onNavigate }) => {
   const { products, deleteProduct, archiveProduct, unarchiveProduct, deduplicateProductsBySku, settings } = useApp();
-  const { currentUser } = useAuth();
+  const { currentUser, isPrivacyMode } = useAuth();
   const isSalesStaff = currentUser?.role === 'Sales Staff';
 
   const duplicateSkuCount = React.useMemo(() => {
@@ -419,7 +419,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({ onNavigate }) => {
                     {/* Cost */}
                     {!isSalesStaff && (
                       <td className="py-3 px-3 font-semibold text-slate-500">
-                        {settings.currencySymbol}{(Number(product.costPrice) || 0).toFixed(2)}
+                        {isPrivacyMode ? '••••••' : `${settings.currencySymbol}${(Number(product.costPrice) || 0).toFixed(2)}`}
                       </td>
                     )}
 
@@ -579,7 +579,9 @@ export const ProductsView: React.FC<ProductsViewProps> = ({ onNavigate }) => {
               {!isSalesStaff && (
                 <div>
                   <span className="text-slate-400">Cost Price:</span>
-                  <p className="font-bold text-slate-700 dark:text-slate-300">{settings.currencySymbol}{(Number(viewingProduct.costPrice) || 0).toFixed(2)}</p>
+                  <p className="font-bold text-slate-700 dark:text-slate-300">
+                    {isPrivacyMode ? '••••••' : `${settings.currencySymbol}${(Number(viewingProduct.costPrice) || 0).toFixed(2)}`}
+                  </p>
                 </div>
               )}
               <div>

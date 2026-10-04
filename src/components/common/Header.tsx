@@ -1,10 +1,10 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   Bell,
-  Sun,
-  Moon,
   Search,
   Menu,
+  Sun,
+  Moon,
   ShieldAlert,
   Check,
   UserPlus,
@@ -20,10 +20,6 @@ import {
   Lock,
   Eye,
   EyeOff,
-  Download,
-  Cloud,
-  CloudOff,
-  RefreshCw,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
@@ -47,7 +43,7 @@ export const Header: React.FC<HeaderProps> = ({
   onMobileMenuToggle,
   onNavigate,
 }) => {
-  const { currentUser, users, isSuperAdmin, switchUser, switchDemoRole, logout, lock, hasPermission } = useAuth();
+  const { currentUser, users, isSuperAdmin, isPrivacyMode, switchUser, switchDemoRole, logout, lock, hasPermission } = useAuth();
   const { mode, toggleTheme } = useTheme();
   const { notifications, markNotificationRead, clearNotifications, settings, products, sales, customers, suppliers, expenses } = useApp();
   const {
@@ -148,7 +144,7 @@ export const Header: React.FC<HeaderProps> = ({
       const el = searchInputRef.current;
       if (!el) return;
       el.placeholder = mq.matches
-        ? (el.dataset.mobilePlaceholder || 'Search…')
+        ? (el.dataset.mobilePlaceholder || 'SearchÃ¢â‚¬Â¦')
         : (el.dataset.desktopPlaceholder || el.placeholder);
     };
     apply();
@@ -164,7 +160,7 @@ export const Header: React.FC<HeaderProps> = ({
 
     // Null-safe dashboard search. These fields are typed as required, but
     // imported/legacy rows routinely carry null, and one bad record used to
-    // throw inside this memo — crashing the whole header (Cmd+K included) on
+    // throw inside this memo Ã¢â‚¬â€ crashing the whole header (Cmd+K included) on
     // every keystroke. String(undefined) would match 'undefined', so an absent
     // value is treated as an empty string.
     const matches = (value: unknown) => {
@@ -193,7 +189,7 @@ export const Header: React.FC<HeaderProps> = ({
           id: `prod-${p.id}`,
           typeLabel: 'Product',
           title: p.name,
-          subtitle: `SKU: ${p.sku} • ${p.category} • ${settings.currencySymbol}${p.retailPrice}`,
+          subtitle: `SKU: ${p.sku} Ã¢â‚¬Â¢ ${p.category} Ã¢â‚¬Â¢ ${settings.currencySymbol}${p.retailPrice}`,
           badge: `${p.currentStock} ${p.unit}`,
           badgeColor:
             p.currentStock <= p.minimumStockLevel
@@ -217,8 +213,8 @@ export const Header: React.FC<HeaderProps> = ({
         list.push({
           id: `sale-${s.id}`,
           typeLabel: 'Invoice',
-          title: `${s.invoiceNo} — ${s.customerName}`,
-          subtitle: `${s.items.length} items • ${settings.currencySymbol}${s.totalAmount} • ${s.paymentMethod}`,
+          title: `${s.invoiceNo} Ã¢â‚¬â€ ${s.customerName}`,
+          subtitle: `${s.items.length} items Ã¢â‚¬Â¢ ${settings.currencySymbol}${s.totalAmount} Ã¢â‚¬Â¢ ${s.paymentMethod}`,
           badge: s.status,
           badgeColor:
             s.status === 'Completed'
@@ -241,9 +237,17 @@ export const Header: React.FC<HeaderProps> = ({
           id: `cust-${c.id}`,
           typeLabel: 'Customer',
           title: c.name,
-          subtitle: `${c.phone} • ${c.email}`,
-          badge: c.outstandingBalance > 0 ? `Due: ${settings.currencySymbol}${c.outstandingBalance}` : 'Active',
-          badgeColor: c.outstandingBalance > 0 ? 'bg-rose-100 text-rose-800' : 'bg-blue-100 text-blue-800',
+          subtitle: isPrivacyMode ? 'Contact Masked Ã¢â‚¬Â¢ Privacy Mode' : `${c.phone} Ã¢â‚¬Â¢ ${c.email}`,
+          badge: isPrivacyMode
+            ? 'Protected'
+            : c.outstandingBalance > 0
+            ? `Due: ${settings.currencySymbol}${c.outstandingBalance}`
+            : 'Active',
+          badgeColor: isPrivacyMode
+            ? 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+            : c.outstandingBalance > 0
+            ? 'bg-rose-100 text-rose-800'
+            : 'bg-blue-100 text-blue-800',
           icon: Users,
           onSelect: () => {
             onNavigate('customers');
@@ -252,7 +256,7 @@ export const Header: React.FC<HeaderProps> = ({
         });
       });
 
-    // 4. Suppliers (up to 2)
+    // 4. Suppliers (up to 2) - Contact masked in Privacy Mode
     suppliers
       .filter((sup) => matchesAll([sup.name, sup.contactPerson, sup.phone]))
       .slice(0, 2)
@@ -261,7 +265,7 @@ export const Header: React.FC<HeaderProps> = ({
           id: `sup-${sup.id}`,
           typeLabel: 'Supplier',
           title: sup.name,
-          subtitle: `Contact: ${sup.contactPerson} • ${sup.phone}`,
+          subtitle: isPrivacyMode ? 'Contact Ã¢â‚¬Â¢ Privacy Mode' : `Contact: ${sup.contactPerson} Ã¢â‚¬Â¢ ${sup.phone}`,
           icon: Building2,
           onSelect: () => {
             onNavigate('suppliers');
@@ -270,7 +274,7 @@ export const Header: React.FC<HeaderProps> = ({
         });
       });
 
-    // 5. Expenses (up to 2)
+    // 5. Expenses (up to 2) - Amount masked in Privacy Mode
     expenses
       .filter((e) => matchesAll([e.title, e.category]))
       .slice(0, 2)
@@ -279,7 +283,7 @@ export const Header: React.FC<HeaderProps> = ({
           id: `exp-${e.id}`,
           typeLabel: 'Expense',
           title: e.title,
-          subtitle: `${e.category} • ${settings.currencySymbol}${e.amount}`,
+          subtitle: isPrivacyMode ? `${e.category} Ã¢â‚¬Â¢ Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢` : `${e.category} Ã¢â‚¬Â¢ ${settings.currencySymbol}${e.amount}`,
           icon: NairaSign,
           onSelect: () => {
             onNavigate('expenses');
@@ -289,7 +293,7 @@ export const Header: React.FC<HeaderProps> = ({
       });
 
     return list;
-  }, [cleanQuery, products, sales, customers, suppliers, expenses, settings, onNavigate]);
+  }, [cleanQuery, products, sales, customers, suppliers, expenses, settings, onNavigate, isPrivacyMode]);
 
   const handleOpenSearchModal = () => {
     setShowSearchResultsModal(true);
@@ -299,7 +303,7 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="app-header sticky top-0 z-30 px-3 sm:px-4 lg:px-8 pt-3 pb-2 sm:py-3 transition-all duration-200" style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))' }}>
       <div className="app-header-layout flex flex-wrap items-center gap-x-3 gap-y-2 sm:gap-4 sm:flex-nowrap">
-        {/* Row 1 — hamburger + compact status cluster (mobile); spacer keeps search full-width below */}
+        {/* Row 1 Ã¢â‚¬â€ hamburger + compact status cluster (mobile); spacer keeps search full-width below */}
         {/* Left Section (Mobile Hamburger only on non-desktop to maximize search bar real estate) */}
         <div className="flex items-center lg:hidden shrink-0">
           <button
@@ -312,7 +316,7 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
         </div>
 
-        {/* Global search — own full-width row on mobile (order-3 basis-full), inline on sm+ */}
+        {/* Global search Ã¢â‚¬â€ own full-width row on mobile (order-3 basis-full), inline on sm+ */}
         <div className="order-3 basis-full sm:order-none sm:basis-auto flex flex-1 min-w-0 sm:min-w-[220px] max-w-3xl sm:mx-3 lg:mx-0 relative">
           <div className="relative w-full">
             <Search className="w-4 h-4 absolute left-3 sm:left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
@@ -324,7 +328,7 @@ export const Header: React.FC<HeaderProps> = ({
               autoComplete="off"
               autoCorrect="off"
               spellCheck={false}
-              placeholder="Search products, invoices, customers…" data-desktop-placeholder="Search products, invoices, customers… (Ctrl/⌘ K)" data-mobile-placeholder="Search products, invoices…"
+              placeholder="Search products, invoices, customersÃ¢â‚¬Â¦" data-desktop-placeholder="Search products, invoices, customersÃ¢â‚¬Â¦ (Ctrl/Ã¢Å’Ëœ K)" data-mobile-placeholder="Search products, invoicesÃ¢â‚¬Â¦"
               value={searchQuery}
               onChange={(e) => {
                 setSearchQuery(e.target.value);
@@ -375,7 +379,7 @@ export const Header: React.FC<HeaderProps> = ({
                 </button>
               )}
               <kbd className="hidden lg:inline-block px-1.5 py-0.5 text-[10px] font-mono text-slate-400 bg-white/50 dark:bg-slate-800/60 rounded-md border border-slate-200/50 dark:border-slate-700/50">
-                Ctrl/⌘ K
+                Ctrl/Ã¢Å’Ëœ K
               </kbd>
             </div>
           </div>
@@ -466,7 +470,7 @@ export const Header: React.FC<HeaderProps> = ({
                         <span>View all matching database results</span>
                       </div>
                       <kbd className="px-1.5 py-0.5 text-[10px] font-mono bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-md">
-                        Enter ↵
+                        Enter Ã¢â€ Âµ
                       </kbd>
                     </button>
                   </>
@@ -488,7 +492,7 @@ export const Header: React.FC<HeaderProps> = ({
             onSync={triggerSync}
           />
 
-          {/* Theme Toggle Button (hidden on narrow phones — the same switch lives in the profile sheet) */}
+          {/* Theme Toggle Button (hidden on narrow phones Ã¢â‚¬â€ the same switch lives in the profile sheet) */}
           <button
             type="button"
             onClick={toggleTheme}
@@ -625,7 +629,7 @@ export const Header: React.FC<HeaderProps> = ({
                     <div className="min-w-0 flex-1">
                       <p className="text-xs font-black truncate">{currentUser?.displayName}</p>
                       <p className="text-[10px] text-slate-400 truncate">
-                        {currentUser?.username ? `@${currentUser.username} • ` : ''}{currentUser?.email}
+                        {currentUser?.username ? `@${currentUser.username} Ã¢â‚¬Â¢ ` : ''}{currentUser?.email}
                       </p>
                       <span className="inline-block mt-0.5 text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-blue-100 dark:bg-blue-950 text-blue-600 dark:text-blue-400 uppercase">
                         {currentUser?.role}
@@ -661,7 +665,7 @@ export const Header: React.FC<HeaderProps> = ({
                                   <div className="text-left min-w-0">
                                     <p className="leading-tight truncate font-bold text-[11px]">{u.displayName}</p>
                                     <p className="text-[9px] text-slate-400 truncate">
-                                      {u.username ? `@${u.username} • ` : ''}{u.role}
+                                      {u.username ? `@${u.username} Ã¢â‚¬Â¢ ` : ''}{u.role}
                                     </p>
                                   </div>
                                 </div>
@@ -699,7 +703,7 @@ export const Header: React.FC<HeaderProps> = ({
                   ) : (
                     <div className="p-2.5 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200/60 dark:border-slate-700/60">
                       <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 leading-tight">
-                        🔒 Auto account switching is strictly restricted to the Super-User session.
+                        Ã°Å¸â€â€™ Auto account switching is strictly restricted to the Super-User session.
                       </p>
                     </div>
                   )}
@@ -767,7 +771,7 @@ export const Header: React.FC<HeaderProps> = ({
                         void lock();
                       }}
                       className="w-full flex items-center justify-center gap-2 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold rounded-xl text-xs transition-colors border border-slate-200/70 dark:border-slate-700"
-                      title="Hide the workspace and return to the Mall. You stay signed in, so you can reopen it instantly. Does NOT protect the terminal from the next person — use Sign Out for that."
+                      title="Hide the workspace and return to the Mall. You stay signed in, so you can reopen it instantly. Does NOT protect the terminal from the next person Ã¢â‚¬â€ use Sign Out for that."
                     >
                       <Lock className="w-3.5 h-3.5" />
                       <span>Lock Workspace</span>
@@ -892,7 +896,7 @@ export const Header: React.FC<HeaderProps> = ({
               <div>
                 <p className="text-xs font-black text-slate-900 dark:text-white">{targetUserForSwitch.displayName}</p>
                 <p className="text-[11px] text-slate-500">
-                  {targetUserForSwitch.username ? `@${targetUserForSwitch.username} • ` : ''}{targetUserForSwitch.email}
+                  {targetUserForSwitch.username ? `@${targetUserForSwitch.username} Ã¢â‚¬Â¢ ` : ''}{targetUserForSwitch.email}
                 </p>
                 <span className="inline-block mt-0.5 text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-blue-100 dark:bg-blue-950 text-blue-600 dark:text-blue-400 uppercase">
                   {targetUserForSwitch.role}

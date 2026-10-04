@@ -25,7 +25,7 @@ import { ConfirmModal } from '../common/ConfirmModal';
 
 export const CustomersView: React.FC = () => {
   const { customers, sales, addCustomer, updateCustomer, updateCustomerBalance, deleteCustomer, settings } = useApp();
-  const { currentUser } = useAuth();
+  const { currentUser, isPrivacyMode } = useAuth();
   const isAdmin = currentUser?.role === 'Administrator';
   const isSalesStaff = currentUser?.role === 'Sales Staff';
 
@@ -219,7 +219,9 @@ export const CustomersView: React.FC = () => {
               Total Revenue Generated
             </span>
             <p className="text-2xl font-black text-emerald-600 dark:text-emerald-400 tracking-tight">
-              {settings.currencySymbol}{totalCustomerRevenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {isPrivacyMode
+                ? '••••••'
+                : `${settings.currencySymbol}${totalCustomerRevenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
             </p>
             <span className="text-[11px] text-slate-500 font-medium">
               Lifetime sales across customers
@@ -237,7 +239,9 @@ export const CustomersView: React.FC = () => {
               Outstanding Balance
             </span>
             <p className="text-2xl font-black text-rose-600 dark:text-rose-400 tracking-tight">
-              {settings.currencySymbol}{totalOutstandingDebt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {isPrivacyMode
+                ? '••••••'
+                : `${settings.currencySymbol}${totalOutstandingDebt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
             </p>
             <span className="text-[11px] text-slate-500 font-medium">
               {debtorCount} customer{debtorCount === 1 ? '' : 's'} with unpaid debt
@@ -324,8 +328,8 @@ export const CustomersView: React.FC = () => {
                       {cust.name}
                     </td>
                     <td className="py-3 px-3">
-                      <p className="flex items-center gap-1 text-[11px]"><Phone className="w-3 h-3 text-slate-400" /> {cust.phone || 'N/A'}</p>
-                      <p className="flex items-center gap-1 text-[10px] text-slate-400"><Mail className="w-3 h-3 text-slate-400" /> {cust.email || 'N/A'}</p>
+                      <p className="flex items-center gap-1 text-[11px]"><Phone className="w-3 h-3 text-slate-400" /> {isPrivacyMode ? '••••••' : (cust.phone || 'N/A')}</p>
+                      <p className="flex items-center gap-1 text-[10px] text-slate-400"><Mail className="w-3 h-3 text-slate-400" /> {isPrivacyMode ? '••••••' : (cust.email || 'N/A')}</p>
                     </td>
                     <td className="py-3 px-3 font-bold">{(cust.purchaseHistoryCount || 0).toLocaleString()} orders</td>
                     <td className="py-3 px-3 font-bold text-amber-600 dark:text-amber-400 flex items-center gap-1">
@@ -333,10 +337,12 @@ export const CustomersView: React.FC = () => {
                       <span>{(cust.loyaltyPoints || 0).toLocaleString()} pts</span>
                     </td>
                     <td className="py-3 px-3 font-bold text-emerald-600 dark:text-emerald-400">
-                      {settings.currencySymbol}{(cust.lifetimeValue || 0).toFixed(2)}
+                      {isPrivacyMode ? '••••••' : `${settings.currencySymbol}${(cust.lifetimeValue || 0).toFixed(2)}`}
                     </td>
                     <td className="py-3 px-3">
-                      {(cust.overageBalance || 0) > 0 ? (
+                      {isPrivacyMode ? (
+                        <span className="font-mono font-bold text-slate-400">••••••</span>
+                      ) : (cust.overageBalance || 0) > 0 ? (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 font-bold text-[11px]">
                           Store Credit: +{settings.currencySymbol}{(cust.overageBalance || 0).toFixed(2)}
                         </span>
