@@ -10,10 +10,12 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../context/AuthContext';
 import { NairaSign } from '../common/NairaSign';
 
 export const AiAssistantView: React.FC = () => {
   const { products, sales, expenses, settings } = useApp();
+  const { isPrivacyMode } = useAuth();
 
   const [activeTab, setActiveTab] = useState<'business' | 'pricing' | 'forecasting'>('business');
   const [businessQuery, setBusinessQuery] = useState('');
@@ -239,7 +241,9 @@ export const AiAssistantView: React.FC = () => {
                   <span>Gemini Intelligence Response:</span>
                 </div>
                 <div className="text-xs text-slate-800 dark:text-slate-200 leading-relaxed whitespace-pre-wrap font-sans">
-                  {businessAnswer}
+                  {isPrivacyMode
+                    ? '🔒 Privacy Mode is active. Internal financial telemetry and profit margin responses are hidden while customer view is enabled.'
+                    : businessAnswer}
                 </div>
               </div>
             )}
@@ -322,7 +326,7 @@ export const AiAssistantView: React.FC = () => {
               <div className="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl">
                 <span className="text-[10px] text-slate-400 font-bold uppercase">Projected Profit Margin</span>
                 <p className="text-xl font-extrabold text-indigo-600 dark:text-indigo-400 mt-1">
-                  {pricingRecommendation.projectedProfitMargin}%
+                  {isPrivacyMode ? '••%' : `${pricingRecommendation.projectedProfitMargin}%`}
                 </p>
               </div>
 
@@ -335,7 +339,11 @@ export const AiAssistantView: React.FC = () => {
 
               <div className="md:col-span-4 bg-blue-50/60 dark:bg-blue-950/40 p-4 rounded-2xl border border-blue-100 dark:border-blue-900 text-xs text-slate-800 dark:text-slate-200">
                 <p className="font-bold text-blue-700 dark:text-blue-300 mb-1">AI Analytical Rationale:</p>
-                <p>{pricingRecommendation.explanation}</p>
+                <p>
+                  {isPrivacyMode
+                    ? '🔒 Internal margin analysis is hidden while Privacy Mode is active.'
+                    : pricingRecommendation.explanation}
+                </p>
               </div>
             </div>
           )}
@@ -368,12 +376,16 @@ export const AiAssistantView: React.FC = () => {
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl">
                   <span className="text-[10px] font-bold text-slate-400 uppercase">Predicted 30-Day Revenue</span>
-                  <p className="text-2xl font-black text-slate-900 dark:text-white mt-1">{settings.currencySymbol}{forecastingResult.predictedRevenue}</p>
+                  <p className="text-2xl font-black text-slate-900 dark:text-white mt-1">
+                    {isPrivacyMode ? `${settings.currencySymbol}••••••` : `${settings.currencySymbol}${forecastingResult.predictedRevenue}`}
+                  </p>
                 </div>
 
                 <div className="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl">
                   <span className="text-[10px] font-bold text-slate-400 uppercase">Cash Flow Trend</span>
-                  <p className="text-2xl font-black text-emerald-600 dark:text-emerald-400 mt-1">{forecastingResult.cashFlowTrend}</p>
+                  <p className="text-2xl font-black text-emerald-600 dark:text-emerald-400 mt-1">
+                    {isPrivacyMode ? 'Protected' : forecastingResult.cashFlowTrend}
+                  </p>
                 </div>
 
                 <div className="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl">

@@ -33,7 +33,7 @@ import { ConfirmModal } from '../common/ConfirmModal';
 
 export const MoneyMovementView: React.FC = () => {
   const { treasuryBalances, moneyMovements, deleteMoneyMovement, purgeHistoricalMoneyMovements, settings } = useApp();
-  const { currentUser, isSuperAdmin } = useAuth();
+  const { currentUser, isSuperAdmin, isPrivacyMode } = useAuth();
   const { showToast } = useToast();
 
   // Modals state
@@ -316,8 +316,9 @@ export const MoneyMovementView: React.FC = () => {
               <Wallet className="w-4 h-4 text-blue-400" />
             </div>
             <p className="text-3xl font-black font-mono tracking-tight text-white mt-1">
-              {settings.currencySymbol}
-              {(treasuryBalances?.totalLiquidCash ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {isPrivacyMode
+                ? '••••••'
+                : `${settings.currencySymbol}${(treasuryBalances?.totalLiquidCash ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
             </p>
             <p className="text-[11px] text-slate-400 mt-1">
               Combined live liquidity from Bank & Till
@@ -358,8 +359,9 @@ export const MoneyMovementView: React.FC = () => {
             </div>
 
             <p className="text-2xl font-black font-mono tracking-tight text-blue-600 dark:text-blue-400 mt-1">
-              {settings.currencySymbol}
-              {(treasuryBalances?.bizAccountBalance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {isPrivacyMode
+                ? '••••••'
+                : `${settings.currencySymbol}${(treasuryBalances?.bizAccountBalance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
             </p>
             <p className="text-[11px] text-slate-400 mt-0.5">
               Receives Mobile Transfers, Bank Transfers, and Card/POS sales.
@@ -407,8 +409,9 @@ export const MoneyMovementView: React.FC = () => {
             </div>
 
             <p className="text-2xl font-black font-mono tracking-tight text-emerald-600 dark:text-emerald-400 mt-1">
-              {settings.currencySymbol}
-              {(treasuryBalances?.physicalCashBalance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {isPrivacyMode
+                ? '••••••'
+                : `${settings.currencySymbol}${(treasuryBalances?.physicalCashBalance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
             </p>
             <p className="text-[11px] text-slate-400 mt-0.5">
               Receives Cash Transactions and covers cash register expenses.
@@ -456,14 +459,14 @@ export const MoneyMovementView: React.FC = () => {
           <div className="px-3 py-1.5 bg-white dark:bg-slate-900 rounded-xl border border-purple-200 dark:border-purple-900 font-mono">
             <span className="text-slate-400 text-[10px] uppercase font-bold block">Total Owner Drawings:</span>
             <span className="font-black text-purple-700 dark:text-purple-300">
-              {settings.currencySymbol}{(treasuryBalances?.totalOwnerDrawings ?? 0).toLocaleString()}
+              {isPrivacyMode ? '••••••' : `${settings.currencySymbol}${(treasuryBalances?.totalOwnerDrawings ?? 0).toLocaleString()}`}
             </span>
           </div>
 
           <div className="px-3 py-1.5 bg-white dark:bg-slate-900 rounded-xl border border-purple-200 dark:border-purple-900 font-mono">
             <span className="text-slate-400 text-[10px] uppercase font-bold block">Active Owner Loans:</span>
             <span className="font-black text-amber-600 dark:text-amber-400">
-              {settings.currencySymbol}{(treasuryBalances?.totalOwnerLoans ?? 0).toLocaleString()}
+              {isPrivacyMode ? '••••••' : `${settings.currencySymbol}${(treasuryBalances?.totalOwnerLoans ?? 0).toLocaleString()}`}
             </span>
           </div>
 
@@ -716,13 +719,15 @@ export const MoneyMovementView: React.FC = () => {
                       </td>
 
                       {/* Notes */}
-                      <td className="py-3.5 px-3 max-w-xs truncate text-[11px] text-slate-600 dark:text-slate-400" title={movement.notes}>
-                        {movement.notes || '—'}
+                      <td className="py-3.5 px-3 max-w-xs truncate text-[11px] text-slate-600 dark:text-slate-400" title={isPrivacyMode ? 'Protected in Privacy Mode' : movement.notes}>
+                        {isPrivacyMode ? '••••••' : (movement.notes || '—')}
                       </td>
 
                       {/* Amount */}
                       <td className="py-3.5 px-3 text-right whitespace-nowrap font-mono font-black text-sm">
-                        {isInternalTransfer ? (
+                        {isPrivacyMode ? (
+                          <span className="text-slate-400">••••••</span>
+                        ) : isInternalTransfer ? (
                           <span className="text-blue-600 dark:text-blue-400">
                             {settings.currencySymbol}{(Number(movement.amount) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </span>

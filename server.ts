@@ -585,6 +585,41 @@ app.post("/api/auth/password", async (req, res) => {
   }
 });
 
+app.post("/api/auth/verify-password", async (req, res) => {
+  try {
+    await ensureAuthSeed();
+    const actor = await requireAppUser(req);
+    const fallbackUserId = String(req.body?.userId || "");
+    const targetUser =
+      actor ||
+      (fallbackUserId
+        ? (db.prepare("SELECT * FROM app_users WHERE id = ?").get(fallbackUserId) as any)
+        : null);
+
+    if (!targetUser) {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+
+    const password = String(req.body?.password || "");
+    if (!password) {
+      return res.status(400).json({ error: "Password is required." });
+    }
+
+    const candidate = await hashPassword(
+      password,
+      targetUser.password_salt,
+      targetUser.password_iterations
+    );
+    if (!safeEqual(candidate, targetUser.password_hash)) {
+      return res.status(401).json({ error: "Incorrect password." });
+    }
+
+    return res.json({ ok: true });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message || "Password verification failed" });
+  }
+});
+
 // =================== D1 STORAGE ROUTES ===================
 
 let configuredD1DatabaseId = process.env.CLOUDFLARE_D1_DATABASE_ID || "3e95a550-a091-490b-819d-f0acb7ea8dd8";

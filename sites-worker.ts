@@ -314,6 +314,24 @@ async function changeAuthPassword(request: Request, env: Env) {
   return json({ok: true, passwordLastChanged: changedAt});
 }
 
+async function verifyAuthPassword(request: Request, env: Env) {
+  await ensureAuthSeed(env);
+  const actor = await requireAppUser(request, env);
+  const body = await readJson(request);
+  const fallbackUserId = String(body?.userId || '');
+  let targetUser = actor;
+  if (!targetUser && fallbackUserId) {
+    const rows = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(fallbackUserId).all<AppUserRow>();
+    targetUser = rows.results?.[0] || null;
+  }
+  if (!targetUser) return json({error: 'Authentication required.'}, 401);
+  const password = String(body?.password || '');
+  if (!password) return json({error: 'Password is required.'}, 400);
+  const candidate = await hashPassword(password, targetUser.password_salt, targetUser.password_iterations);
+  if (!safeEqual(candidate, targetUser.password_hash)) return json({error: 'Incorrect password.'}, 401);
+  return json({ok: true});
+}
+
 async function readJson(request: Request) {
   try {
     return await request.json() as Record<string, any>;
@@ -559,6 +577,7 @@ export default {
       if (request.method === 'PUT' && url.pathname === '/api/auth/users') return await upsertAuthUser(request, env);
       if (request.method === 'DELETE' && url.pathname.startsWith('/api/auth/users/')) return await deleteAuthUser(request, env, decodeURIComponent(url.pathname.slice('/api/auth/users/'.length)));
       if (request.method === 'POST' && url.pathname === '/api/auth/password') return await changeAuthPassword(request, env);
+      if (request.method === 'POST' && url.pathname === '/api/auth/verify-password') return await verifyAuthPassword(request, env);
       if (request.method === 'PUT' && url.pathname === '/api/storage/snapshot') return await saveSnapshot(request, env);
       if (request.method === 'GET' && url.pathname === '/api/storage/snapshot') return await readSnapshot(request, env);
       if (request.method === 'PATCH' && url.pathname === '/api/storage/records') return await patchRecords(request, env);

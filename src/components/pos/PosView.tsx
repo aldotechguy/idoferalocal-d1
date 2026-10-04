@@ -61,7 +61,7 @@ export const PosView: React.FC = () => {
     pendingRepeatSale,
     clearPendingRepeatSale,
   } = useApp();
-  const { currentUser } = useAuth();
+  const { currentUser, isPrivacyMode } = useAuth();
   const { showToast } = useToast();
 
   const [showAddProductModal, setShowAddProductModal] = useState(false);
@@ -1224,12 +1224,16 @@ export const PosView: React.FC = () => {
                             <p className="font-extrabold truncate">{c.name}</p>
                             <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium flex items-center gap-1 mt-0.5">
                               <Phone className="w-2.5 h-2.5 shrink-0" />
-                              <span>{c.phone || 'No phone'}</span>
+                              <span>{isPrivacyMode && !isSelected ? '••••••' : (c.phone || 'No phone')}</span>
                             </p>
                           </div>
 
                           <div className="flex items-center gap-2 shrink-0">
-                            {cOverage > 0 ? (
+                            {isPrivacyMode && !isSelected ? (
+                              <span className="px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-500 text-[10px] font-bold">
+                                ••••
+                              </span>
+                            ) : cOverage > 0 ? (
                               <span className="px-1.5 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 text-[10px] font-black">
                                 +{settings.currencySymbol}{cOverage.toFixed(0)}
                               </span>
@@ -1486,7 +1490,7 @@ export const PosView: React.FC = () => {
                         <span className="text-[11px] font-semibold text-slate-500">
                           {settings.currencySymbol}{item.unitPrice.toFixed(2)}
                         </span>
-                        {isBackdateMode && (
+                        {isBackdateMode && !isPrivacyMode && (
                           <span className="text-[10px] text-slate-400 font-medium">
                             (Cost: {settings.currencySymbol}{item.costPrice.toFixed(2)})
                           </span>

@@ -202,24 +202,6 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
         ) : null}
       </button>
 
-      {/* Quick Ping Button - gives user instant liberty to ping whenever in doubt */}
-      <button
-        type="button"
-        id="d1-quick-ping-btn"
-        onClick={async (e) => {
-          e.stopPropagation();
-          await onPing();
-        }}
-        disabled={isChecking}
-        title="Ping Cloudflare D1 endpoint now (test connectivity & latency anytime)"
-        className="p-1.5 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-all cursor-pointer shadow-xs disabled:opacity-50 flex items-center gap-1"
-      >
-        <RefreshCw className={`w-3.5 h-3.5 ${isChecking ? 'animate-spin text-emerald-500' : 'text-slate-500'}`} />
-        <span className="sr-only xl:not-sr-only text-[10px] font-medium hidden xl:inline">
-          {isChecking ? 'Pinging...' : 'Ping'}
-        </span>
-      </button>
-
       {/* Popover Dropdown Panel */}
       {isOpen && (
         <div

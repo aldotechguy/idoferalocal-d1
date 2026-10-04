@@ -18,10 +18,12 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../context/AuthContext';
 import { InvestmentPlannerView } from '../finance/InvestmentPlannerView';
 
 export const ReportsView: React.FC = () => {
   const { sales, products, expenses, settings } = useApp();
+  const { isPrivacyMode } = useAuth();
 
   // Read any pre-selected period intent from navigation (e.g. from Dashboard "Past Month" button)
   const [selectedPeriod, setSelectedPeriod] = useState<string>(() => {
@@ -576,11 +578,13 @@ export const ReportsView: React.FC = () => {
                 </span>
               </div>
               <div className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">
-                {cs}{periodRevenue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                {isPrivacyMode
+                  ? `${cs}••••••`
+                  : `${cs}${periodRevenue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
               </div>
               <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-100 dark:border-slate-800">
                 <span className="text-slate-500">{periodOrdersCount} total sales</span>
-                {momRevenuePct !== null && (
+                {!isPrivacyMode && momRevenuePct !== null && (
                   <span
                     className={`font-bold flex items-center gap-0.5 ${
                       momRevenuePct >= 0 ? 'text-emerald-600' : 'text-rose-600'
@@ -602,12 +606,16 @@ export const ReportsView: React.FC = () => {
                 </span>
               </div>
               <div className="text-2xl font-black text-emerald-600 dark:text-emerald-400 tracking-tight">
-                {cs}{periodGrossProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                {isPrivacyMode
+                  ? `${cs}••••••`
+                  : `${cs}${periodGrossProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
               </div>
               <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-100 dark:border-slate-800">
-                <span className="text-slate-500">COGS: -{cs}{periodCOGS.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                <span className="text-slate-500">
+                  COGS: {isPrivacyMode ? `-${cs}••••••` : `-${cs}${periodCOGS.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                </span>
                 <span className="font-extrabold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/50 px-2 py-0.5 rounded-full">
-                  {periodGrossMarginPct.toFixed(1)}% Margin
+                  {isPrivacyMode ? '••% Margin' : `${periodGrossMarginPct.toFixed(1)}% Margin`}
                 </span>
               </div>
             </div>
@@ -631,10 +639,14 @@ export const ReportsView: React.FC = () => {
                   periodNetProfit >= 0 ? 'text-indigo-600 dark:text-indigo-400' : 'text-rose-600 dark:text-rose-400'
                 }`}
               >
-                {cs}{periodNetProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                {isPrivacyMode
+                  ? `${cs}••••••`
+                  : `${cs}${periodNetProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
               </div>
               <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-100 dark:border-slate-800">
-                <span className="text-slate-500">Store Overhead: -{cs}{periodExpenseTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                <span className="text-slate-500">
+                  Store Overhead: {isPrivacyMode ? `-${cs}••••••` : `-${cs}${periodExpenseTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                </span>
                 <span
                   className={`font-extrabold px-2 py-0.5 rounded-full ${
                     periodNetProfit >= 0
@@ -642,7 +654,7 @@ export const ReportsView: React.FC = () => {
                       : 'text-rose-700 bg-rose-100 dark:bg-rose-950/60 dark:text-rose-300'
                   }`}
                 >
-                  {periodNetMarginPct.toFixed(1)}% Net Margin
+                  {isPrivacyMode ? '••% Net Margin' : `${periodNetMarginPct.toFixed(1)}% Net Margin`}
                 </span>
               </div>
             </div>
@@ -667,41 +679,57 @@ export const ReportsView: React.FC = () => {
               <div className="space-y-2.5 text-xs">
                 <div className="flex justify-between py-1.5 border-b border-slate-100 dark:border-slate-800/60 font-semibold">
                   <span className="text-slate-600 dark:text-slate-300">Retail Sales:</span>
-                  <span className="text-slate-900 dark:text-white">{cs}{periodRetailSales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  <span className="text-slate-900 dark:text-white">
+                    {isPrivacyMode ? `${cs}••••••` : `${cs}${periodRetailSales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                  </span>
                 </div>
                 <div className="flex justify-between py-1.5 border-b border-slate-100 dark:border-slate-800/60 font-semibold">
                   <span className="text-slate-600 dark:text-slate-300">Wholesale Sales:</span>
-                  <span className="text-slate-900 dark:text-white">{cs}{periodWholesaleSales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  <span className="text-slate-900 dark:text-white">
+                    {isPrivacyMode ? `${cs}••••••` : `${cs}${periodWholesaleSales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                  </span>
                 </div>
                 {periodDiscounts > 0 && (
                   <div className="flex justify-between py-1.5 border-b border-slate-100 dark:border-slate-800/60 font-semibold text-rose-600">
                     <span>Discounts Granted:</span>
-                    <span>-{cs}{periodDiscounts.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    <span>
+                      {isPrivacyMode ? `-${cs}••••` : `-${cs}${periodDiscounts.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                    </span>
                   </div>
                 )}
                 <div className="flex justify-between py-2 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 px-3 rounded-xl font-bold">
                   <span className="text-slate-900 dark:text-white">GROSS REVENUE:</span>
-                  <span className="text-blue-600 dark:text-blue-400">{cs}{periodRevenue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  <span className="text-blue-600 dark:text-blue-400">
+                    {isPrivacyMode ? `${cs}••••••` : `${cs}${periodRevenue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                  </span>
                 </div>
 
                 <div className="flex justify-between py-1.5 border-b border-slate-100 dark:border-slate-800/60 font-semibold text-rose-600 dark:text-rose-400">
                   <span>Less: Cost of Goods Sold (COGS):</span>
-                  <span>-{cs}{periodCOGS.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  <span>
+                    {isPrivacyMode ? `-${cs}••••••` : `-${cs}${periodCOGS.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                  </span>
                 </div>
 
                 <div className="flex justify-between py-2 border-b border-slate-200 dark:border-slate-700 bg-blue-50/50 dark:bg-blue-950/30 px-3 rounded-xl font-extrabold text-blue-900 dark:text-blue-200">
                   <span>GROSS OPERATING PROFIT:</span>
-                  <span>{cs}{periodGrossProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  <span>
+                    {isPrivacyMode ? `${cs}••••••` : `${cs}${periodGrossProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                  </span>
                 </div>
 
                 <div className="flex justify-between py-1.5 border-b border-slate-100 dark:border-slate-800/60 font-semibold text-rose-600 dark:text-rose-400">
                   <span>Less: Operating Overhead / Expenses:</span>
-                  <span>-{cs}{periodExpenseTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  <span>
+                    {isPrivacyMode ? `-${cs}••••••` : `-${cs}${periodExpenseTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                  </span>
                 </div>
 
                 <div className="flex justify-between py-3 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-900 dark:text-emerald-200 px-4 rounded-2xl font-black text-sm shadow-2xs">
                   <span>NET BUSINESS PROFIT:</span>
-                  <span>{cs}{periodNetProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  <span>
+                    {isPrivacyMode ? `${cs}••••••` : `${cs}${periodNetProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                  </span>
                 </div>
               </div>
             </div>
@@ -716,7 +744,7 @@ export const ReportsView: React.FC = () => {
                   <p className="text-[11px] text-slate-500">Expenses logged in {activePeriodLabel}</p>
                 </div>
                 <span className="font-extrabold text-xs text-rose-600 dark:text-rose-400">
-                  Total: {cs}{periodExpenseTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  Total: {isPrivacyMode ? `${cs}••••••` : `${cs}${periodExpenseTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                 </span>
               </div>
 
@@ -731,14 +759,14 @@ export const ReportsView: React.FC = () => {
                       <div className="flex justify-between text-xs font-semibold text-slate-700 dark:text-slate-300">
                         <span>{item.category}</span>
                         <span className="font-bold text-slate-900 dark:text-white">
-                          {cs}{item.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}{' '}
-                          <span className="text-[10px] text-slate-400 font-normal">({item.pctOfTotal.toFixed(1)}%)</span>
+                          {isPrivacyMode ? `${cs}••••••` : `${cs}${item.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}{' '}
+                          <span className="text-[10px] text-slate-400 font-normal">({isPrivacyMode ? '••%' : `${item.pctOfTotal.toFixed(1)}%`})</span>
                         </span>
                       </div>
                       <div className="w-full bg-slate-100 dark:bg-slate-800 h-2 rounded-full overflow-hidden">
                         <div
                           className="bg-rose-500 h-full rounded-full transition-all"
-                          style={{ width: `${Math.min(100, Math.max(2, item.pctOfTotal))}%` }}
+                          style={{ width: `${isPrivacyMode ? 35 : Math.min(100, Math.max(2, item.pctOfTotal))}%` }}
                         />
                       </div>
                     </div>
@@ -755,7 +783,9 @@ export const ReportsView: React.FC = () => {
                   {paymentMethodsBreakdown.map((pm) => (
                     <div key={pm.method} className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800">
                       <p className="text-[10px] text-slate-400 font-bold truncate">{pm.method}</p>
-                      <p className="text-xs font-extrabold text-slate-900 dark:text-white">{cs}{pm.total.toFixed(0)}</p>
+                      <p className="text-xs font-extrabold text-slate-900 dark:text-white">
+                        {isPrivacyMode ? `${cs}••••` : `${cs}${pm.total.toFixed(0)}`}
+                      </p>
                       <p className="text-[9px] text-slate-500">{pm.count} orders</p>
                     </div>
                   ))}
@@ -806,9 +836,11 @@ export const ReportsView: React.FC = () => {
                           <td className="py-3 px-3 font-bold text-slate-900 dark:text-white">{item.name}</td>
                           <td className="py-3 px-3 font-mono text-[11px] text-slate-500">{item.sku}</td>
                           <td className="py-3 px-3 font-bold text-emerald-600 text-right">{item.unitsSold} units</td>
-                          <td className="py-3 px-3 font-bold text-slate-900 dark:text-white text-right">{cs}{item.totalRevenue.toFixed(2)}</td>
+                          <td className="py-3 px-3 font-bold text-slate-900 dark:text-white text-right">
+                            {isPrivacyMode ? `${cs}••••••` : `${cs}${item.totalRevenue.toFixed(2)}`}
+                          </td>
                           <td className="py-3 px-4 font-bold text-emerald-600 dark:text-emerald-400 text-right">
-                            +{cs}{itemProfit.toFixed(2)}
+                            {isPrivacyMode ? `${cs}••••••` : `+${cs}${itemProfit.toFixed(2)}`}
                           </td>
                         </tr>
                       );
@@ -871,7 +903,7 @@ export const ReportsView: React.FC = () => {
                         </td>
                         <td className="py-3 px-3">{s.paymentMethod}</td>
                         <td className="py-3 px-4 font-bold text-emerald-600 dark:text-emerald-400 text-right">
-                          {cs}{Number(s.totalAmount || 0).toFixed(2)}
+                          {isPrivacyMode ? `${cs}••••••` : `${cs}${Number(s.totalAmount || 0).toFixed(2)}`}
                         </td>
                       </tr>
                     ))
@@ -894,27 +926,37 @@ export const ReportsView: React.FC = () => {
                   <tr className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40">
                     <td className="py-3 px-4 font-bold text-slate-900 dark:text-white">Gross Sales Revenue</td>
                     <td className="py-3 px-3 text-emerald-600 font-semibold">Income</td>
-                    <td className="py-3 px-4 font-bold text-emerald-600 text-right">{cs}{periodRevenue.toFixed(2)}</td>
+                    <td className="py-3 px-4 font-bold text-emerald-600 text-right">
+                      {isPrivacyMode ? `${cs}••••••` : `${cs}${periodRevenue.toFixed(2)}`}
+                    </td>
                   </tr>
                   <tr className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40">
                     <td className="py-3 px-4 font-bold text-slate-900 dark:text-white">Cost of Goods Sold (COGS)</td>
                     <td className="py-3 px-3 text-rose-600 font-semibold">Expense</td>
-                    <td className="py-3 px-4 font-bold text-rose-600 text-right">-{cs}{periodCOGS.toFixed(2)}</td>
+                    <td className="py-3 px-4 font-bold text-rose-600 text-right">
+                      {isPrivacyMode ? `-${cs}••••••` : `-${cs}${periodCOGS.toFixed(2)}`}
+                    </td>
                   </tr>
                   <tr className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 font-bold bg-slate-50/50 dark:bg-slate-800/30">
                     <td className="py-3 px-4 text-slate-900 dark:text-white">Gross Profit</td>
                     <td className="py-3 px-3 text-blue-600">Calculated</td>
-                    <td className="py-3 px-4 text-blue-600 text-right">{cs}{periodGrossProfit.toFixed(2)}</td>
+                    <td className="py-3 px-4 text-blue-600 text-right">
+                      {isPrivacyMode ? `${cs}••••••` : `${cs}${periodGrossProfit.toFixed(2)}`}
+                    </td>
                   </tr>
                   <tr className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40">
                     <td className="py-3 px-4 font-bold text-slate-900 dark:text-white">Total Operating Expenses</td>
                     <td className="py-3 px-3 text-rose-600 font-semibold">Expense</td>
-                    <td className="py-3 px-4 font-bold text-rose-600 text-right">-{cs}{periodExpenseTotal.toFixed(2)}</td>
+                    <td className="py-3 px-4 font-bold text-rose-600 text-right">
+                      {isPrivacyMode ? `-${cs}••••••` : `-${cs}${periodExpenseTotal.toFixed(2)}`}
+                    </td>
                   </tr>
                   <tr className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 font-black bg-emerald-50/40 dark:bg-emerald-950/20">
                     <td className="py-3.5 px-4 text-emerald-900 dark:text-emerald-200">Net Profit / (Loss)</td>
                     <td className="py-3.5 px-3 text-emerald-700">Final Net</td>
-                    <td className="py-3.5 px-4 text-emerald-600 text-right">{cs}{periodNetProfit.toFixed(2)}</td>
+                    <td className="py-3.5 px-4 text-emerald-600 text-right">
+                      {isPrivacyMode ? `${cs}••••••` : `${cs}${periodNetProfit.toFixed(2)}`}
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -945,9 +987,11 @@ export const ReportsView: React.FC = () => {
                         <td className="py-3 px-3 font-mono text-[11px]">{p.sku}</td>
                         <td className="py-3 px-3">{p.category}</td>
                         <td className="py-3 px-3 font-bold">{p.currentStock} {p.unit}</td>
-                        <td className="py-3 px-3">{cs}{p.costPrice.toFixed(2)}</td>
+                        <td className="py-3 px-3">
+                          {isPrivacyMode ? `${cs}••••` : `${cs}${p.costPrice.toFixed(2)}`}
+                        </td>
                         <td className="py-3 px-4 font-bold text-blue-600 dark:text-blue-400 text-right">
-                          {cs}{(p.currentStock * p.costPrice).toFixed(2)}
+                          {isPrivacyMode ? `${cs}••••••` : `${cs}${(p.currentStock * p.costPrice).toFixed(2)}`}
                         </td>
                       </tr>
                     ))
@@ -977,7 +1021,9 @@ export const ReportsView: React.FC = () => {
                       <tr key={p.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors">
                         <td className="py-3 px-4 font-bold text-slate-900 dark:text-white">{p.name}</td>
                         <td className="py-3 px-3 font-mono text-[11px]">{p.sku}</td>
-                        <td className="py-3 px-3 text-slate-500">{cs}{p.costPrice.toFixed(2)}</td>
+                        <td className="py-3 px-3 text-slate-500">
+                          {isPrivacyMode ? `${cs}••••` : `${cs}${p.costPrice.toFixed(2)}`}
+                        </td>
                         <td className="py-3 px-3 font-bold text-emerald-600 dark:text-emerald-400">{cs}{p.retailPrice.toFixed(2)}</td>
                         <td className="py-3 px-3 font-bold text-indigo-600 dark:text-indigo-400">{cs}{p.wholesalePrice.toFixed(2)}</td>
                         <td className="py-3 px-4 font-bold text-right text-blue-600 dark:text-blue-400">+{premPct}%</td>
@@ -1014,7 +1060,9 @@ export const ReportsView: React.FC = () => {
                         <td className="py-3 px-3 font-bold text-slate-900 dark:text-white">{item.name}</td>
                         <td className="py-3 px-3 font-mono text-[11px]">{item.sku}</td>
                         <td className="py-3 px-3 font-bold text-emerald-600">{item.unitsSold} units</td>
-                        <td className="py-3 px-4 font-black text-slate-900 dark:text-white text-right">{cs}{item.totalRevenue.toFixed(2)}</td>
+                        <td className="py-3 px-4 font-black text-slate-900 dark:text-white text-right">
+                          {isPrivacyMode ? `${cs}••••••` : `${cs}${item.totalRevenue.toFixed(2)}`}
+                        </td>
                       </tr>
                     ))
                   )}
@@ -1049,8 +1097,12 @@ export const ReportsView: React.FC = () => {
                         <td className="py-3 px-3 font-mono text-[11px]">{p.sku}</td>
                         <td className="py-3 px-3">{p.category}</td>
                         <td className="py-3 px-3 font-bold text-amber-600">{p.currentStock} {p.unit}</td>
-                        <td className="py-3 px-3">{cs}{p.costPrice.toFixed(2)}</td>
-                        <td className="py-3 px-4 font-bold text-rose-600 text-right">{cs}{(p.currentStock * p.costPrice).toFixed(2)}</td>
+                        <td className="py-3 px-3">
+                          {isPrivacyMode ? `${cs}••••` : `${cs}${p.costPrice.toFixed(2)}`}
+                        </td>
+                        <td className="py-3 px-4 font-bold text-rose-600 text-right">
+                          {isPrivacyMode ? `${cs}••••••` : `${cs}${(p.currentStock * p.costPrice).toFixed(2)}`}
+                        </td>
                       </tr>
                     ))
                   )}

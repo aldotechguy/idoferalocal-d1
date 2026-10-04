@@ -8,7 +8,7 @@ import { ConfirmModal } from '../common/ConfirmModal';
 
 export const ExpensesView: React.FC = () => {
   const { expenses, addExpense, deleteExpense, settings } = useApp();
-  const { currentUser } = useAuth();
+  const { currentUser, isPrivacyMode } = useAuth();
 
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -88,7 +88,9 @@ export const ExpensesView: React.FC = () => {
       <div className="bg-white dark:bg-slate-900 p-5 rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-xs flex items-center justify-between">
         <div>
           <span className="text-[10px] font-bold text-slate-400 uppercase">Total Logged Operational Expenditure</span>
-          <p className="text-2xl font-extrabold text-rose-600 dark:text-rose-400 mt-0.5">{settings.currencySymbol}{totalExpense.toFixed(2)}</p>
+          <p className="text-2xl font-extrabold text-rose-600 dark:text-rose-400 mt-0.5">
+            {isPrivacyMode ? '••••••' : `${settings.currencySymbol}${totalExpense.toFixed(2)}`}
+          </p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -124,8 +126,8 @@ export const ExpensesView: React.FC = () => {
               {filteredExpenses.map((exp) => (
                 <tr key={exp.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors">
                   <td className="py-3 px-4">
-                    <p className="font-bold text-slate-900 dark:text-white">{exp.title}</p>
-                    {exp.description && <p className="text-[10px] text-slate-400">{exp.description}</p>}
+                    <p className="font-bold text-slate-900 dark:text-white">{isPrivacyMode ? '•••••• (Protected Expense)' : exp.title}</p>
+                    {exp.description && !isPrivacyMode && <p className="text-[10px] text-slate-400">{exp.description}</p>}
                   </td>
                   <td className="py-3 px-3">
                     <span className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 font-bold text-[10px]">
@@ -133,7 +135,7 @@ export const ExpensesView: React.FC = () => {
                     </span>
                   </td>
                   <td className="py-3 px-3 font-extrabold text-rose-600 dark:text-rose-400">
-                    -{settings.currencySymbol}{exp.amount.toFixed(2)}
+                    {isPrivacyMode ? '••••••' : `-${settings.currencySymbol}${exp.amount.toFixed(2)}`}
                   </td>
                   <td className="py-3 px-3 font-medium">{exp.paymentMethod}</td>
                   <td className="py-3 px-3 font-semibold">{exp.paidBy}</td>

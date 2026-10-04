@@ -66,7 +66,7 @@ export const PurchasesView: React.FC = () => {
     addMoneyMovement,
     addSupplier,
   } = useApp();
-  const { currentUser, isSuperAdmin } = useAuth();
+  const { currentUser, isSuperAdmin, isPrivacyMode } = useAuth();
   const { showToast } = useToast();
 
   // Filters & Tabs State
@@ -844,7 +844,10 @@ export const PurchasesView: React.FC = () => {
           <div>
             <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Purchase Orders</p>
             <h3 className="text-xl font-black">
-              {totalPOsCount} <span className="text-xs font-normal text-slate-400">({settings.currencySymbol}{totalPOValue.toLocaleString('en-US', { minimumFractionDigits: 2 })})</span>
+              {totalPOsCount}{' '}
+              <span className="text-xs font-normal text-slate-400">
+                ({isPrivacyMode ? `${settings.currencySymbol}••••••` : `${settings.currencySymbol}${totalPOValue.toLocaleString('en-US', { minimumFractionDigits: 2 })}`})
+              </span>
             </h3>
           </div>
         </div>
@@ -866,7 +869,10 @@ export const PurchasesView: React.FC = () => {
               )}
             </p>
             <h3 className="text-xl font-black text-amber-600 dark:text-amber-400">
-              {draftPOsCount} <span className="text-xs font-normal text-slate-400">({settings.currencySymbol}{draftPOsValue.toLocaleString('en-US', { minimumFractionDigits: 2 })})</span>
+              {draftPOsCount}{' '}
+              <span className="text-xs font-normal text-slate-400">
+                ({isPrivacyMode ? `${settings.currencySymbol}••••••` : `${settings.currencySymbol}${draftPOsValue.toLocaleString('en-US', { minimumFractionDigits: 2 })}`})
+              </span>
             </h3>
           </div>
         </div>
@@ -905,7 +911,9 @@ export const PurchasesView: React.FC = () => {
           <div>
             <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Unpaid Payables</p>
             <h3 className="text-xl font-black text-rose-600 dark:text-rose-400">
-              {settings.currencySymbol}{unpaidTotal.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+              {isPrivacyMode
+                ? `${settings.currencySymbol}••••••`
+                : `${settings.currencySymbol}${unpaidTotal.toLocaleString('en-US', { minimumFractionDigits: 2 })}`}
             </h3>
           </div>
         </div>
@@ -1048,7 +1056,9 @@ export const PurchasesView: React.FC = () => {
 
                       {/* Supplier */}
                       <td className="py-3.5 px-3">
-                        <p className="font-bold text-slate-900 dark:text-white">{po.supplierName}</p>
+                        <p className="font-bold text-slate-900 dark:text-white">
+                          {isPrivacyMode ? 'Protected Supplier' : po.supplierName}
+                        </p>
                         <p className="text-[10px] text-slate-400">Exp: {po.expectedDelivery}</p>
                       </td>
 
@@ -1070,19 +1080,19 @@ export const PurchasesView: React.FC = () => {
                       {/* Amount */}
                       <td className="py-3.5 px-3">
                         <p className="font-black text-slate-900 dark:text-white font-mono">
-                          {settings.currencySymbol}{po.totalAmount.toFixed(2)}
+                          {isPrivacyMode ? `${settings.currencySymbol}••••••` : `${settings.currencySymbol}${po.totalAmount.toFixed(2)}`}
                         </p>
-                        {po.deliveryFee && po.deliveryFee > 0 ? (
+                        {!isPrivacyMode && po.deliveryFee && po.deliveryFee > 0 ? (
                           <p className="text-[10px] text-blue-600 dark:text-blue-400 font-medium">
                             Supplier logistics: {settings.currencySymbol}{po.deliveryFee.toFixed(2)}
                           </p>
                         ) : null}
-                        {po.localLogisticsFee && po.localLogisticsFee > 0 ? (
+                        {!isPrivacyMode && po.localLogisticsFee && po.localLogisticsFee > 0 ? (
                           <p className="text-[10px] text-violet-600 dark:text-violet-400 font-medium">
                             Local logistics: {settings.currencySymbol}{po.localLogisticsFee.toFixed(2)}
                           </p>
                         ) : null}
-                        {po.deliveryStatus !== 'Draft' && remainingPayment > 0 && (
+                        {!isPrivacyMode && po.deliveryStatus !== 'Draft' && remainingPayment > 0 && (
                           <p className="text-[10px] text-rose-500 font-semibold">
                             Due: {settings.currencySymbol}{remainingPayment.toFixed(2)}
                           </p>

@@ -1,8 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   Bell,
-  Sun,
-  Moon,
   Search,
   Menu,
   ShieldAlert,
@@ -20,13 +18,8 @@ import {
   Lock,
   Eye,
   EyeOff,
-  Download,
-  Cloud,
-  CloudOff,
-  RefreshCw,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { useTheme } from '../../context/ThemeContext';
 import { useApp } from '../../context/AppContext';
 import { useCloudSync } from '../../hooks/useCloudSync';
 import { ConflictResolutionModal } from '../modals/ConflictResolutionModal';
@@ -48,8 +41,16 @@ export const Header: React.FC<HeaderProps> = ({
   onMobileMenuToggle,
   onNavigate,
 }) => {
-  const { currentUser, users, isSuperAdmin, switchUser, switchDemoRole, logout, hasPermission } = useAuth();
-  const { mode, toggleTheme } = useTheme();
+  const {
+    currentUser,
+    users,
+    isSuperAdmin,
+    isPrivacyMode,
+    switchUser,
+    switchDemoRole,
+    logout,
+    hasPermission,
+  } = useAuth();
   const { notifications, markNotificationRead, clearNotifications, settings, products, sales, customers, suppliers, expenses } = useApp();
   const {
     isOnline,
@@ -230,8 +231,8 @@ export const Header: React.FC<HeaderProps> = ({
       .filter(
         (c) =>
           c.name.toLowerCase().includes(cleanQuery) ||
-          c.phone.toLowerCase().includes(cleanQuery) ||
-          c.email.toLowerCase().includes(cleanQuery)
+          (!isPrivacyMode && c.phone.toLowerCase().includes(cleanQuery)) ||
+          (!isPrivacyMode && c.email.toLowerCase().includes(cleanQuery))
       )
       .slice(0, 2)
       .forEach((c) => {
@@ -239,9 +240,17 @@ export const Header: React.FC<HeaderProps> = ({
           id: `cust-${c.id}`,
           typeLabel: 'Customer',
           title: c.name,
-          subtitle: `${c.phone} • ${c.email}`,
-          badge: c.outstandingBalance > 0 ? `Due: ${settings.currencySymbol}${c.outstandingBalance}` : 'Active',
-          badgeColor: c.outstandingBalance > 0 ? 'bg-rose-100 text-rose-800' : 'bg-blue-100 text-blue-800',
+          subtitle: isPrivacyMode ? 'Contact Masked • Privacy Mode' : `${c.phone} • ${c.email}`,
+          badge: isPrivacyMode
+            ? 'Protected'
+            : c.outstandingBalance > 0
+            ? `Due: ${settings.currencySymbol}${c.outstandingBalance}`
+            : 'Active',
+          badgeColor: isPrivacyMode
+            ? 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+            : c.outstandingBalance > 0
+            ? 'bg-rose-100 text-rose-800'
+            : 'bg-blue-100 text-blue-800',
           icon: Users,
           onSelect: () => {
             onNavigate('customers');
@@ -250,53 +259,57 @@ export const Header: React.FC<HeaderProps> = ({
         });
       });
 
-    // 4. Suppliers (up to 2)
-    suppliers
-      .filter(
-        (sup) =>
-          sup.name.toLowerCase().includes(cleanQuery) ||
-          sup.contactPerson.toLowerCase().includes(cleanQuery) ||
-          sup.phone.toLowerCase().includes(cleanQuery)
-      )
-      .slice(0, 2)
-      .forEach((sup) => {
-        list.push({
-          id: `sup-${sup.id}`,
-          typeLabel: 'Supplier',
-          title: sup.name,
-          subtitle: `Contact: ${sup.contactPerson} • ${sup.phone}`,
-          icon: Building2,
-          onSelect: () => {
-            onNavigate('suppliers');
-            setIsSearchFocused(false);
-          },
+    // 4. Suppliers (up to 2) - Hidden in Privacy Mode
+    if (!isPrivacyMode) {
+      suppliers
+        .filter(
+          (sup) =>
+            sup.name.toLowerCase().includes(cleanQuery) ||
+            sup.contactPerson.toLowerCase().includes(cleanQuery) ||
+            sup.phone.toLowerCase().includes(cleanQuery)
+        )
+        .slice(0, 2)
+        .forEach((sup) => {
+          list.push({
+            id: `sup-${sup.id}`,
+            typeLabel: 'Supplier',
+            title: sup.name,
+            subtitle: `Contact: ${sup.contactPerson} • ${sup.phone}`,
+            icon: Building2,
+            onSelect: () => {
+              onNavigate('suppliers');
+              setIsSearchFocused(false);
+            },
+          });
         });
-      });
+    }
 
-    // 5. Expenses (up to 2)
-    expenses
-      .filter(
-        (e) =>
-          e.title.toLowerCase().includes(cleanQuery) ||
-          e.category.toLowerCase().includes(cleanQuery)
-      )
-      .slice(0, 2)
-      .forEach((e) => {
-        list.push({
-          id: `exp-${e.id}`,
-          typeLabel: 'Expense',
-          title: e.title,
-          subtitle: `${e.category} • ${settings.currencySymbol}${e.amount}`,
-          icon: NairaSign,
-          onSelect: () => {
-            onNavigate('expenses');
-            setIsSearchFocused(false);
-          },
+    // 5. Expenses (up to 2) - Hidden in Privacy Mode
+    if (!isPrivacyMode) {
+      expenses
+        .filter(
+          (e) =>
+            e.title.toLowerCase().includes(cleanQuery) ||
+            e.category.toLowerCase().includes(cleanQuery)
+        )
+        .slice(0, 2)
+        .forEach((e) => {
+          list.push({
+            id: `exp-${e.id}`,
+            typeLabel: 'Expense',
+            title: e.title,
+            subtitle: `${e.category} • ${settings.currencySymbol}${e.amount}`,
+            icon: NairaSign,
+            onSelect: () => {
+              onNavigate('expenses');
+              setIsSearchFocused(false);
+            },
+          });
         });
-      });
+    }
 
     return list;
-  }, [cleanQuery, products, sales, customers, suppliers, expenses, settings, onNavigate]);
+  }, [cleanQuery, products, sales, customers, suppliers, expenses, settings, onNavigate, isPrivacyMode]);
 
   const handleOpenSearchModal = () => {
     setShowSearchResultsModal(true);
@@ -495,27 +508,6 @@ export const Header: React.FC<HeaderProps> = ({
               <span>{conflicts.length} Conflict{conflicts.length > 1 ? 's' : ''}</span>
             </button>
           )}
-
-          {/* Theme Toggle Button */}
-          <button
-            type="button"
-            onClick={toggleTheme}
-            className="p-2 text-slate-600 dark:text-slate-300 liquid-glass-pill rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
-            title={`Current theme: ${mode.toUpperCase()}. Click to switch to ${mode === 'dark' ? 'Light' : 'Dark'} mode`}
-            aria-label="Toggle color theme"
-          >
-            {mode === 'dark' ? (
-              <>
-                <Sun className="w-4 h-4 text-amber-400 fill-amber-400/20" />
-                <span className="hidden md:inline text-xs font-extrabold text-amber-400">Light</span>
-              </>
-            ) : (
-              <>
-                <Moon className="w-4 h-4 text-slate-700 dark:text-slate-200" />
-                <span className="hidden md:inline text-xs font-extrabold text-slate-700 dark:text-slate-300">Dark</span>
-              </>
-            )}
-          </button>
 
           {/* Notifications Dropdown */}
           <div className="relative">
