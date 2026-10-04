@@ -136,6 +136,9 @@ export const customers = sqliteTable(
     outstandingBalanceKobo: integer('outstanding_balance_kobo').notNull().default(0),
     loyaltyPoints: integer('loyalty_points').notNull().default(0),
     lifetimeValueKobo: integer('lifetime_value_kobo').notNull().default(0),
+    // Store credit (main c75f81e): an overpayment on one sale is parked here and
+    // can be applied to a later sale. The credit mirror of outstandingBalanceKobo.
+    overageBalanceKobo: integer('overage_balance_kobo').notNull().default(0),
     createdAt: text('created_at').notNull(),
   },
   (t) => [index('idx_customers_phone').on(t.phone)],
@@ -156,6 +159,12 @@ export const sales = sqliteTable(
     paidKobo: integer('paid_kobo').notNull().default(0),
     paymentMethod: text('payment_method').notNull().default('Cash'),
     paymentBreakdownJson: text('payment_breakdown_json'),
+    // Store credit + partial refunds (main c75f81e). refundsJson holds the
+    // SaleRefundRecord[] audit trail and stays NULL for a never-refunded sale.
+    overageAppliedKobo: integer('overage_applied_kobo').notNull().default(0),
+    overageCreatedKobo: integer('overage_created_kobo').notNull().default(0),
+    totalRefundedKobo: integer('total_refunded_kobo').notNull().default(0),
+    refundsJson: text('refunds_json'),
     status: text('status').notNull().default('Completed'),
     notes: text('notes'),
     createdBy: text('created_by').notNull().default(''),
@@ -181,6 +190,9 @@ export const saleItems = sqliteTable(
     totalKobo: integer('total_kobo').notNull().default(0),
     isWholesale: integer('is_wholesale').notNull().default(0),
     isClearance: integer('is_clearance').notNull().default(0),
+    // Partial refunds (main c75f81e): quantity of this line already returned.
+    // Bounds what is still refundable so a line can never be refunded twice.
+    returnedQty: integer('returned_qty').notNull().default(0),
   },
   (t) => [index('idx_sale_items_sale').on(t.saleId)],
 );
@@ -221,6 +233,10 @@ export const purchaseItems = sqliteTable(
     receivedQty: integer('received_qty').notNull().default(0),
     acceptedQty: integer('accepted_qty').notNull().default(0),
     damagedQty: integer('damaged_qty').notNull().default(0),
+    // GRN variance (main c75f81e): ordered-vs-delivered shortfall / surplus.
+    // Drives the 'Received with Shortage' status and the close-shortage decision.
+    shortageQty: integer('shortage_qty').notNull().default(0),
+    excessQty: integer('excess_qty').notNull().default(0),
   },
   (t) => [index('idx_purchase_items_po').on(t.purchaseId)],
 );

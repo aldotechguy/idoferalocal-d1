@@ -3,7 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { RELATIONAL_DDL, RELATIONAL_INDEXES } from './relationalDdl.js';
 import { MALL_OVERSELL_TRIGGER_SQL, type MallExecutor } from './mallApi.js';
 import { MALL_SAFETY_DDL, MALL_CATALOG_INDEX_COLUMNS, MALL_CATALOG_INDEXES } from './mallSafety.js';
-import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, MALL_ORDER_COLUMNS, MALL_SCHEMA_VERSION, isDuplicateColumnError, type MallConfig } from './mallOperations.js';
+import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, MALL_ORDER_COLUMNS, RELATIONAL_FINANCE_COLUMNS, MALL_SCHEMA_VERSION, isDuplicateColumnError, type MallConfig } from './mallOperations.js';
 
 
 export type Tx = {
@@ -49,6 +49,13 @@ export function ensureRelationalSchemaNode(db: DatabaseSync): number {
     catch (error) { if (!isDuplicateColumnError(error)) throw error; }
   }
   for (const column of MALL_CATALOG_INDEX_COLUMNS) {
+    try { db.exec(`${column.ddl};`); }
+    catch (error) { if (!isDuplicateColumnError(error)) throw error; }
+  }
+  // v10 store-credit / partial-refund / GRN-variance columns on the CORE
+  // relational tables: additive, same guarded contract. These must exist before
+  // any snapshot push, because relationalMapper names them explicitly.
+  for (const column of RELATIONAL_FINANCE_COLUMNS) {
     try { db.exec(`${column.ddl};`); }
     catch (error) { if (!isDuplicateColumnError(error)) throw error; }
   }
@@ -110,6 +117,7 @@ export function relationalSchemaStatements(): string[] {
     ...MALL_MERCH_COLUMNS.map((column) => column.ddl),
     ...MALL_ORDER_COLUMNS.map((column) => column.ddl),
     ...MALL_CATALOG_INDEX_COLUMNS.map((column) => column.ddl),
+    ...RELATIONAL_FINANCE_COLUMNS.map((column) => column.ddl),
     ...MALL_CATALOG_INDEXES,
     MALL_OVERSELL_TRIGGER_SQL,
     `INSERT OR IGNORE INTO mall_schema_versions(version, installed_at) VALUES (${MALL_SCHEMA_VERSION}, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,

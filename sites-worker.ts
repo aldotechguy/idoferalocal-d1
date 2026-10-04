@@ -63,7 +63,7 @@ import { handleStaffMallApi, maintainMall } from './src/server/mallOrderAdminApi
 import { handleStaffMallListingApi } from './src/server/mallListingApi.js';
 import { handleStaffProductImageApi, handlePublicImageRequest } from './src/server/productImageApi.js';
 import type { ImageStore } from './src/server/imageStore.js';
-import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, MALL_ORDER_COLUMNS, MALL_SCHEMA_VERSION, isDuplicateColumnError, signMallWebhook, type MallConfig } from './src/server/mallOperations.js';
+import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, MALL_ORDER_COLUMNS, RELATIONAL_FINANCE_COLUMNS, MALL_SCHEMA_VERSION, isDuplicateColumnError, signMallWebhook, type MallConfig } from './src/server/mallOperations.js';
 import { MALL_SAFETY_DDL, MALL_CATALOG_INDEX_COLUMNS, MALL_CATALOG_INDEXES } from './src/server/mallSafety.js';
 import { bootstrapAdmin } from './src/server/adminBootstrap.js';
 import { handleMallWebhook } from './src/server/mallWebhook.js';
@@ -268,10 +268,11 @@ async function ensureSchema(env: Env) {
   // and staff-page indexes assume the operations tables the batch above just
   // created, and its catalog covering indexes assume RELATIONAL_DDL tables.
   await env.DB.batch(MALL_SAFETY_DDL.map(sql => env.DB.prepare(sql)));
-  // #10 merchandising columns + the status column the catalog indexes cover:
-  // additive guarded ALTERs; a duplicate column is the expected no-op on every
-  // start after the first.
-  for (const column of [...MALL_MERCH_COLUMNS, ...MALL_ORDER_COLUMNS, ...MALL_CATALOG_INDEX_COLUMNS]) {
+  // #10 merchandising columns + the status column the catalog indexes cover, and
+  // v10's RELATIONAL_FINANCE_COLUMNS (store credit, partial refunds, GRN
+  // variance) on the core relational tables: additive guarded ALTERs; a duplicate
+  // column is the expected no-op on every start after the first.
+  for (const column of [...MALL_MERCH_COLUMNS, ...MALL_ORDER_COLUMNS, ...MALL_CATALOG_INDEX_COLUMNS, ...RELATIONAL_FINANCE_COLUMNS]) {
     try { await env.DB.prepare(column.ddl).run(); }
     catch (error) { if (!isDuplicateColumnError(error)) throw error; }
   }

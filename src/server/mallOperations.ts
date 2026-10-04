@@ -9,14 +9,18 @@ import { normalizedPhoneSql } from '../shared/mallPhone.js';
 /**
  * Bumped whenever the additive schema below changes. A deployed Worker checks
  * this single row before re-running the DDL, so a cold isolate no longer repeats
- * ~80 statements (and the 5 known-failing duplicate-column ALTERs) on every
+ * ~80 statements (and the 13 known-failing duplicate-column ALTERs) on every
  * start. See `ensureSchema` in sites-worker.ts.
  */
 // v7 installs the session-first buy-again indexes on existing D1 databases;
 // v8 adds the covering sold-quantity index behind the top-sellers rail.
 // v9 adds the snapshot ORDER BY indexes, the staff-page/counting indexes, and
 // drops the two unused products indexes (see MALL_SAFETY_DDL).
-export const MALL_SCHEMA_VERSION = 9;
+// v10 adds RELATIONAL_FINANCE_COLUMNS: the store-credit, partial-refund and
+// GRN-variance columns the unified relational store needs so the snapshot
+// mappers can round-trip main's c75f81e fields instead of silently dropping
+// them (and so the derived INSERTs never name a column the table lacks).
+export const MALL_SCHEMA_VERSION = 10;
 
 export const MALL_MERCH_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: 'mall_featured', ddl: 'ALTER TABLE products ADD COLUMN mall_featured INTEGER NOT NULL DEFAULT 0' },
@@ -28,6 +32,30 @@ export const MALL_MERCH_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = 
 
 export const MALL_ORDER_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: 'customer_email', ddl: 'ALTER TABLE mall_orders ADD COLUMN customer_email TEXT' },
+];
+
+/**
+ * v10 — additive columns on the CORE relational tables (not mall_*), carrying
+ * main's c75f81e store-credit / partial-refund / GRN-variance fields.
+ *
+ * RELATIONAL_DDL is `CREATE TABLE IF NOT EXISTS`, so a database provisioned
+ * before v10 never gains these from the bootstrap — these guarded ALTERs are the
+ * only path that adds them. A fresh database gets them from the CREATE and the
+ * ALTER then fails as a duplicate column: the expected no-op, same contract as
+ * MALL_MERCH_COLUMNS. Both runtimes must apply these BEFORE relationalMapper
+ * emits the matching keys, because coreUpsert() derives its INSERT column list
+ * from the mapper's returned object — a missing column would fail the entire
+ * snapshot push, not just the new feature.
+ */
+export const RELATIONAL_FINANCE_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
+  { name: 'customers.overage_balance_kobo', ddl: 'ALTER TABLE customers ADD COLUMN overage_balance_kobo INTEGER NOT NULL DEFAULT 0' },
+  { name: 'sales.overage_applied_kobo', ddl: 'ALTER TABLE sales ADD COLUMN overage_applied_kobo INTEGER NOT NULL DEFAULT 0' },
+  { name: 'sales.overage_created_kobo', ddl: 'ALTER TABLE sales ADD COLUMN overage_created_kobo INTEGER NOT NULL DEFAULT 0' },
+  { name: 'sales.total_refunded_kobo', ddl: 'ALTER TABLE sales ADD COLUMN total_refunded_kobo INTEGER NOT NULL DEFAULT 0' },
+  { name: 'sales.refunds_json', ddl: 'ALTER TABLE sales ADD COLUMN refunds_json TEXT' },
+  { name: 'sale_items.returned_qty', ddl: 'ALTER TABLE sale_items ADD COLUMN returned_qty INTEGER NOT NULL DEFAULT 0' },
+  { name: 'purchase_items.shortage_qty', ddl: 'ALTER TABLE purchase_items ADD COLUMN shortage_qty INTEGER NOT NULL DEFAULT 0' },
+  { name: 'purchase_items.excess_qty', ddl: 'ALTER TABLE purchase_items ADD COLUMN excess_qty INTEGER NOT NULL DEFAULT 0' },
 ];
 
 export function isDuplicateColumnError(error: unknown) {

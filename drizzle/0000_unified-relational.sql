@@ -46,6 +46,7 @@ CREATE TABLE `customers` (
 	`outstanding_balance_kobo` integer DEFAULT 0 NOT NULL,
 	`loyalty_points` integer DEFAULT 0 NOT NULL,
 	`lifetime_value_kobo` integer DEFAULT 0 NOT NULL,
+	`overage_balance_kobo` integer DEFAULT 0 NOT NULL,
 	`created_at` text NOT NULL
 );
 --> statement-breakpoint
@@ -253,7 +254,9 @@ CREATE TABLE `purchase_items` (
 	`total_kobo` integer DEFAULT 0 NOT NULL,
 	`received_qty` integer DEFAULT 0 NOT NULL,
 	`accepted_qty` integer DEFAULT 0 NOT NULL,
-	`damaged_qty` integer DEFAULT 0 NOT NULL
+	`damaged_qty` integer DEFAULT 0 NOT NULL,
+	`shortage_qty` integer DEFAULT 0 NOT NULL,
+	`excess_qty` integer DEFAULT 0 NOT NULL
 );
 --> statement-breakpoint
 CREATE INDEX `idx_purchase_items_po` ON `purchase_items` (`purchase_id`);--> statement-breakpoint
@@ -309,7 +312,8 @@ CREATE TABLE `sale_items` (
 	`cost_price_kobo` integer DEFAULT 0 NOT NULL,
 	`total_kobo` integer DEFAULT 0 NOT NULL,
 	`is_wholesale` integer DEFAULT 0 NOT NULL,
-	`is_clearance` integer DEFAULT 0 NOT NULL
+	`is_clearance` integer DEFAULT 0 NOT NULL,
+	`returned_qty` integer DEFAULT 0 NOT NULL
 );
 --> statement-breakpoint
 CREATE INDEX `idx_sale_items_sale` ON `sale_items` (`sale_id`);--> statement-breakpoint
@@ -327,6 +331,10 @@ CREATE TABLE `sales` (
 	`paid_kobo` integer DEFAULT 0 NOT NULL,
 	`payment_method` text DEFAULT 'Cash' NOT NULL,
 	`payment_breakdown_json` text,
+	`overage_applied_kobo` integer DEFAULT 0 NOT NULL,
+	`overage_created_kobo` integer DEFAULT 0 NOT NULL,
+	`total_refunded_kobo` integer DEFAULT 0 NOT NULL,
+	`refunds_json` text,
 	`status` text DEFAULT 'Completed' NOT NULL,
 	`notes` text,
 	`created_by` text DEFAULT '' NOT NULL,

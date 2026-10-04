@@ -39,6 +39,24 @@ export function parseJsonArray(raw: unknown): any[] {
 }
 
 /**
+ * Sale refund audit trail (main c75f81e). Returns `undefined` — not `[]` — for a
+ * never-refunded sale, so a rebuilt document keeps the exact shape it had before
+ * this column existed and the refund UI can still distinguish "no refunds" from
+ * "refunds recorded". Malformed JSON degrades to `undefined` instead of throwing,
+ * matching parseJsonArray's tolerance on the snapshot read path.
+ */
+export function parseRefundsJson(raw: unknown): any[] | undefined {
+  if (Array.isArray(raw)) return raw.length ? raw : undefined;
+  if (typeof raw !== 'string' || !raw) return undefined;
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) && v.length ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Settings documents were occasionally stored as nested wrappers (`{"0": {...}}`)
  * by old sync builds. The ETL and every write path must unwrap identically, so
  * this lives in the shared mapper (scripts/etl/lib.ts re-exports it).
@@ -81,7 +99,11 @@ export function customerRow(r: any) {
   return {
     id: r.id, name: r.name, phone: r.phone || '', email: r.email || '', address: r.address || undefined,
     purchaseHistoryCount: n(r.purchase_history_count), outstandingBalance: KoboToNaira(r.outstanding_balance_kobo),
-    loyaltyPoints: n(r.loyalty_points), lifetimeValue: KoboToNaira(r.lifetime_value_kobo), createdAt: r.created_at,
+    loyaltyPoints: n(r.loyalty_points), lifetimeValue: KoboToNaira(r.lifetime_value_kobo),
+    // Store credit (main c75f81e). Emitted only when non-zero so a snapshot with
+    // no credit yet serializes byte-identically to its pre-v10 shape.
+    overageBalance: KoboToNaira(r.overage_balance_kobo) || undefined,
+    createdAt: r.created_at,
   };
 }
 export function supplierRow(r: any) {
@@ -98,6 +120,8 @@ export function saleRow(r: any, itemsBySale: Map<string, any[]>) {
     quantity: n(it.qty), unitPrice: KoboToNaira(it.unit_price_kobo),
     costPrice: KoboToNaira(it.cost_price_kobo), total: KoboToNaira(it.total_kobo),
     isWholesale: b(it.is_wholesale) || undefined, isClearance: b(it.is_clearance) || undefined,
+    // Partial refunds (main c75f81e): quantity of this line already returned.
+    returnedQuantity: n(it.returned_qty) || undefined,
   }));
   return {
     id: r.id, invoiceNo: r.receipt_no, customerId: r.customer_id || undefined,
@@ -107,6 +131,12 @@ export function saleRow(r: any, itemsBySale: Map<string, any[]>) {
     totalAmount: KoboToNaira(r.total_kobo), paidAmount: KoboToNaira(r.paid_kobo),
     paymentMethod: r.payment_method || 'Cash',
     paymentBreakdown: r.payment_breakdown_json ? JSON.parse(r.payment_breakdown_json) : undefined,
+    // Store credit + partial refunds (main c75f81e). Same `|| undefined` contract
+    // as paymentBreakdown, so an untouched sale keeps its pre-v10 shape.
+    overageApplied: KoboToNaira(r.overage_applied_kobo) || undefined,
+    overageCreated: KoboToNaira(r.overage_created_kobo) || undefined,
+    totalRefunded: KoboToNaira(r.total_refunded_kobo) || undefined,
+    refunds: parseRefundsJson(r.refunds_json),
     status: r.status || 'Completed', notes: r.notes || undefined,
     createdBy: r.created_by || '', orderTakenBy: r.order_taken_by || undefined,
     isHistorical: b(r.is_historical) || undefined,
@@ -201,7 +231,8 @@ export function customerToRow(c: any, now: string) {
     id: s(c.id), name: s(c.name, 'Walk-in Customer'), phone: s(c.phone), email: s(c.email),
     address: c.address ? s(c.address) : null, purchase_history_count: n(c.purchaseHistoryCount),
     outstanding_balance_kobo: NairaToKobo(c.outstandingBalance), loyalty_points: n(c.loyaltyPoints),
-    lifetime_value_kobo: NairaToKobo(c.lifetimeValue), created_at: s(c.createdAt, now),
+    lifetime_value_kobo: NairaToKobo(c.lifetimeValue),
+    overage_balance_kobo: NairaToKobo(c.overageBalance), created_at: s(c.createdAt, now),
   };
 }
 export function supplierToRow(sp: any, now: string) {
@@ -262,6 +293,12 @@ export function saleToRows(doc: any) {
     total_kobo: NairaToKobo(doc.totalAmount), paid_kobo: NairaToKobo(doc.paidAmount),
     payment_method: s(doc.paymentMethod, 'Cash'),
     payment_breakdown_json: doc.paymentBreakdown ? JSON.stringify(doc.paymentBreakdown) : null,
+    // Store credit + partial refunds (main c75f81e). refunds_json stays NULL for a
+    // never-refunded sale so parseRefundsJson reads back `undefined`, not `[]`.
+    overage_applied_kobo: NairaToKobo(doc.overageApplied),
+    overage_created_kobo: NairaToKobo(doc.overageCreated),
+    total_refunded_kobo: NairaToKobo(doc.totalRefunded),
+    refunds_json: Array.isArray(doc.refunds) && doc.refunds.length ? JSON.stringify(doc.refunds) : null,
     status: s(doc.status, 'Completed'), notes: doc.notes ? s(doc.notes) : null,
     created_by: s(doc.createdBy), order_taken_by: doc.orderTakenBy ? s(doc.orderTakenBy) : null,
     is_historical: b01(doc.isHistorical), expense_id: doc.expenseId ? s(doc.expenseId) : null,
@@ -273,6 +310,7 @@ export function saleToRows(doc: any) {
     unit_price_kobo: NairaToKobo(it.unitPrice), cost_price_kobo: NairaToKobo(it.costPrice),
     total_kobo: NairaToKobo(it.total),
     is_wholesale: b01(it.isWholesale), is_clearance: b01(it.isClearance),
+    returned_qty: n(it.returnedQuantity),
   }));
   return { header, lines };
 }
@@ -294,6 +332,8 @@ export function purchaseToRows(doc: any) {
     product_name: s(it.productName), sku: s(it.sku), qty: n(it.quantity),
     unit_cost_kobo: NairaToKobo(it.unitCost), total_kobo: NairaToKobo(it.total),
     received_qty: n(it.receivedQuantity), accepted_qty: n(it.acceptedQuantity), damaged_qty: n(it.damagedQuantity),
+    // GRN variance (main c75f81e): ordered-vs-delivered shortfall / surplus.
+    shortage_qty: n(it.shortageQuantity), excess_qty: n(it.excessQuantity),
   }));
   const receipts = (Array.isArray(doc.receivingHistory) ? doc.receivingHistory : []).map((r: any, i: number) => ({
     id: s(r.id || `${id}-grn-${i}`), purchase_id: id, grn_number: s(r.grnNumber),
