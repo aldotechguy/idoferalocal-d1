@@ -3,10 +3,23 @@ import { toKobo, str, num, nowIso, cleanImages, bool01 } from './lib.js';
 import type { DocRow, Stmt } from './lib.js';
 import type { Ctx } from './ctx.js';
 import { parsePayload } from './ctx.js';
-import { catalogStatus } from '../../src/shared/productStatus.js';
+import { catalogStatus, isClearanceItem } from '../../src/shared/productStatus.js';
 
-export function placeholder(stmts: Stmt[], ctx: Ctx, pid: string, pname: string) {
+/**
+ * Materialise a placeholder product for a line item whose product_id has no
+ * matching catalogue product (so sale/purchase lines never orphan).
+ *
+ * Clearance / non-inventory lines are EXCLUDED: POS mints a throwaway
+ * `clearance-<ts>-<rand>` id and `sku === 'CLEARANCE'` and these must never
+ * become active catalogue products. Their line items keep product_name/sku and
+ * a NULL product_id instead (see part2c.ts).
+ */
+export function placeholder(stmts: Stmt[], ctx: Ctx, pid: string, pname: string, item?: {isClearance?: unknown; sku?: unknown}) {
   if (!pid || ctx.productIds.has(pid)) return;
+  if (isClearanceItem({productId: pid, sku: item?.sku, isClearance: item?.isClearance})) {
+    ctx.skippedClearance += 1;
+    return;
+  }
   ctx.productIds.add(pid);
   ctx.placeholderProducts++;
   stmts.push({ sql: `INSERT INTO products (id, sku, name, category_name, stock_qty, created_at, updated_at) VALUES (?, ?, ?, 'Uncategorized', 0, ?, ?) ON CONFLICT(id) DO NOTHING;`, params: [pid, pid.slice(0, 40), pname ? pname.slice(0, 120) : `Archived ${pid.slice(0, 12)}`, nowIso(), nowIso()] });
@@ -16,6 +29,14 @@ export function loadProducts(byCol: Map<string, DocRow[]>, stmts: Stmt[], ctx: C
   for (const d of byCol.get('products') || []) {
     const p = parsePayload(ctx, d); if (!p) continue;
     const id = str(p.id || d.docId);
+    // Clearance / non-inventory items must never enter the active catalogue even
+    // if a blob accidentally declared them as products (POS mints throwaway
+    // `clearance-<ts>-<rand>` ids). Skipped, not archived — they appear nowhere.
+    // isClearanceItem needs the id; sku === 'CLEARANCE' is the second signal.
+    if (isClearanceItem({productId: id, sku: p.sku, isClearance: p.isClearance})) {
+      ctx.skippedClearance += 1;
+      continue;
+    }
     ctx.productIds.add(id);
     const catName = str(p.category, '').trim() || 'Uncategorized';
     const images = cleanImages(p.images);

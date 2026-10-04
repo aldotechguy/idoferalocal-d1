@@ -8,7 +8,13 @@ export const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || '35b3077113769543
 export const DATABASE_ID = process.env.CLOUDFLARE_D1_DATABASE_ID_TARGET || '3a3eb157-5aa5-419a-a8ce-2eade2afc436';
 export const API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
 export const DRY_RUN = process.argv.includes('--dry-run');
-export const SOURCE_FILE = path.join(process.cwd(), 'backups', 'idofera-d1-2026-09-15.sql');
+// Canonical input is the `idofera-d1` document dump. Override with ETL_SOURCE_FILE
+// (or --source=<path>) so the ETL can run against a freshly exported blob without
+// editing code. Defaults to the original 2026-09-15 export for reproducibility.
+const SOURCE_ARG = process.argv.find((a) => a.startsWith('--source='))?.slice('--source='.length);
+export const SOURCE_FILE = path.resolve(
+  SOURCE_ARG || process.env.ETL_SOURCE_FILE || path.join(process.cwd(), 'backups', 'idofera-d1-2026-09-15.sql'),
+);
 export const toKobo = (n: unknown): number => {
   const v = typeof n === 'number' ? n : typeof n === 'string' ? Number(n) : 0;
   if (!Number.isFinite(v)) return 0;
@@ -123,4 +129,18 @@ export async function executeD1(statements: Stmt[]) {
       throw new Error('D1 execution error');
     }
   }
+}
+
+/** Run one SELECT against the target D1 and return its rows (for verify/report scripts). */
+export async function queryD1(sql: string, params: any[] = [], databaseId: string = DATABASE_ID): Promise<any[]> {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/d1/database/${databaseId}/query`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${API_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql, params }),
+  });
+  const data = (await res.json()) as any;
+  if (!res.ok || !data.success) throw new Error(`D1 query failed: ${JSON.stringify(data).slice(0, 400)}`);
+  const first = Array.isArray(data.result) ? data.result[0] : data.result;
+  return (first?.results ?? []) as any[];
 }

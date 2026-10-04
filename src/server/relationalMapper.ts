@@ -4,6 +4,7 @@
  * Frontend contract (src/types) is UNCHANGED.
  */
 import { catalogStatus } from '../shared/productStatus.js';
+import { isClearanceItem } from '../shared/productStatus.js';
 export type Snapshot = Record<string, any[]>;
 export type QueryAll = (sql: string, params?: any[]) => Promise<any[]>;
 
@@ -287,8 +288,15 @@ export function moneyToRow(m: any, now: string) {
 export function saleToRows(doc: any) {
   const id = s(doc.id);
   const now = s(doc.createdAt, new Date().toISOString());
+  // receipt_no is UNIQUE in the relational store and reads back as `invoiceNo`.
+  // A missing / placeholder receipt ("", "N/A", "-") would collide across sales
+  // (e.g. multiple walk-in / repeat / historical entries), so those fall back to
+  // the sale id — each sale keeps its own unique, traceable receipt_no.
+  const rawReceipt = s(doc.invoiceNo).trim();
+  const isPlaceholder = rawReceipt === '' || /^n\/?a$/i.test(rawReceipt) || rawReceipt === '-';
+  const receiptNo = isPlaceholder ? id : rawReceipt;
   const header = {
-    id, receipt_no: s(doc.invoiceNo || id), customer_id: doc.customerId ? s(doc.customerId) : null,
+    id, receipt_no: receiptNo, customer_id: doc.customerId ? s(doc.customerId) : null,
     customer_name: s(doc.customerName), type: s(doc.type, 'Retail'),
     subtotal_kobo: NairaToKobo(doc.subtotal), discount_kobo: NairaToKobo(doc.discount),
     tax_kobo: NairaToKobo(doc.tax), delivery_fee_kobo: NairaToKobo(doc.deliveryFee),
@@ -307,11 +315,16 @@ export function saleToRows(doc: any) {
     created_at: now,
   };
   const lines = (Array.isArray(doc.items) ? doc.items : []).map((it: any, i: number) => ({
-    id: `${id}-item-${i}`, sale_id: id, product_id: it.productId ? s(it.productId) : null,
+    id: `${id}-item-${i}`, sale_id: id,
+    // Clearance / non-inventory lines are not catalogue products: they carry no
+    // product_id FK (option A — the ETL likewise creates no `products` row for
+    // them), while product_name/sku stay on the line so receipts and reports are
+    // unaffected. is_clearance is derived from the SAME rule everywhere.
+    product_id: !isClearanceItem(it) && it.productId ? s(it.productId) : null,
     product_name: s(it.productName), sku: s(it.sku), qty: n(it.quantity),
     unit_price_kobo: NairaToKobo(it.unitPrice), cost_price_kobo: NairaToKobo(it.costPrice),
     total_kobo: NairaToKobo(it.total),
-    is_wholesale: b01(it.isWholesale), is_clearance: b01(it.isClearance),
+    is_wholesale: b01(it.isWholesale), is_clearance: b01(isClearanceItem(it)),
     returned_qty: n(it.returnedQuantity),
   }));
   return { header, lines };

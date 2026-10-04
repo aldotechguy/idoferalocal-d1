@@ -106,6 +106,36 @@ async function d1Get(env: Env, sql: string, params: any[] = []): Promise<any> {
   return res.results?.[0] || null;
 }
 
+/**
+ * 100% relational sync watermark (edge). Mirrors src/server/syncWatermark.ts: the
+ * document store's `sync_revisions` row is replaced by a monotonic INTEGER kept in
+ * the `settings` table under `key = 'sync_watermark'`. Shared semantics with the
+ * Node runtime so both report the same revision contract.
+ */
+const SYNC_WATERMARK_KEY = 'sync_watermark';
+
+async function currentWatermark(env: Env): Promise<number> {
+  try {
+    const row = await d1Get(env, 'SELECT value_json FROM settings WHERE key = ?', [SYNC_WATERMARK_KEY]);
+    if (row?.value_json != null) {
+      const parsed = JSON.parse(String(row.value_json));
+      const value = typeof parsed === 'number' ? parsed : Number(parsed?.revision);
+      if (Number.isFinite(value)) return value;
+    }
+  } catch {
+    // settings table absent on a brand-new database — treat as revision 0.
+  }
+  return 0;
+}
+
+async function bumpWorkerWatermark(env: Env, revision: number): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
+     WHERE CAST(excluded.value_json AS INTEGER) > CAST(settings.value_json AS INTEGER)`,
+  ).bind(SYNC_WATERMARK_KEY, JSON.stringify(revision), Date.now()).run();
+}
+
 const ALLOWED_STORES = new Set([
   'products', 'customers', 'suppliers', 'sales', 'purchases', 'expenses',
   'notifications', 'auditLogs', 'stockMovements', 'pricingHistory', 'settings',
@@ -188,7 +218,6 @@ function publicUser(user: AppUserRow) {
 }
 
 const schemaReady = new WeakSet<D1Database>();
-let relationalBackfilled = false;
 
 /**
  * Row-read guard. `schemaReady` is per-isolate, so before this check every cold
@@ -214,20 +243,6 @@ async function ensureSchema(env: Env) {
     return;
   }
   const statements: D1PreparedStatement[] = [
-    env.DB.prepare(`CREATE TABLE IF NOT EXISTS app_documents (
-      owner_id TEXT NOT NULL,
-      collection TEXT NOT NULL,
-      document_id TEXT NOT NULL,
-      payload TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (owner_id, collection, document_id)
-    )`),
-    env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_app_documents_owner_collection ON app_documents (owner_id, collection)`),
-    env.DB.prepare(`CREATE TABLE IF NOT EXISTS sync_revisions (
-      owner_id TEXT PRIMARY KEY NOT NULL,
-      revision INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    )`),
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS app_users (
       id TEXT PRIMARY KEY NOT NULL,
       email TEXT NOT NULL UNIQUE,
@@ -294,57 +309,16 @@ async function ensureSchema(env: Env) {
   schemaReady.add(env.DB);
 }
 
-/** D1 only reports on tables it has; empty relational store + documents means we backfill once. */
-async function emptyRelational(env: Env): Promise<boolean> {
-  const row = await d1Get(env, 'SELECT (SELECT COUNT(*) FROM products) AS p, (SELECT COUNT(*) FROM sales) AS s');
-  return Number(row?.p || 0) === 0 && Number(row?.s || 0) === 0;
-}
-
 /**
- * Phase 4 bridge (edge) — when the relational tables are empty but legacy
- * app_documents rows exist (fresh database, or the pre-ETL prod D1), project the
- * documents once. The read is keyset-paginated (the old single query pulled
- * every document payload into isolate memory at once, which is unbounded on a
- * large legacy D1); the writes are chunked to stay inside D1 batch limits.
- * `relationalBackfilled` is a per-isolate cache of "this isolate already
- * checked", never proof that the bound database still holds rows: the read path
- * below still falls back to documents when a relational read comes back empty.
+ * 100% relational: the legacy `app_documents` -> relational backfill bridge and its
+ * `emptyRelational` probe are REMOVED. `idofera` carries no document mirror, so
+ * there is nothing to project. Kept as an explicit no-op for the snapshot response.
  */
 async function ensureRelationalBackfill(env: Env): Promise<{ documents: number; statements: number; skipped: number }> {
-  const none = { documents: 0, statements: 0, skipped: 0 };
-  if (relationalBackfilled) return none;
-  if (!(await emptyRelational(env))) {
-    relationalBackfilled = true;
-    return none;
-  }
-  const CHUNK = 500;
-  const select = 'SELECT owner_id, collection, document_id, payload, updated_at FROM app_documents';
-  const order = ' ORDER BY owner_id, collection, document_id LIMIT ?';
-  const after = ' WHERE (owner_id, collection, document_id) > (?, ?, ?)';
-  let documents = 0;
-  let statements = 0;
-  let skipped = 0;
-  let cursor: string[] | null = null;
-  for (;;) {
-    const rows = cursor
-      ? await env.DB.prepare(`${select}${after}${order}`).bind(...cursor, CHUNK)
-        .all<{ collection: string; document_id: string; payload: string; owner_id?: string; updated_at?: number }>()
-      : await env.DB.prepare(`${select}${order}`).bind(CHUNK)
-        .all<{ collection: string; document_id: string; payload: string; owner_id?: string; updated_at?: number }>();
-    const list = rows.results || [];
-    if (!list.length) break;
-    const { stmts, skipped: chunkSkipped } = backfillStatementsFromDocumentRows(list, new Date().toISOString());
-    await runStatements(env, toD1Statements(env, stmts));
-    documents += list.length;
-    statements += stmts.length;
-    skipped += chunkSkipped;
-    const last = list[list.length - 1];
-    cursor = [String(last.owner_id ?? ''), String(last.collection), String(last.document_id)];
-    if (list.length < CHUNK) break;
-  }
-  relationalBackfilled = true;
-  return { documents, statements, skipped };
+  return { documents: 0, statements: 0, skipped: 0 };
 }
+void ensureRelationalBackfill;
+
 
 async function seedUser(env: Env, user: { id: string; email: string; username: string; displayName: string; password: string; superAdmin: boolean }) {
   await ensureSchema(env);
@@ -365,18 +339,8 @@ async function ensureAuthSeed(env: Env) {
   if (admin) await seedUser(env, admin);
 }
 
-async function ensureBusinessDataOwner(env: Env) {
-  const current = await env.DB.prepare('SELECT 1 AS present FROM app_documents WHERE owner_id = ? LIMIT 1').bind(BUSINESS_OWNER_ID).all();
-  if (current.results?.length) return;
-  const legacy = await env.DB.prepare('SELECT owner_id FROM app_documents WHERE owner_id != ? GROUP BY owner_id ORDER BY COUNT(*) DESC LIMIT 1')
-    .bind(BUSINESS_OWNER_ID).all<{ owner_id: string }>();
-  const legacyOwner = legacy.results?.[0]?.owner_id;
-  if (!legacyOwner) return;
-  await env.DB.batch([
-    env.DB.prepare('INSERT OR IGNORE INTO app_documents (owner_id, collection, document_id, payload, updated_at) SELECT ?, collection, document_id, payload, updated_at FROM app_documents WHERE owner_id = ?').bind(BUSINESS_OWNER_ID, legacyOwner),
-    env.DB.prepare('INSERT OR IGNORE INTO sync_revisions (owner_id, revision, updated_at) SELECT ?, revision, updated_at FROM sync_revisions WHERE owner_id = ?').bind(BUSINESS_OWNER_ID, legacyOwner),
-  ]);
-}
+// 100% relational: the legacy document-store owner migration is REMOVED with the
+// document mirror. The relational store is owner-less and canonical.
 
 async function requireAppUser(request: Request, env: Env): Promise<AppUserRow | null> {
   const token = readCookie(request, SESSION_COOKIE);
@@ -560,7 +524,6 @@ async function requireSuperAdmin(request: Request, env: Env): Promise<{ actor: A
  */
 async function establishSession(user: AppUserRow, request: Request, env: Env, payload: Record<string, unknown>) {
   const session = await createSession(user.id, env);
-  await ensureBusinessDataOwner(env);
   const response = json({ ...payload, canSuperAdmin: await superAdminSession(request, env, user) });
   response.headers.set('cache-control', 'no-store');
   response.headers.set('set-cookie', sessionCookie(session.token, session.maxAge));
@@ -844,7 +807,6 @@ async function readJson(request: Request) {
 
 async function saveSnapshot(request: Request, env: Env) {
   await ensureSchema(env);
-  const ownerId = BUSINESS_OWNER_ID;
   const body = await readJson(request);
   if (!body?.stores || typeof body.stores !== 'object') return json({ error: 'A stores object is required.' }, 400);
   // Bound the restore before touching a single row: a runaway payload would
@@ -855,49 +817,26 @@ async function saveSnapshot(request: Request, env: Env) {
     return json({ error: `Snapshot exceeds the maximum of ${SNAPSHOT_PUSH_DOC_LIMIT} documents. Restore a bounded slice and sync the rest with record PATCHes.` }, 413);
   }
 
-  const revisionRows = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
-    .bind(ownerId).all<{ revision: number }>();
-  const currentRevision = Number(revisionRows.results?.[0]?.revision || 0);
+  const current = await currentWatermark(env);
   const expectedRevision = Number(body.expectedRevision || 0);
-  if (expectedRevision !== currentRevision) {
-    return json({ error: 'Snapshot revision conflict.', revision: currentRevision }, 409);
+  const isForce = Boolean(body.force) || expectedRevision === -1;
+  if (!isForce && expectedRevision !== current) {
+    return json({ error: 'Snapshot revision conflict.', revision: current }, 409);
   }
 
-  const now = Date.now();
-  const revision = Math.max(now, currentRevision + 1);
-  const nowIso = new Date(now).toISOString();
-  const statements: D1PreparedStatement[] = [];
+  const nowIso = new Date().toISOString();
   const relationalStmts: { sql: string; params: any[] }[] = [];
+  // 100% relational full replace: child-first DELETE + upsert per collection.
+  // No document mirror is written — there is nothing to mirror into.
   for (const [collection, documents] of Object.entries(body.stores)) {
     if (!ALLOWED_STORES.has(collection) || !Array.isArray(documents)) continue;
-    statements.push(env.DB.prepare('DELETE FROM app_documents WHERE owner_id = ? AND collection = ?').bind(ownerId, collection));
-    // Phase 4: mirror the same full-replace into relational tables.
     relationalStmts.push(...replaceCollectionStatements(collection, documents, nowIso));
-    for (const document of documents) {
-      if (!document || typeof document !== 'object') continue;
-      const documentId = String((document as Record<string, unknown>).id || 'singleton');
-      statements.push(
-        env.DB.prepare(
-          'INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at',
-        ).bind(ownerId, collection, documentId, JSON.stringify(document), now),
-      );
-    }
   }
-  statements.push(
-    env.DB.prepare(
-      'INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?) ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at',
-    ).bind(ownerId, revision, now),
-  );
 
   // The relational tables are what every read serves, so write them FIRST and
-  // refuse to move the revision if they fail. The old order wrote the document
-  // mirror and bumped the revision, then reported a relational failure as a
-  // non-fatal warning while answering ok:true — a client that restored a
-  // snapshot then re-read with the new revision would be told 304 and keep
-  // serving the pre-restore catalog.
+  // refuse to move the revision if they fail.
   try {
     await runStatements(env, toD1Statements(env, relationalStmts));
-    relationalBackfilled = true;
   } catch (error) {
     const relationalError = error instanceof Error ? error.message : String(error);
     console.warn('Relational snapshot write failed:', relationalError);
@@ -906,7 +845,8 @@ async function saveSnapshot(request: Request, env: Env) {
       relationalError,
     }, 500);
   }
-  await runStatements(env, statements);
+  const revision = Math.max(Date.now(), current + 1);
+  await bumpWorkerWatermark(env, revision);
   // A snapshot restore can replace every product; drop the catalog facet cache.
   invalidateMallFacetCache();
   return json({
@@ -958,66 +898,18 @@ function snapshotResponse(body: Record<string, unknown>, revision: number, backe
 
 async function readSnapshot(request: Request, env: Env) {
   await ensureSchema(env);
-  const ownerId = BUSINESS_OWNER_ID;
-  // Read the revision first so an unchanged store can short-circuit below.
-  const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
-    .bind(ownerId).all<{ revision: number }>();
-  const revision = Number(revisions.results?.[0]?.revision || 0);
-
-  // Option B: every read is a full snapshot. A legacy `?since=` watermark is
-  // ignored rather than answered with a partial store — the revision guard
-  // above still 304s unchanged stores, so the common case stays cheap.
-  // Phase 4: relational read path. Falls back to the document store when the
-  // relational tables are still empty (pre-ETL / fresh database).
-  try {
-    const backfill = await ensureRelationalBackfill(env);
-    if (relationalBackfilled) {
-      if (snapshotNotModified(request, revision, 'relational')) return snapshotUnchanged(revision, 'relational');
-      const { stores, capped } = await buildSnapshot(makeD1QueryAll(env));
-      // The flag is a cache, not proof: after a database reset (or against a
-      // different bound D1) it can be stale while the tables are empty. Answering
-      // with a blank catalog would look like data loss, so an empty relational read
-      // falls through to the document read below — the same fallback a pre-ETL
-      // database takes. `toStores` always emits a key per collection (usually as an
-      // empty array), so emptiness must be counted in rows, not in keys.
-      const relationalRows = Object.values(stores).reduce<number>(
-        (total, docs) => total + (Array.isArray(docs) ? docs.length : 0), 0);
-      if (relationalRows > 0) {
-        return snapshotResponse({
-          stores,
-          hasData: true,
-          revision,
-          backend: 'relational',
-          backfill: backfill.statements ? backfill : undefined,
-          ...(capped.length ? { bounds: { capped } } : {}),
-        }, revision, 'relational');
-      }
-    }
-  } catch (error) {
-    console.warn('Relational snapshot failed, serving documents:', error instanceof Error ? error.message : error);
-  }
-
-  // The document-store read is the most expensive query in the app; a matching
-  // validator skips it entirely.
-  if (snapshotNotModified(request, revision, 'documents')) return snapshotUnchanged(revision, 'documents');
-
-  const rows = await env.DB.prepare(
-    'SELECT collection, document_id, payload, updated_at FROM app_documents WHERE owner_id = ? ORDER BY collection, document_id',
-  ).bind(ownerId).all<{ collection: string; document_id: string; payload: string; updated_at: number }>();
-  const stores: Record<string, unknown[]> = {};
-  for (const row of rows.results || []) {
-    try {
-      (stores[row.collection] ||= []).push(JSON.parse(row.payload));
-    } catch {
-      // Ignore a malformed row without making the rest of the snapshot unreadable.
-    }
-  }
+  // 100% relational: the snapshot is built from the relational tables only. The
+  // legacy `app_documents` fallback is REMOVED — there is no document mirror.
+  const revision = await currentWatermark(env);
+  if (snapshotNotModified(request, revision, 'relational')) return snapshotUnchanged(revision, 'relational');
+  const { stores, capped } = await buildSnapshot(makeD1QueryAll(env));
   return snapshotResponse({
     stores,
-    hasData: Object.keys(stores).length > 0,
+    hasData: true,
     revision,
-    backend: 'documents',
-  }, revision, 'documents');
+    backend: 'relational',
+    ...(capped.length ? { bounds: { capped } } : {}),
+  }, revision, 'relational');
 }
 
 async function patchRecords(request: Request, env: Env) {
@@ -1055,16 +947,12 @@ async function patchRecords(request: Request, env: Env) {
     relationalStmts.push(...deleteToStatements(collection, documentId));
   }
 
-  const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
-    .bind(ownerId).all<{ revision: number }>();
-  const revision = Math.max(now, Number(revisions.results?.[0]?.revision || 0) + 1);
-  // Write the relational rows FIRST and only bump the revision when they are
-  // actually in place. Bumping first (the old order) meant a failed relational
-  // batch still answered ok:true with a moved revision: the client acked its
-  // keys and never retried, while the revision-guarded full read 304'd the
-  // pre-write world — the record was lost on every device. A failure now leaves
-  // the revision untouched and answers 5xx, so the client keeps its dirty keys
-  // and retries.
+  // Write the relational rows FIRST and only bump the watermark when they are
+  // actually in place. Bumping first meant a failed relational batch still
+  // answered ok:true with a moved revision: the client acked its keys and never
+  // retried, while the revision-guarded full read 304'd the pre-write world — the
+  // record was lost on every device. A failure now leaves the revision untouched
+  // and answers 5xx, so the client keeps its dirty keys and retries.
   try {
     await runStatements(env, toD1Statements(env, relationalStmts));
   } catch (error) {
@@ -1075,9 +963,8 @@ async function patchRecords(request: Request, env: Env) {
       relationalError,
     }, 500);
   }
-  await runStatements(env, [env.DB.prepare(
-    'INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?) ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at',
-  ).bind(ownerId, revision, now)]);
+  const revision = Math.max(now, (await currentWatermark(env)) + 1);
+  await bumpWorkerWatermark(env, revision);
   // Product writes change the catalog facet lists; drop the in-memory cache so
   // the next catalog request rebuilds the counts including this write.
   invalidateMallFacetCache();
@@ -1279,17 +1166,13 @@ export default {
       if (url.pathname === '/api/health') return json({ status: 'ok', app: 'IdoferaLabs API', timestamp: new Date().toISOString() });
       if (url.pathname === '/api/storage/d1/health') {
         await ensureSchema(env);
-        const ownerId = BUSINESS_OWNER_ID;
-        const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?').bind(ownerId).all<{ revision: number }>();
-        // Counting every document and five relational tables costs ~2,185 rows on
-        // each poll. Liveness only needs the revision, so the counts are opt-in
-        // (`?detail=1`) and used by the Settings panel rather than by every poll.
+        const revision = await currentWatermark(env);
+        // Counting five relational tables costs ~2,185 rows. Liveness only needs
+        // the revision, so the counts are opt-in (`?detail=1`) and used by the
+        // Settings panel rather than by every poll.
         const wantsDetail = new URL(request.url).searchParams.get('detail') === '1';
-        let totalDocuments: number | undefined;
         let relational: Record<string, unknown> | undefined;
         if (wantsDetail) {
-          const docCount = await env.DB.prepare('SELECT count(*) as count FROM app_documents WHERE owner_id = ?').bind(ownerId).all<{ count: number }>();
-          totalDocuments = Number(docCount.results?.[0]?.count || 0);
           try {
             const row = await d1Get(env, `SELECT
               (SELECT COUNT(*) FROM products) as products,
@@ -1313,8 +1196,8 @@ export default {
           connected: true,
           backend: 'relational',
           databaseId: env.D1_DATABASE_ID || 'unconfigured',
-          revision: Number(revisions.results?.[0]?.revision || 0),
-          totalDocuments,
+          revision,
+          totalDocuments: 0,
           relational,
           detail: wantsDetail,
           endpoint: 'Cloudflare D1 Edge Worker',

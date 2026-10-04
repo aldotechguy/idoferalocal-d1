@@ -59,6 +59,6 @@ async function main() {
   const outPath = path.join(process.cwd(), 'backups', 'idofera-relational-import.sql');
   fs.writeFileSync(outPath, out.join('\n'));
   console.log(`Wrote ${out.length} statements -> ${outPath}`);
-  console.log(`cats=${ctx.categoryByName.size} placeholders=${ctx.placeholderProducts} sales=${ctx.salesCount}/${ctx.saleItemsCount} errors=${ctx.errors.length}`);
+  console.log(`cats=${ctx.categoryByName.size} placeholders=${ctx.placeholderProducts} skippedClearance=${ctx.skippedClearance} sales=${ctx.salesCount}/${ctx.saleItemsCount} errors=${ctx.errors.length}`);
 }
 main().catch((e) => { console.error('dump fatal:', e); process.exit(1); });

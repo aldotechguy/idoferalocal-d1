@@ -1119,18 +1119,13 @@ test('legacy since= watermarks are ignored: the read stays one full snapshot', a
     VALUES ('delta-staff','delta@test.invalid','Manager','Administrator','Active','x','y','now')`).run();
   db.prepare('INSERT INTO app_sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)')
     .run(hash, 'delta-staff', Date.now(), Date.now() + 60000);
-  db.prepare('INSERT INTO sync_revisions(owner_id,revision,updated_at) VALUES (?,?,?)')
-    .run('idofera-business', 41, Date.now());
-  const oldAt = Date.parse('2026-01-01T00:00:00.000Z');
-  const newAt = Date.parse('2026-02-01T00:00:00.000Z');
-  const product = (id: string) => JSON.stringify({
-    id, sku: `SKU-${id.toUpperCase()}`, name: `Product ${id}`, category: 'Caps',
-    brand: 'Brand', unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 1,
-  });
-  db.prepare('INSERT INTO app_documents(owner_id,collection,document_id,payload,updated_at) VALUES (?,?,?,?,?)')
-    .run('idofera-business', 'products', 'old', product('old'), oldAt);
-  db.prepare('INSERT INTO app_documents(owner_id,collection,document_id,payload,updated_at) VALUES (?,?,?,?,?)')
-    .run('idofera-business', 'products', 'new', product('new'), newAt);
+  // 100% relational: seed the watermark in `settings` and the rows in `products`.
+  db.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES ('sync_watermark', ?, ?)`)
+    .run(JSON.stringify(41), Date.now());
+  const product = (id: string, at: string) => db.prepare(`INSERT INTO products(id,sku,name,category_name,brand,unit,status,retail_price_kobo,stock_qty,created_at,updated_at)
+    VALUES (?, ?, ?, 'Caps', 'Brand', 'pcs', 'Active', 10000, 1, ?, ?)`).run(id, `SKU-${id.toUpperCase()}`, `Product ${id}`, at, at);
+  product('old', '2026-01-01T00:00:00.000Z');
+  product('new', '2026-02-01T00:00:00.000Z');
   const cookie = { cookie: `idofera_session=${token}` };
   // Two different legacy watermarks must produce the identical full read:
   // rows older than the watermark are never sliced out anymore (Option B).
@@ -1152,7 +1147,7 @@ test('legacy since= watermarks are ignored: the read stays one full snapshot', a
   assert.equal(second.revision, first.revision, 'nor the revision');
 });
 
-test('PATCH re-push bumps the revision but never touches the document mirror', async (t) => {
+test('PATCH re-push bumps the watermark and writes only the relational row', async (t) => {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
   await worker.fetch(new Request('http://test/api/mall/health'), env);
@@ -1163,22 +1158,20 @@ test('PATCH re-push bumps the revision but never touches the document mirror', a
     VALUES ('delta-tie','delta-tie@test.invalid','Manager','Administrator','Active','x','y','now')`).run();
   db.prepare('INSERT INTO app_sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)')
     .run(hash, 'delta-tie', Date.now(), Date.now() + 60000);
-  db.prepare('INSERT INTO sync_revisions(owner_id,revision,updated_at) VALUES (?,?,?)')
-    .run('idofera-business', 42, Date.now());
-  // Rows sharing one millisecond both survive into the full read: there is no
+  // 100% relational: the watermark lives in `settings`; rows live in `products`.
+  db.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES ('sync_watermark', ?, ?)`)
+    .run(JSON.stringify(42), Date.now());
+  // Rows sharing one timestamp both survive into the full read: there is no
   // keyset cursor that could skip the tail of a same-millisecond page anymore.
-  const sharedAt = Date.parse('2026-03-01T00:00:00.000Z');
+  const sharedAt = '2026-03-01T00:00:00.000Z';
   for (const id of ['a-row', 'b-row']) {
-    const payload = JSON.stringify({
-      id, sku: `SKU-${id.toUpperCase()}`, name: `Product ${id}`, category: 'Caps',
-      brand: 'Brand', unit: 'pcs', status: 'Active', retailPrice: 100, currentStock: 1,
-    });
-    db.prepare('INSERT INTO app_documents(owner_id,collection,document_id,payload,updated_at) VALUES (?,?,?,?,?)')
-      .run('idofera-business', 'products', id, payload, sharedAt);
+    db.prepare(`INSERT INTO products(id,sku,name,category_name,brand,unit,status,retail_price_kobo,stock_qty,created_at,updated_at)
+      VALUES (?, ?, ?, 'Caps', 'Brand', 'pcs', 'Active', 10000, 1, ?, ?)`)
+      .run(id, `SKU-${id.toUpperCase()}`, `Product ${id}`, sharedAt, sharedAt);
   }
   const cookie = { cookie: `idofera_session=${token}` };
   const full = await worker.fetch(new Request(
-    `http://test/api/storage/snapshot?since=${encodeURIComponent(JSON.stringify({ ms: sharedAt, collection: 'products', documentId: 'a-row' }))}`,
+    `http://test/api/storage/snapshot?since=${encodeURIComponent(JSON.stringify({ ms: Date.parse(sharedAt), collection: 'products', documentId: 'a-row' }))}`,
     { headers: cookie },
   ), env);
   assert.equal(full.status, 200);
@@ -1190,8 +1183,8 @@ test('PATCH re-push bumps the revision but never touches the document mirror', a
     'a legacy composite watermark cannot slice rows out of the read',
   );
 
-  // Option B (mirror-less PATCH): a re-push writes the relational row again
-  // (idempotent) and bumps the revision, but never touches the document store.
+  // PATCH writes the relational row again (idempotent) and bumps the watermark;
+  // there is no document store to touch.
   const unchanged = await worker.fetch(new Request('http://test/api/storage/records', {
     method: 'PATCH',
     headers: { ...cookie, 'content-type': 'application/json' },
@@ -1208,12 +1201,13 @@ test('PATCH re-push bumps the revision but never touches the document mirror', a
   const unchangedBody = await unchanged.json() as any;
   assert.equal(unchangedBody.skippedUnchanged, 0);
   assert.equal(unchangedBody.upserted, 1);
-  assert.ok(unchangedBody.revision > 42, 'a written batch bumps the revision even without a mirror write');
-  assert.equal(db.prepare('SELECT updated_at AS u FROM app_documents WHERE document_id = ?').get('b-row')?.u, sharedAt,
-    'PATCHes must never write the document mirror; only snapshot PUTs do');
+  assert.ok(unchangedBody.revision > 42, 'a written batch bumps the watermark');
+  // The relational row is authoritative: the PATCH updated the catalogue row.
+  assert.equal((db.prepare('SELECT name FROM products WHERE id = ?').get('b-row') as any)?.name, 'B row',
+    'PATCHes write the relational catalogue row');
 });
 
-test('incremental mirror keeps orphans out without rewriting unchanged lines', async (t) => {
+test('incremental relational upsert keeps orphans out without rewriting unchanged lines', async (t) => {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
   await worker.fetch(new Request('http://test/api/mall/health'), env);
@@ -1224,8 +1218,8 @@ test('incremental mirror keeps orphans out without rewriting unchanged lines', a
     VALUES ('lines-staff','lines@test.invalid','Manager','Administrator','Active','x','y','now')`).run();
   db.prepare('INSERT INTO app_sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)')
     .run(hash, 'lines-staff', Date.now(), Date.now() + 60000);
-  db.prepare('INSERT INTO sync_revisions(owner_id,revision,updated_at) VALUES (?,?,?)')
-    .run('idofera-business', 43, Date.now());
+  db.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES ('sync_watermark', ?, ?)`)
+    .run(JSON.stringify(43), Date.now());
   const cookie = { cookie: `idofera_session=${token}` };
   const sale = (items: { productId: string; quantity: number }[]) => ({
     id: 'sale-lines', invoiceNo: 'INV-LINES', totalAmount: 100,
@@ -1763,7 +1757,7 @@ test('oversized snapshot pushes are rejected before any write', async (t) => {
     body: JSON.stringify({ stores: { products: documents }, expectedRevision: 0 }),
   }), env);
   assert.equal(oversized.status, 413);
-  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM app_documents').get() as any).n, 0,
+  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM products').get() as any).n, 0,
     'the bound must reject the push before a single row is written');
 
   // A bounded restore still succeeds right after the rejection.

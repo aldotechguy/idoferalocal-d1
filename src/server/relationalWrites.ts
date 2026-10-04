@@ -1,5 +1,6 @@
 /** Phase 4 — write router part 2: finance + ops + misc collections. */
 import { s, expenseToRow, stockMovementToRow, pricingToRow, moneyToRow, unwrapSettings } from './relationalMapper.js';
+import { isClearanceItem } from '../shared/productStatus.js';
 import { coreUpsert, coreDelete } from './relationalWritesCore.js';
 import type { SqlStmt } from './relationalWritesCore.js';
 import type { QueryAll } from './relationalMapper.js';
@@ -150,10 +151,18 @@ export function backfillStatementsFromDocumentRows(
     'stockMovements', 'pricingHistory', 'moneyMovements', 'deliveryOrders',
     'whatsAppPreOrders', 'notifications', 'auditLogs', 'heldOrders', 'settings',
   ];
-  const productIds = new Set<string>((byCollection.get('products') || []).map((d: any) => s(d.id)));
+  const productIds = new Set<string>(
+    (byCollection.get('products') || [])
+      .filter((d: any) => !isClearanceItem({ productId: s(d.id), sku: d.sku, isClearance: d.isClearance }))
+      .map((d: any) => s(d.id)),
+  );
   const stmts: SqlStmt[] = [];
-  const placeholder = (pid: string, pname: string) => {
+  const placeholder = (pid: string, pname: string, item?: any) => {
     if (!pid || productIds.has(pid)) return;
+    // Clearance / non-inventory lines never become catalogue products (parity with
+    // the ETL and the runtime mapper); their line item keeps product_name/sku and a
+    // NULL product_id instead.
+    if (isClearanceItem({ productId: pid, sku: item?.sku, isClearance: item?.isClearance })) return;
     productIds.add(pid);
     stmts.push({
       sql: `INSERT INTO products (id, sku, name, category_name, stock_qty, created_at, updated_at) VALUES (?, ?, ?, 'Uncategorized', 0, ?, ?) ON CONFLICT(id) DO NOTHING;`,
@@ -161,7 +170,12 @@ export function backfillStatementsFromDocumentRows(
     });
   };
   const emit = (collection: string, documents: any[]) => {
-    for (const document of documents) stmts.push(...upsertToStatements(collection, document, nowIso));
+    for (const document of documents) {
+      // Drop any clearance item that leaked into the products collection so the
+      // catalogue matches the ETL byte-for-byte.
+      if (collection === 'products' && isClearanceItem({ productId: s(document.id), sku: document.sku, isClearance: document.isClearance })) continue;
+      stmts.push(...upsertToStatements(collection, document, nowIso));
+    }
   };
   for (const collection of ordered) emit(collection, byCollection.get(collection) || []);
   for (const [collection, documents] of byCollection) {
@@ -169,7 +183,7 @@ export function backfillStatementsFromDocumentRows(
   }
   for (const collection of ['sales', 'purchases']) {
     for (const d of byCollection.get(collection) || []) {
-      for (const it of Array.isArray(d.items) ? d.items : []) placeholder(s(it?.productId), s(it?.productName));
+      for (const it of Array.isArray(d.items) ? d.items : []) placeholder(s(it?.productId), s(it?.productName), it);
     }
   }
   return { stmts, skipped, collapsed };

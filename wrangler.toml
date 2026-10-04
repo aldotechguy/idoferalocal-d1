@@ -31,6 +31,12 @@ binding = "DB"
 database_name = "idofera-d1"
 database_id = "3e95a550-a091-490b-819d-f0acb7ea8dd8"
 
+# NOTE (2026-10-04): `idofera-d1` was the legacy document-store canon. The canon
+# was migrated into the relational D1 `idofera` (`[env.mall]` below), which is now
+# the single source of truth. This default binding is kept only as a frozen
+# read-only rollback target — do NOT write the canon back to it. See
+# docs/05-canon-migration.md.
+
 # Live Mall target: shortened public name, backed by relational D1 `idofera`.
 # Usage: `npx wrangler dev --env mall` / `npx wrangler deploy --env mall`
 [env.mall]

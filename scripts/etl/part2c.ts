@@ -4,6 +4,7 @@ import type { DocRow, Stmt } from './lib.js';
 import type { Ctx } from './ctx.js';
 import { parsePayload } from './ctx.js';
 import { placeholder } from './part2b.js';
+import { isClearanceItem } from '../../src/shared/productStatus.js';
 
 export function loadSales(byCol: Map<string, DocRow[]>, stmts: Stmt[], ctx: Ctx) {
   // Dedup receipts: prod has duplicate invoiceNo across DISTINCT sale ids
@@ -25,11 +26,11 @@ export function loadSales(byCol: Map<string, DocRow[]>, stmts: Stmt[], ctx: Ctx)
       params: [id, str(s.invoiceNo || id), s.customerId ? str(s.customerId) : null, str(s.customerName), str(s.type, 'Retail'), toKobo(s.subtotal), toKobo(s.discount), toKobo(s.tax), toKobo(s.deliveryFee), toKobo(s.totalAmount), toKobo(s.paidAmount), str(s.paymentMethod, 'Cash'), s.paymentBreakdown ? JSON.stringify(s.paymentBreakdown) : null, str(s.status, 'Completed'), s.notes ? str(s.notes) : null, str(s.createdBy), s.orderTakenBy ? str(s.orderTakenBy) : null, bool01(s.isHistorical), s.expenseId ? str(s.expenseId) : null, str(s.createdAt, nowIso())],
     });
     (Array.isArray(s.items) ? s.items : []).forEach((it: any, i: number) => {
-      placeholder(stmts, ctx, str(it.productId), str(it.productName));
+      placeholder(stmts, ctx, str(it.productId), str(it.productName), it);
       ctx.saleItemsCount++;
       stmts.push({
         sql: `INSERT INTO sale_items (id, sale_id, product_id, product_name, sku, qty, unit_price_kobo, cost_price_kobo, total_kobo, is_wholesale, is_clearance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET qty=excluded.qty;`,
-        params: [`${id}-item-${i}`, id, str(it.productId) || null, str(it.productName), str(it.sku), num(it.quantity), toKobo(it.unitPrice), toKobo(it.costPrice), toKobo(it.total), bool01(it.isWholesale), bool01(it.isClearance)],
+        params: [`${id}-item-${i}`, id, isClearanceItem(it) || !str(it.productId) ? null : str(it.productId), str(it.productName), str(it.sku), num(it.quantity), toKobo(it.unitPrice), toKobo(it.costPrice), toKobo(it.total), bool01(it.isWholesale), bool01(isClearanceItem(it))],
       });
     });
   }

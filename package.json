@@ -24,6 +24,11 @@
     "ddl:gen": "tsx scripts/etl/gen-ddl.ts",
     "etl:dump": "tsx scripts/etl/dump.ts",
     "etl:run": "tsx scripts/etl/run.ts",
+    "etl:inspect-clearance": "tsx scripts/etl/inspect-clearance.ts",
+    "etl:verify-canon": "tsx scripts/etl/verify-canon-import.ts",
+    "etl:export-d1": "tsx scripts/etl/export-d1.ts",
+    "canon:wipe": "tsx scripts/etl/wipe-target.ts",
+    "canon:move": "tsx scripts/etl/move-canon.ts",
     "verify:relational": "tsx scripts/verify-relational.ts",
     "verify:writes": "tsx scripts/verify-relational-writes.ts",
     "verify": "tsx scripts/verify-relational.ts && tsx scripts/verify-relational-writes.ts"

@@ -5,7 +5,6 @@
  * Used by server.ts (node:sqlite) AND sites-worker.ts (Cloudflare D1).
  */
 export const RELATIONAL_DDL: string[] = [
-  "CREATE TABLE IF NOT EXISTS app_documents ( owner_id text NOT NULL, collection text NOT NULL, document_id text NOT NULL, payload text NOT NULL, updated_at integer NOT NULL, PRIMARY KEY(owner_id, collection, document_id) );",
   "CREATE TABLE IF NOT EXISTS app_sessions ( token_hash text PRIMARY KEY NOT NULL, user_id text NOT NULL, created_at integer NOT NULL, expires_at integer NOT NULL );",
   "CREATE TABLE IF NOT EXISTS audit_logs ( id text PRIMARY KEY NOT NULL, actor_id text DEFAULT '' NOT NULL, action text NOT NULL, entity text NOT NULL, entity_id text, details text DEFAULT '' NOT NULL, created_at text NOT NULL );",
   "CREATE TABLE IF NOT EXISTS categories ( id text PRIMARY KEY NOT NULL, name text NOT NULL, slug text NOT NULL, parent_id text, image_url text );",
@@ -32,14 +31,12 @@ export const RELATIONAL_DDL: string[] = [
   "CREATE TABLE IF NOT EXISTS settings ( key text PRIMARY KEY NOT NULL, value_json text NOT NULL, updated_at integer NOT NULL );",
   "CREATE TABLE IF NOT EXISTS stock_movements ( id text PRIMARY KEY NOT NULL, product_id text, product_name text DEFAULT '' NOT NULL, type text NOT NULL, qty integer DEFAULT 0 NOT NULL, prev_stock integer DEFAULT 0 NOT NULL, new_stock integer DEFAULT 0 NOT NULL, ref_id text, notes text, performed_by text DEFAULT '' NOT NULL, created_at text NOT NULL );",
   "CREATE TABLE IF NOT EXISTS suppliers ( id text PRIMARY KEY NOT NULL, name text NOT NULL, contact_person text DEFAULT '' NOT NULL, email text DEFAULT '' NOT NULL, phone text DEFAULT '' NOT NULL, address text, payment_terms text DEFAULT 'Due on Receipt' NOT NULL, products_count integer DEFAULT 0 NOT NULL, opening_balance_kobo integer DEFAULT 0 NOT NULL, outstanding_balance_kobo integer DEFAULT 0 NOT NULL, created_at text NOT NULL );",
-  "CREATE TABLE IF NOT EXISTS sync_revisions ( owner_id text PRIMARY KEY NOT NULL, revision integer NOT NULL, updated_at integer NOT NULL );",
   "CREATE TABLE IF NOT EXISTS users ( id text PRIMARY KEY NOT NULL, email text NOT NULL, username text, display_name text NOT NULL, role text NOT NULL, status text DEFAULT 'Active' NOT NULL, avatar_url text, password_hash text NOT NULL, password_salt text NOT NULL, password_iterations integer DEFAULT 100000 NOT NULL, is_super_admin integer DEFAULT 0 NOT NULL, is_protected integer DEFAULT 0 NOT NULL, created_at text NOT NULL, last_login text, password_last_changed text );",
   "CREATE TABLE IF NOT EXISTS whatsapp_preorders ( id text PRIMARY KEY NOT NULL, preorder_no text NOT NULL, customer_id text, customer_name text DEFAULT '' NOT NULL, customer_phone text DEFAULT '' NOT NULL, delivery_address text, notes text, items_json text DEFAULT '[]' NOT NULL, subtotal_kobo integer DEFAULT 0 NOT NULL, discount_kobo integer DEFAULT 0 NOT NULL, delivery_fee_kobo integer DEFAULT 0 NOT NULL, deposit_kobo integer DEFAULT 0 NOT NULL, total_kobo integer DEFAULT 0 NOT NULL, status text DEFAULT 'Pending Review' NOT NULL, converted_sale_id text, created_by text DEFAULT '' NOT NULL, created_at text NOT NULL, updated_at text );"
 ];
 
 /** Indexes (idempotent form) — applied after the tables exist. */
 export const RELATIONAL_INDEXES: string[] = [
-  "CREATE INDEX IF NOT EXISTS idx_app_documents_owner_collection ON app_documents (owner_id,collection);",
   "CREATE INDEX IF NOT EXISTS idx_app_sessions_user_expiry ON app_sessions (user_id,expires_at);",
   "CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs (created_at);",
   "CREATE UNIQUE INDEX IF NOT EXISTS categories_slug_unique ON categories (slug);",

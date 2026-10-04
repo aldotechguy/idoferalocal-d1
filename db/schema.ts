@@ -1,19 +1,10 @@
 import {index, integer, primaryKey, sqliteTable, text} from 'drizzle-orm/sqlite-core';
 
-export const appDocuments = sqliteTable(
-  'app_documents',
-  {
-    ownerId: text('owner_id').notNull(),
-    collection: text('collection').notNull(),
-    documentId: text('document_id').notNull(),
-    payload: text('payload').notNull(),
-    updatedAt: integer('updated_at').notNull(),
-  },
-  (table) => [
-    primaryKey({columns: [table.ownerId, table.collection, table.documentId]}),
-    index('idx_app_documents_owner_collection').on(table.ownerId, table.collection),
-  ],
-);
+// NOTE (100% relational): `app_documents` and `sync_revisions` were REMOVED from the
+// schema. `idofera` is the canonical relational store; the legacy JSON document
+// mirror is gone, and the sync revision is now derived from the relational store
+// (see src/server/syncWatermark.ts, persisted in `settings` under `sync_watermark`).
+// Do NOT re-add these tables — bootstrap no longer creates them and nothing reads them.
 
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
@@ -64,11 +55,6 @@ export const suppliers = sqliteTable('suppliers', {
   openingBalanceKobo: integer('opening_balance_kobo').notNull().default(0),
   outstandingBalanceKobo: integer('outstanding_balance_kobo').notNull().default(0),
   createdAt: text('created_at').notNull(),
-});
-export const syncRevisions = sqliteTable('sync_revisions', {
-  ownerId: text('owner_id').primaryKey(),
-  revision: integer('revision').notNull(),
-  updatedAt: integer('updated_at').notNull(),
 });
 
 export const products = sqliteTable(

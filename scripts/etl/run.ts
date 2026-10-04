@@ -33,8 +33,8 @@ async function main() {
   loadFinance(byCol, stmts, ctx);
   loadOps(byCol, stmts, ctx);
   const skipped = (byCol.get('test_coll') || []).length;
-  console.log(`categories=${ctx.categoryByName.size} products=${byCol.get('products')?.length || 0} strippedImages=${ctx.strippedImages} placeholders=${ctx.placeholderProducts} sales=${ctx.salesCount}/${ctx.saleItemsCount} totalKobo=${ctx.salesTotalKobo} skipped=${skipped} errors=${ctx.errors.length} stmts=${stmts.length}`);
-  fs.writeFileSync(path.join(process.cwd(), 'backups', 'etl-report.json'), JSON.stringify({ at: new Date().toISOString(), docs: docs.length, stmts: stmts.length, cats: ctx.categoryByName.size, products: byCol.get('products')?.length || 0, strippedImages: ctx.strippedImages, placeholders: ctx.placeholderProducts, sales: ctx.salesCount, saleItems: ctx.saleItemsCount, salesTotalKobo: ctx.salesTotalKobo, skipped, errors: ctx.errors }, null, 2));
+  console.log(`categories=${ctx.categoryByName.size} products=${byCol.get('products')?.length || 0} strippedImages=${ctx.strippedImages} placeholders=${ctx.placeholderProducts} skippedClearance=${ctx.skippedClearance} sales=${ctx.salesCount}/${ctx.saleItemsCount} totalKobo=${ctx.salesTotalKobo} skipped=${skipped} errors=${ctx.errors.length} stmts=${stmts.length}`);
+  fs.writeFileSync(path.join(process.cwd(), 'backups', 'etl-report.json'), JSON.stringify({ at: new Date().toISOString(), docs: docs.length, stmts: stmts.length, cats: ctx.categoryByName.size, products: byCol.get('products')?.length || 0, strippedImages: ctx.strippedImages, placeholders: ctx.placeholderProducts, skippedClearance: ctx.skippedClearance, sales: ctx.salesCount, saleItems: ctx.saleItemsCount, salesTotalKobo: ctx.salesTotalKobo, skipped, errors: ctx.errors }, null, 2));
   if (DRY_RUN) { console.log('DRY RUN ok — no writes.'); return; }
   let done = 0;
   for (let i = 0; i < stmts.length; i += 25) {

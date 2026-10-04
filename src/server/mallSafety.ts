@@ -9,10 +9,8 @@ export const MALL_SAFETY_DDL = [
   `CREATE INDEX IF NOT EXISTS idx_mall_checkout_session_order ON mall_checkout_attempts (session_id, order_id)`,
   `CREATE INDEX IF NOT EXISTS idx_mall_order_items_order_product ON mall_order_items (mall_order_id, product_id)`,
   `CREATE INDEX IF NOT EXISTS idx_payments_order_status ON payments (order_id, status)`,
-  // Sync-mirror write path (sites-worker PATCH + Node PATCH): bounds the delta
-  // read to rows written after a composite (updated_at, collection, document_id)
-  // watermark instead of scanning the whole document store per staff edit.
-  `CREATE INDEX IF NOT EXISTS idx_app_documents_owner_updated ON app_documents (owner_id, updated_at, collection, document_id)`,
+  // 100% relational: the `idx_app_documents_owner_updated` sync-mirror index is
+  // REMOVED with the document store. There is no `app_documents` table to index.
   // Stock-movement restock lookups: the newArrivals rail correlates
   // lastRestockSql against every product row; a covering index lets each
   // aggregate run entirely from the index without touching the table heap.
@@ -114,20 +112,24 @@ export function assertSql(condition: string, params: unknown[] = []): MallStmt[]
 /**
  * One statement that belongs in EVERY Mall write batch. Mall writes go
  * straight to the relational tables, but a staff workspace only re-reads
- * the store when `sync_revisions` moves: delta reads are bounded by the
- * app_documents watermark (which Mall writes never touch), and a guarded
- * snapshot GET answers 304 while the revision is unchanged. Without this
- * bump a settled Mall sale — and the stock it moved — stays invisible to
- * every client until an unrelated storage PATCH happens to bump the
- * revision. MAX() mirrors the storage paths' Math.max(now, current + 1):
- * a lagging clock can advance but never rewind the revision.
+ * the store when the sync revision moves: a guarded snapshot GET answers 304
+ * while the revision is unchanged. Without this bump a settled Mall sale — and
+ * the stock it moved — stays invisible to every client until an unrelated
+ * storage PATCH happens to bump the revision. MAX() mirrors the storage paths'
+ * Math.max(now, current + 1): a lagging clock can advance but never rewind the
+ * revision.
+ *
+ * 100% relational: the revision lives in the `settings` table under
+ * `key = 'sync_watermark'` (there is no `sync_revisions` table any more). The
+ * JSON integer compare keeps the bump monotonic exactly like the old MAX().
  */
 export function revisionBumpStatement(): MallStmt {
   const now = Date.now();
   return {
-    sql: `INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES ('idofera-business', ?, ?)
-      ON CONFLICT(owner_id) DO UPDATE SET revision = MAX(excluded.revision, sync_revisions.revision + 1), updated_at = excluded.updated_at`,
-    params: [now, now],
+    sql: `INSERT INTO settings (key, value_json, updated_at) VALUES ('sync_watermark', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
+      WHERE CAST(excluded.value_json AS INTEGER) > CAST(settings.value_json AS INTEGER)`,
+    params: [JSON.stringify(now), now],
   };
 }
 

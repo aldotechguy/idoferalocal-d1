@@ -1,4 +1,4 @@
-/** Phase 4c â€” verify relational layer maps rows identically to ETL. */
+/** Phase 4c — verify relational layer maps rows identically to ETL. */
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import { makeNodeAdapter, ensureRelationalSchemaNode } from '../src/server/nodeAdapter.js';
@@ -27,7 +27,7 @@ for (const d of docs) {
 }
 const ctx = newCtx();
 // Freeze the clock: ETL fallback timestamps (nowIso()) and the backfill's `now`
-// fallback must be byte-identical â€” wall-clock drift is not data drift.
+// fallback must be byte-identical — wall-clock drift is not data drift.
 const FIXED_TS = Date.parse('2026-09-15T00:00:00.000Z');
 const realDateNow = Date.now;
 Date.now = () => FIXED_TS;
@@ -51,7 +51,7 @@ const { stores: snap } = await buildSnapshot(tx.queryAll);
 const salesTotal = (snap.sales as any[]).reduce((a, x) => a + Number(x.totalAmount || 0), 0);
 console.log('snapshot collections:', Object.keys(snap).map((k) => `${k}=${(snap[k] as any[]).length}`).join(' '));
 console.log('sales total naira:', salesTotal, 'expected 1113680');
-console.log('products:', (snap.products as any[]).length, 'expected 117 (106 + 11 placeholders)');
+console.log('products:', (snap.products as any[]).length, 'expected 106 (117 minus 11 clearance excluded from the catalogue)');
 const p0 = (snap.products as any[])[0];
 console.log('sample product keys:', Object.keys(p0).sort().join(','));
 const s0 = (snap.sales as any[])[0];

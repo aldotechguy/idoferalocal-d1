@@ -5,13 +5,15 @@ export type Ctx = {
   categoryByName: Map<string, string>;
   productIds: Set<string>;
   placeholderProducts: number;
+  /** Clearance / non-inventory line items excluded from the catalogue. */
+  skippedClearance: number;
   strippedImages: number;
   salesTotalKobo: number;
   salesCount: number;
   saleItemsCount: number;
 };
 export function newCtx(): Ctx {
-  return { errors: [], categoryByName: new Map(), productIds: new Set(), placeholderProducts: 0, strippedImages: 0, salesTotalKobo: 0, salesCount: 0, saleItemsCount: 0 };
+  return { errors: [], categoryByName: new Map(), productIds: new Set(), placeholderProducts: 0, skippedClearance: 0, strippedImages: 0, salesTotalKobo: 0, salesCount: 0, saleItemsCount: 0 };
 }
 export function parsePayload(ctx: Ctx, d: DocRow): any {
   try { return JSON.parse(d.payload); }

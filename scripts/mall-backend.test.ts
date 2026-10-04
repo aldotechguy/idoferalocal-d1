@@ -121,8 +121,8 @@ test('staff payment creates one canonical sale without deducting stock twice', a
 
 test('every mall write batch bumps the sync revision', async () => {
   const { db, exec, session } = fixture();
-  const revision = () => Number((db.prepare(`SELECT revision FROM sync_revisions WHERE owner_id = 'idofera-business'`).get() as any)?.revision || 0);
-  assert.equal(revision(), 0, 'a fresh database starts with no revision row');
+  const revision = () => Number(JSON.parse(String((db.prepare(`SELECT value_json FROM settings WHERE key = 'sync_watermark'`).get() as any)?.value_json ?? '0')) || 0);
+  assert.equal(revision(), 0, 'a fresh database starts with no watermark row');
   await checkout(exec, session);
   const afterCheckout = revision();
   assert.ok(afterCheckout > 0, 'checkout bumps the revision (stock + stock_movements changed)');

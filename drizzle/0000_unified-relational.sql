@@ -1,13 +1,3 @@
-CREATE TABLE `app_documents` (
-	`owner_id` text NOT NULL,
-	`collection` text NOT NULL,
-	`document_id` text NOT NULL,
-	`payload` text NOT NULL,
-	`updated_at` integer NOT NULL,
-	PRIMARY KEY(`owner_id`, `collection`, `document_id`)
-);
---> statement-breakpoint
-CREATE INDEX `idx_app_documents_owner_collection` ON `app_documents` (`owner_id`,`collection`);--> statement-breakpoint
 CREATE TABLE `app_sessions` (
 	`token_hash` text PRIMARY KEY NOT NULL,
 	`user_id` text NOT NULL,
@@ -380,12 +370,6 @@ CREATE TABLE `suppliers` (
 	`opening_balance_kobo` integer DEFAULT 0 NOT NULL,
 	`outstanding_balance_kobo` integer DEFAULT 0 NOT NULL,
 	`created_at` text NOT NULL
-);
---> statement-breakpoint
-CREATE TABLE `sync_revisions` (
-	`owner_id` text PRIMARY KEY NOT NULL,
-	`revision` integer NOT NULL,
-	`updated_at` integer NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE `users` (

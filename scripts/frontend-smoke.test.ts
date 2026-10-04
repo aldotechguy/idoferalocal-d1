@@ -18,6 +18,7 @@ import { createStaffCartHold, STAFF_CART_HOLD_MS } from '../src/hooks/useStaffCa
 import { DatabaseSync } from 'node:sqlite';
 import { issueEntrance, hasEntrance, revokeEntrance, entranceCookie, isStaffPage, isPrivateApi } from '../src/server/staffEntrance.ts';
 import { issueStepUp, hasStepUp, STEP_UP_COOKIE } from '../src/server/stepUp.ts';
+import { ensureRelationalSchemaNode } from '../src/server/nodeAdapter.ts';
 
 function entranceFixture() {
   const db = new DatabaseSync(':memory:');
@@ -53,10 +54,9 @@ test('catalog visibility is independent of stock and archive survives normalizat
 test('visibility migration preserves quantities and archives and is idempotent', () => {
   const db = new DatabaseSync(':memory:');
   try {
-    db.exec("CREATE TABLE products (id TEXT, status TEXT, stock_qty INTEGER); CREATE TABLE app_documents (collection TEXT, payload TEXT);");
+    db.exec("CREATE TABLE products (id TEXT, status TEXT, stock_qty INTEGER);");
     for (const status of ['Active', 'Low Stock', 'Out of Stock', 'Archived']) {
       db.prepare('INSERT INTO products VALUES (?, ?, ?)').run(status, status, 0);
-      db.prepare('INSERT INTO app_documents VALUES (?, ?)').run('products', JSON.stringify({ status, currentStock: 0 }));
     }
     const sql = fs.readFileSync('scripts/migrations/normalize-product-visibility.sql', 'utf8');
     db.exec(sql);
@@ -64,7 +64,6 @@ test('visibility migration preserves quantities and archives and is idempotent',
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM products WHERE status = 'Active'").get()?.n, 3);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM products WHERE status = 'Archived'").get()?.n, 1);
     assert.equal(db.prepare('SELECT SUM(stock_qty) AS n FROM products').get()?.n, 0);
-    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM app_documents WHERE json_extract(payload, '$.status') = 'Active'").get()?.n, 3);
   } finally { db.close(); }
 });
 
@@ -796,12 +795,15 @@ test('the mall mirror layer stays deleted', () => {
   }
 });
 
-test('the edge falls back to documents when a stale relational flag meets empty tables', () => {
-  // `relationalBackfilled` is a per-isolate cache: after a database reset it can be
-  // true while the tables are empty, and an empty catalog must never be served.
+test('the edge serves the relational catalog and never falls back to documents', () => {
+  // 100% relational: the document fallback was removed with `app_documents`.
+  // The snapshot is built straight from the relational tables, and the source
+  // must not reference the document store at all.
   const workerSource = fs.readFileSync('sites-worker.ts', 'utf8');
-  assert.match(workerSource, /const relationalRows = Object\.values\(stores\)\.reduce<number>/);
-  assert.match(workerSource, /if \(relationalRows > 0\) \{/);
+  assert.doesNotMatch(workerSource, /FROM app_documents/);
+  assert.doesNotMatch(workerSource, /INTO sync_revisions/);
+  assert.match(workerSource, /async function currentWatermark\(env: Env\)/);
+  assert.match(workerSource, /await buildSnapshot\(makeD1QueryAll\(env\)\)/);
 });
 
 
@@ -833,24 +835,24 @@ test('unchanged store answers 304 and a stale token still returns the catalog', 
     VALUES ('staff','staff@test.invalid','Manager','Administrator','Active','x','y','now')`).run();
   db.prepare('INSERT INTO app_sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)')
     .run(hash, 'staff', Date.now(), Date.now() + 60000);
-  db.prepare('INSERT INTO sync_revisions(owner_id,revision,updated_at) VALUES (?,?,?)')
-    .run('idofera-business', 7, Date.now());
+  db.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES ('sync_watermark', ?, ?)`)
+    .run(JSON.stringify(7), Date.now());
   const cookie = { cookie: `idofera_session=${token}` };
 
   const first = await worker.fetch(new Request('https://test/api/storage/snapshot?fresh=true', { headers: cookie }), env);
   assert.equal(first.status, 200);
-  assert.equal(first.headers.get('etag'), '"7-documents"');
-  assert.equal((await first.json() as any).hasData, false);
+  assert.equal(first.headers.get('etag'), '"7-relational"');
+  assert.equal((await first.json() as any).hasData, true);
 
   const guarded = await worker.fetch(new Request('https://test/api/storage/snapshot?fresh=true', {
-    headers: { ...cookie, 'if-none-match': '"7-documents"' },
+    headers: { ...cookie, 'if-none-match': '"7-relational"' },
   }), env);
   assert.equal(guarded.status, 304);
-  assert.equal(guarded.headers.get('etag'), '"7-documents"');
+  assert.equal(guarded.headers.get('etag'), '"7-relational"');
   assert.equal(await guarded.text(), '');
 
   const stale = await worker.fetch(new Request('https://test/api/storage/snapshot?fresh=true', {
-    headers: { ...cookie, 'if-none-match': '"6-documents"' },
+    headers: { ...cookie, 'if-none-match': '"6-relational"' },
   }), env);
   assert.equal(stale.status, 200);
   assert.ok((await stale.json() as any).revision === 7);
@@ -1235,4 +1237,79 @@ test('readiness scoring reports the real check count and never claims health it 
   // A non-boolean must not score as a passing check: strict equality, not
   // truthiness, so a malformed payload degrades to Not Ready rather than Ready.
   assert.deepEqual(mallReadinessSummary({ a: 1, b: 'yes', c: true } as unknown as Record<string, boolean>), { ready: false, passing: 1, total: 3, label: 'Not Ready (1/3)' });
+});
+
+/**
+ * Canon invariants (docs/05-canon-migration.md). Guards the `idofera` canon
+ * against future ETL drift by dry-loading the generated relational import into an
+ * in-memory store and asserting the properties the cutover verified live:
+ *   - no clearance / non-inventory products in the catalogue,
+ *   - no orphan sale/purchase line items,
+ *   - no base64 images,
+ *   - a stable sales money total.
+ *
+ * Skips (does not fail) when the import artifact is absent, so a checkout without
+ * `backups/` still passes. Regenerate it with:
+ *   npx tsx scripts/etl/dump.ts --source=backups/<idofera-d1-export>.sql --full-refresh
+ */
+test('canon import holds the clearance / orphan / base64 / money invariants', () => {
+  const file = 'backups/idofera-relational-import.sql';
+  if (!fs.existsSync(file)) {
+    console.log(`skipped: ${file} not present (run etl:dump to generate it)`);
+    return;
+  }
+  const raw = fs.readFileSync(file, 'utf8');
+  // One statement per line, EXCEPT when a payload embeds a raw newline; track
+  // single-quote parity so a split statement is reassembled.
+  const statements: string[] = [];
+  let buf = '';
+  let inString = false;
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!buf && (trimmed.length === 0 || trimmed.startsWith('--'))) continue;
+    buf = buf ? `${buf}\n${line}` : line;
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] !== "'") continue;
+      if (inString && line[i + 1] === "'") { i++; continue; }
+      inString = !inString;
+    }
+    if (!inString) { const done = buf.trim(); if (done && !done.startsWith('--')) statements.push(done); buf = ''; }
+  }
+  if (buf.trim()) statements.push(buf.trim());
+
+  const db = new DatabaseSync(':memory:');
+  try {
+    ensureRelationalSchemaNode(db);
+    db.exec('BEGIN;');
+    for (const sql of statements) db.exec(sql);
+    db.exec('COMMIT;');
+
+    const one = (sql: string) => db.prepare(sql).get() as any;
+    const n = (sql: string) => Number(one(sql)?.n || 0);
+
+    assert.equal(
+      n("SELECT COUNT(*) AS n FROM products WHERE id LIKE 'clearance-%' OR UPPER(sku) = 'CLEARANCE'"),
+      0,
+      'clearance / non-inventory items must never be catalogue products',
+    );
+    assert.equal(
+      n('SELECT COUNT(*) AS n FROM sale_items WHERE product_id IS NOT NULL AND product_id != \'\' AND product_id NOT IN (SELECT id FROM products)'),
+      0,
+      'no orphan sale_items',
+    );
+    assert.equal(
+      n('SELECT COUNT(*) AS n FROM purchase_items WHERE product_id IS NOT NULL AND product_id != \'\' AND product_id NOT IN (SELECT id FROM products)'),
+      0,
+      'no orphan purchase_items',
+    );
+    assert.equal(
+      n('SELECT COUNT(*) AS n FROM products WHERE images_json LIKE \'%data:%\''),
+      0,
+      'base64 photos must never enter relational storage',
+    );
+    assert.ok(n('SELECT COUNT(*) AS n FROM sales') > 0, 'the canon carries sales');
+    assert.ok(n('SELECT COALESCE(SUM(total_kobo),0) AS n FROM sales') > 0, 'the canon carries a positive sales total');
+  } finally {
+    db.close();
+  }
 });

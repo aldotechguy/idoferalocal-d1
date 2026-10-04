@@ -91,10 +91,11 @@ function createDatabaseInstance(): DatabaseSync {
 
 let db = createDatabaseInstance();
 
-// Phase 4 â€” relational backend. Local node:sqlite now carries the SAME 30
-// tables as D1 `idofera` (DDL single-sourced from drizzle/0000_unified-relational.sql).
+// Phase 4 — relational backend (100% relational). Local node:sqlite carries the
+// SAME tables as D1 `idofera` (DDL single-sourced from drizzle/0000_unified-relational.sql).
 // The mapper translates rows <-> the unchanged frontend snapshot shape, so the
-// UI needs zero changes. Legacy app_documents tables are kept for rollback reads.
+// UI needs zero changes. The legacy `app_documents` JSON mirror is GONE: the store
+// is relational-only and the sync revision is derived via src/server/syncWatermark.ts.
 import { makeNodeAdapter } from "./src/server/nodeAdapter";
 import { ensureRelationalSchemaNode, makeNodeMallExecutor } from "./src/server/nodeAdapter";
 import { handleMallApi, invalidateMallFacetCache } from "./src/server/mallApi";
@@ -109,9 +110,8 @@ import {
   upsertToStatements,
   deleteToStatements,
   replaceCollectionStatements,
-  relationalHasData,
-  backfillStatementsFromDocumentRows,
 } from "./src/server/relationalWrites.js";
+import { currentRevision, bumpWatermark } from "./src/server/syncWatermark.js";
 const USE_RELATIONAL = process.env.VITE_USE_RELATIONAL !== "false";
 try {
   const created = ensureRelationalSchemaNode(db);
@@ -121,74 +121,19 @@ try {
 }
 
 /**
- * Phase 4 bridge â€” if the relational store is still empty but legacy documents
- * exist (first boot on a fresh machine, or a restored document store), project the
- * documents into relational tables once. Idempotent: no-op once rows exist.
+ * 100% relational: the legacy `app_documents` -> relational backfill bridge has been
+ * REMOVED. `idofera` (and the local node store) no longer carry a document mirror,
+ * so there is nothing to project. Kept as an explicit no-op so the snapshot response
+ * shape (`backfill`) stays stable for older clients.
  */
 async function ensureRelationalBackfill(): Promise<{ statements: number; documents: number; skipped: number }> {
-  const empty = { statements: 0, documents: 0, skipped: 0 };
-  if (!USE_RELATIONAL) return empty;
-  const tx = makeNodeAdapter(db);
-  if (await relationalHasData(tx.queryAll)) return empty;
-  // Keyset-paginated so the legacy bridge never pulls every document payload
-  // into memory at once (unbounded on a large restored document store).
-  const CHUNK = 500;
-  const select = "SELECT owner_id, collection, document_id, payload, updated_at FROM app_documents";
-  const order = " ORDER BY owner_id, collection, document_id LIMIT ?";
-  const after = " WHERE (owner_id, collection, document_id) > (?, ?, ?)";
-  let statements = 0;
-  let documents = 0;
-  let skipped = 0;
-  let cursor: string[] | null = null;
-  try {
-    for (;;) {
-      const list = cursor
-        ? (db.prepare(`${select}${after}${order}`).all(...cursor, CHUNK) as any[])
-        : (db.prepare(`${select}${order}`).all(CHUNK) as any[]);
-      if (!list.length) break;
-      const { stmts, skipped: chunkSkipped } = backfillStatementsFromDocumentRows(list, new Date().toISOString());
-      db.exec("BEGIN TRANSACTION;");
-      try {
-        for (const st of stmts) tx.run(st.sql, st.params);
-        db.exec("COMMIT;");
-      } catch (e) {
-        try { db.exec("ROLLBACK;"); } catch {}
-        throw e;
-      }
-      statements += stmts.length;
-      documents += list.length;
-      skipped += chunkSkipped;
-      const last = list[list.length - 1];
-      cursor = [String(last.owner_id ?? ""), String(last.collection), String(last.document_id)];
-      if (list.length < CHUNK) break;
-    }
-  } catch {
-    return empty;
-  }
-  if (!documents) return empty;
-  console.log(`Relational backfill: ${statements} statements from ${documents} documents (${skipped} skipped).`);
-  return { statements, documents, skipped };
+  return { statements: 0, documents: 0, skipped: 0 };
 }
 
 // Initialize schema with corruption protection
 function initSchema() {
   try {
     db.exec(`
-      CREATE TABLE IF NOT EXISTS app_documents (
-        owner_id TEXT NOT NULL,
-        collection TEXT NOT NULL,
-        document_id TEXT NOT NULL,
-        payload TEXT NOT NULL,
-        updated_at INTEGER NOT NULL,
-        PRIMARY KEY (owner_id, collection, document_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS sync_revisions (
-        owner_id TEXT PRIMARY KEY,
-        revision INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
-
       CREATE TABLE IF NOT EXISTS app_users (
         id TEXT PRIMARY KEY,
         email TEXT NOT NULL UNIQUE,
@@ -224,21 +169,6 @@ function initSchema() {
       db = new DatabaseSync(DB_PATH);
       db.exec("PRAGMA journal_mode = WAL;");
       db.exec(`
-        CREATE TABLE IF NOT EXISTS app_documents (
-          owner_id TEXT NOT NULL,
-          collection TEXT NOT NULL,
-          document_id TEXT NOT NULL,
-          payload TEXT NOT NULL,
-          updated_at INTEGER NOT NULL,
-          PRIMARY KEY (owner_id, collection, document_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS sync_revisions (
-          owner_id TEXT PRIMARY KEY,
-          revision INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS app_users (
           id TEXT PRIMARY KEY,
           email TEXT NOT NULL UNIQUE,
@@ -398,24 +328,10 @@ async function ensureAuthSeed() {
 // Initial seed
 ensureAuthSeed().catch(console.error);
 
-async function ensureBusinessDataOwner() {
-  const current = db.prepare("SELECT 1 AS present FROM app_documents WHERE owner_id = ? LIMIT 1").get(BUSINESS_OWNER_ID) as any;
-  if (current?.present) return;
-  const legacy = db.prepare("SELECT owner_id FROM app_documents WHERE owner_id != ? GROUP BY owner_id ORDER BY COUNT(*) DESC LIMIT 1").get(BUSINESS_OWNER_ID) as any;
-  const legacyOwner = legacy?.owner_id;
-  if (!legacyOwner) return;
-  // Parameterized: owner ids come from stored rows, and a single quote inside
-  // one would have broken (or worse, rewritten) the interpolated SQL.
-  db.prepare(`
-    INSERT OR IGNORE INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-    SELECT ?, collection, document_id, payload, updated_at FROM app_documents WHERE owner_id = ?
-  `).run(BUSINESS_OWNER_ID, legacyOwner);
-  db.prepare(`
-    INSERT OR IGNORE INTO sync_revisions (owner_id, revision, updated_at)
-    SELECT ?, revision, updated_at FROM sync_revisions WHERE owner_id = ?
-  `).run(BUSINESS_OWNER_ID, legacyOwner);
-}
-ensureBusinessDataOwner().catch(console.error);
+// 100% relational: the legacy document-store owner migration
+// (`app_documents`/`sync_revisions` copied into the `idofera-business` owner) has
+// been REMOVED with the document mirror. The relational store is owner-less and
+// canonical, so there is nothing to migrate.
 
 async function requireAppUser(req: Request): Promise<any | null> {
   const token = readCookie(req, SESSION_COOKIE);
@@ -1180,53 +1096,18 @@ app.get("/mall-images/*", async (req, res) => {
 
 app.get("/api/storage/snapshot", async (req, res) => {
   try {
-    const ownerId = BUSINESS_OWNER_ID;
-
-    // Phase 4: relational read path â€” rows -> frontend snapshot (same contract).
-    if (USE_RELATIONAL) {
-      try {
-        const backfill = await ensureRelationalBackfill();
-        const tx = makeNodeAdapter(db);
-        const { stores, capped } = await buildSnapshot(tx.queryAll);
-        const revRow = db.prepare("SELECT revision FROM sync_revisions WHERE owner_id = ?").get(ownerId) as any;
-        const revision = Number(revRow?.revision || 0);
-        return res.json({
-          stores,
-          hasData: Object.keys(stores).length > 0,
-          revision,
-          timestamp: new Date().toISOString(),
-          backend: "relational",
-          backfill: backfill.statements ? backfill : undefined,
-          ...(capped.length ? { bounds: { capped } } : {}),
-        });
-      } catch (relErr: any) {
-        console.warn("Relational snapshot failed, falling back to documents:", relErr?.message || relErr);
-      }
-    }
-
-    const rows = db.prepare(`
-      SELECT collection, document_id, payload, updated_at FROM app_documents
-      WHERE owner_id = ? ORDER BY collection, document_id
-    `).all(ownerId) as any[];
-
-    const stores: Record<string, any[]> = {};
-    for (const row of rows || []) {
-      try {
-        const parsed = JSON.parse(normalizeDocumentPayload(row.collection, row.payload));
-        (stores[row.collection] ||= []).push(parsed);
-      } catch {
-        // Skip invalid JSON row
-      }
-    }
-
-    const revRow = db.prepare("SELECT revision FROM sync_revisions WHERE owner_id = ?").get(ownerId) as any;
-    const revision = Number(revRow?.revision || 0);
-
+    // 100% relational: the snapshot is built from the relational tables only. The
+    // legacy `app_documents` fallback is REMOVED — there is no document mirror.
+    const tx = makeNodeAdapter(db);
+    const { stores, capped } = await buildSnapshot(tx.queryAll);
+    const revision = await currentRevision(tx);
     return res.json({
       stores,
       hasData: Object.keys(stores).length > 0,
       revision,
       timestamp: new Date().toISOString(),
+      backend: "relational",
+      ...(capped.length ? { bounds: { capped } } : {}),
     });
   } catch (error: any) {
     return res.status(500).json({ error: error.message || "Failed to read snapshot" });
@@ -1235,7 +1116,6 @@ app.get("/api/storage/snapshot", async (req, res) => {
 
 app.put("/api/storage/snapshot", async (req, res) => {
   try {
-    const ownerId = BUSINESS_OWNER_ID;
     const body = req.body;
     if (!body?.stores || typeof body.stores !== "object") {
       return res.status(400).json({ error: "A stores object is required." });
@@ -1248,76 +1128,47 @@ app.put("/api/storage/snapshot", async (req, res) => {
       return res.status(413).json({ error: `Snapshot exceeds the maximum of ${SNAPSHOT_PUSH_DOC_LIMIT} documents. Restore a bounded slice and sync the rest with record PATCHes.` });
     }
 
-    const revRow = db.prepare("SELECT revision FROM sync_revisions WHERE owner_id = ?").get(ownerId) as any;
-    const currentRevision = Number(revRow?.revision || 0);
+    const tx = makeNodeAdapter(db);
+    const current = await currentRevision(tx);
     const expectedRevision = Number(body.expectedRevision || 0);
     const isForce = Boolean(body.force) || expectedRevision === -1;
 
-    if (!isForce && expectedRevision !== currentRevision && currentRevision !== 0) {
-      return res.status(409).json({ error: "Snapshot revision conflict.", revision: currentRevision });
+    if (!isForce && expectedRevision !== current && current !== 0) {
+      return res.status(409).json({ error: "Snapshot revision conflict.", revision: current });
     }
 
-    const now = Date.now();
-    const revision = Math.max(now, currentRevision + 1);
-
-    const deleteStoreStmt = db.prepare("DELETE FROM app_documents WHERE owner_id = ? AND collection = ?");
-    const insertDocStmt = db.prepare(`
-      INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-        payload = excluded.payload, updated_at = excluded.updated_at
-    `);
-
-    // Phase 4: mirror the full-replace snapshot into relational tables (idofera).
+    // 100% relational full replace: child-first DELETE + upsert per collection.
+    // No document mirror is written — there is nothing to mirror into.
     const relStatements: { sql: string; params: any[] }[] = [];
-    const nowIso = new Date(now).toISOString();
-    const tx = makeNodeAdapter(db);
+    const nowIso = new Date().toISOString();
 
     db.exec("BEGIN TRANSACTION;");
     try {
       for (const [collection, documents] of Object.entries(body.stores)) {
         if (!ALLOWED_STORES.has(collection) || !Array.isArray(documents)) continue;
-        deleteStoreStmt.run(ownerId, collection);
-        if (USE_RELATIONAL) {
-          for (const st of replaceCollectionStatements(collection, documents, nowIso)) {
-            tx.run(st.sql, st.params);
-            relStatements.push(st);
-          }
-        }
-
-        for (const doc of documents) {
-          if (!doc || typeof doc !== "object") continue;
-          const documentId = String((doc as any).id || "singleton");
-          const payloadStr = JSON.stringify(doc);
-          insertDocStmt.run(ownerId, collection, documentId, payloadStr, now);
+        for (const st of replaceCollectionStatements(collection, documents, nowIso)) {
+          tx.run(st.sql, st.params);
+          relStatements.push(st);
         }
       }
-
-      const setRevStmt = db.prepare(`
-        INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?)
-        ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at
-      `);
-      setRevStmt.run(ownerId, revision, now);
-
       db.exec("COMMIT;");
     } catch (txErr) {
       db.exec("ROLLBACK;");
       throw txErr;
     }
 
+    // Advance the relational watermark so clients see a new revision.
+    const revision = await bumpWatermark(tx);
+
     // A snapshot restore can replace every product; drop the catalog facet cache.
     invalidateMallFacetCache();
 
-    // Cloudflare D1 is written by the deployed Worker, so a local restore only
-    // touches this runtime's own store.
     return res.json({
       ok: true,
       revision,
       collections: Object.keys(body.stores).filter((name) => ALLOWED_STORES.has(name)),
-      backend: USE_RELATIONAL ? "relational" : "documents",
+      backend: "relational",
       relationalStatements: relStatements.length,
-      // The relational rows commit inside the same transaction as the mirror, so a
-      // committed PUT is always relationally synced; a failure rolls back to a 500.
       relationalSynced: true,
     });
   } catch (error: any) {
@@ -1327,7 +1178,6 @@ app.put("/api/storage/snapshot", async (req, res) => {
 
 app.patch("/api/storage/records", async (req, res) => {
   try {
-    const ownerId = BUSINESS_OWNER_ID;
     const upserts = Array.isArray(req.body?.upserts) ? req.body.upserts : [];
     const deletes = Array.isArray(req.body?.deletes) ? req.body.deletes : [];
 
@@ -1335,42 +1185,19 @@ app.patch("/api/storage/records", async (req, res) => {
       return res.status(413).json({ error: "Too many records in one sync." });
     }
 
-    const now = Date.now();
     const nowIso = new Date().toISOString();
     const tx = makeNodeAdapter(db);
-    // Mirror-less PATCH (option B): when the relational backend owns the store
-    // (the default), a staff edit no longer rewrites its app_documents mirror
-    // row — snapshot PUTs keep the mirror current, so a PATCH pays only the
-    // relational rows it changes instead of a mirror rewrite per index entry.
-    // The legacy documents backend still owns its mirror, so the dual-write
-    // (local store + non-blocking D1 replication) stays enabled there.
-    const mirror = !USE_RELATIONAL;
+    // 100% relational: a PATCH writes ONLY the relational rows it changes. There is
+    // no `app_documents` mirror to keep in sync — the relational store is the store.
     const relStatements: { sql: string; params: any[] }[] = [];
-
-    const insertStmt = db.prepare(`
-      INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET
-        payload = excluded.payload, updated_at = excluded.updated_at
-    `);
-    const deleteStmt = db.prepare(`
-      DELETE FROM app_documents WHERE owner_id = ? AND collection = ? AND document_id = ?
-    `);
 
     for (const item of upserts) {
       const collection = String(item?.collection || "");
       const document = item?.document;
       if (!ALLOWED_STORES.has(collection) || !document || typeof document !== "object") continue;
-      const documentId = String(document.id || "singleton");
-      const payloadStr = JSON.stringify(document);
-      if (mirror) {
-        insertStmt.run(ownerId, collection, documentId, payloadStr, now);
-      }
-      if (USE_RELATIONAL) {
-        for (const st of upsertToStatements(collection, document, nowIso)) {
-          tx.run(st.sql, st.params);
-          relStatements.push(st);
-        }
+      for (const st of upsertToStatements(collection, document, nowIso)) {
+        tx.run(st.sql, st.params);
+        relStatements.push(st);
       }
     }
 
@@ -1378,14 +1205,9 @@ app.patch("/api/storage/records", async (req, res) => {
       const collection = String(item?.collection || "");
       const documentId = String(item?.documentId || "");
       if (!ALLOWED_STORES.has(collection) || !documentId) continue;
-      if (mirror) {
-        deleteStmt.run(ownerId, collection, documentId);
-      }
-      if (USE_RELATIONAL) {
-        for (const st of deleteToStatements(collection, documentId)) {
-          tx.run(st.sql, st.params);
-          relStatements.push(st);
-        }
+      for (const st of deleteToStatements(collection, documentId)) {
+        tx.run(st.sql, st.params);
+        relStatements.push(st);
       }
     }
 
@@ -1393,23 +1215,15 @@ app.patch("/api/storage/records", async (req, res) => {
     // so the next catalog request rebuilds the counts including this write.
     invalidateMallFacetCache();
 
-    const revRow = db.prepare("SELECT revision FROM sync_revisions WHERE owner_id = ?").get(ownerId) as any;
-    const currentRevision = Number(revRow?.revision || 0);
-    const revision = Math.max(now, currentRevision + 1);
+    // Advance the relational watermark so clients see a new revision.
+    const revision = await bumpWatermark(tx);
 
-    db.prepare(`
-      INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?)
-      ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at
-    `).run(ownerId, revision, now);
-
-    // Cloudflare D1 is written by the deployed Worker; this runtime only bumps
-    // its own revision for the local read path.
     return res.json({
       ok: true,
       revision,
       upserted: upserts.length,
       deleted: deletes.length,
-      backend: USE_RELATIONAL ? "relational" : "documents",
+      backend: "relational",
       relationalStatements: relStatements.length,
       // A relational write that throws here fails the whole PATCH, so reaching this
       // response means the live catalog rows are in place.
@@ -1429,43 +1243,41 @@ const NODE_D1_DATABASE_ID = process.env.CLOUDFLARE_D1_DATABASE_ID || "3e95a550-a
 app.get("/api/storage/d1/health", async (req, res) => {
   try {
     const start = Date.now();
-    const ownerId = BUSINESS_OWNER_ID;
-    const revRow = db.prepare("SELECT revision, updated_at FROM sync_revisions WHERE owner_id = ?").get(ownerId) as any;
-    const countRow = db.prepare("SELECT count(*) as total FROM app_documents WHERE owner_id = ?").get(ownerId) as any;
+    const tx = makeNodeAdapter(db);
 
+    // Relational-only health: no document counts. `totalDocuments` is retained
+    // (0) so older clients that read the field keep parsing the payload.
     let relational: any = null;
-    if (USE_RELATIONAL) {
-      try {
-        const tx = makeNodeAdapter(db);
-        const rows = await tx.queryAll(`SELECT
-          (SELECT COUNT(*) FROM products) as products,
-          (SELECT COUNT(*) FROM sales) as sales,
-          (SELECT COUNT(*) FROM customers) as customers,
-          (SELECT COUNT(*) FROM suppliers) as suppliers,
-          (SELECT COUNT(*) FROM sale_items) as sale_items`);
-        const row: any = rows?.[0] || {};
-        relational = {
-          tables: (await tx.queryAll("SELECT COUNT(*) as n FROM sqlite_master WHERE type='table'"))?.[0]?.n ?? null,
-          products: Number(row.products || 0),
-          sales: Number(row.sales || 0),
-          customers: Number(row.customers || 0),
-          suppliers: Number(row.suppliers || 0),
-          saleItems: Number(row.sale_items || 0),
-        };
-      } catch (e: any) {
-        relational = { error: e?.message || String(e) };
-      }
+    try {
+      const rows = await tx.queryAll(`SELECT
+        (SELECT COUNT(*) FROM products) as products,
+        (SELECT COUNT(*) FROM sales) as sales,
+        (SELECT COUNT(*) FROM customers) as customers,
+        (SELECT COUNT(*) FROM suppliers) as suppliers,
+        (SELECT COUNT(*) FROM sale_items) as sale_items`);
+      const row: any = rows?.[0] || {};
+      relational = {
+        tables: (await tx.queryAll("SELECT COUNT(*) as n FROM sqlite_master WHERE type='table'"))?.[0]?.n ?? null,
+        products: Number(row.products || 0),
+        sales: Number(row.sales || 0),
+        customers: Number(row.customers || 0),
+        suppliers: Number(row.suppliers || 0),
+        saleItems: Number(row.sale_items || 0),
+      };
+    } catch (e: any) {
+      relational = { error: e?.message || String(e) };
     }
 
+    const revision = await currentRevision(tx);
     const latencyMs = Date.now() - start;
 
     return res.json({
       status: "healthy",
       connected: true,
-      backend: USE_RELATIONAL ? "relational" : "documents",
+      backend: "relational",
       databaseId: NODE_D1_DATABASE_ID,
-      revision: Number(revRow?.revision || 0),
-      totalDocuments: Number(countRow?.total || 0),
+      revision,
+      totalDocuments: 0,
       relational,
       latencyMs,
       endpoint: "Cloudflare D1 Primary Edge",
@@ -1694,7 +1506,7 @@ app.post("/api/ai/business-assistant", async (req, res) => {
 
     if (!ai) {
       return res.json({
-        answer: `[IdoferaLabs AI Analysis]\n\nBased on your recent business data:\n- Today's Total Sales: â‚¦${businessContext?.todaySales || 0}\n- Active Low Stock Items: ${businessContext?.lowStockCount || 0}\n- Monthly Revenue: â‚¦${businessContext?.monthlyRevenue || 0}\n\n**Key Takeaway**: ${prompt.toLowerCase().includes("reorder") ? "We recommend immediate replenishment for items below minimum stock threshold to prevent lost revenue." : "Sales trends show consistent activity. Monitor top-performing categories to optimize inventory turnover."}`,
+        answer: `[IdoferaLabs AI Analysis]\n\nBased on your recent business data:\n- Today's Total Sales: ₦${businessContext?.todaySales || 0}\n- Active Low Stock Items: ${businessContext?.lowStockCount || 0}\n- Monthly Revenue: ₦${businessContext?.monthlyRevenue || 0}\n\n**Key Takeaway**: ${prompt.toLowerCase().includes("reorder") ? "We recommend immediate replenishment for items below minimum stock threshold to prevent lost revenue." : "Sales trends show consistent activity. Monitor top-performing categories to optimize inventory turnover."}`,
         source: "fallback",
       });
     }
@@ -1736,7 +1548,7 @@ app.post("/api/ai/pricing-assistant", async (req, res) => {
         suggestedDiscountPct: 5,
         projectedProfitMargin: margin,
         riskLevel: "Low",
-        explanation: `Based on a cost price of â‚¦${cost}, the suggested retail price (â‚¦${suggestedRetail}) maintains a healthy ${margin}% margin while remaining competitive in the current category market. The wholesale price (â‚¦${suggestedWholesale}) yields a stable 20% margin for volume orders.`,
+        explanation: `Based on a cost price of ₦${cost}, the suggested retail price (₦${suggestedRetail}) maintains a healthy ${margin}% margin while remaining competitive in the current category market. The wholesale price (₦${suggestedWholesale}) yields a stable 20% margin for volume orders.`,
         source: "fallback",
       });
     }
@@ -1788,7 +1600,7 @@ app.post("/api/ai/sales-forecasting", async (req, res) => {
         insights: [
           "Demand for packaging products is projected to rise 18% over the next 2 weeks.",
           "Stock levels for high-velocity SKUs require immediate purchase order dispatch.",
-          "Expected net cash inflow is projected at â‚¦142,000 after pending supplier commitments.",
+          "Expected net cash inflow is projected at ₦142,000 after pending supplier commitments.",
         ],
         source: "fallback",
       });
@@ -1902,16 +1714,10 @@ async function startServer() {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`IdoferaLabs Server running on http://0.0.0.0:${PORT}`);
 
-    // Asynchronously seed the business owner without blocking HTTP readiness.
     // The deployed Worker owns Cloudflare D1, so startup only prepares this
-    // runtime's own store.
-    (async () => {
-      try {
-        await ensureBusinessDataOwner();
-      } catch (seedErr: any) {
-        console.warn("Background startup seed warning:", seedErr?.message || seedErr);
-      }
+    // runtime's own store. (100% relational: no document owner migration runs.)
 
+    (async () => {
       if (process.env.MALL_SEED_HEROES === 'true') {
         const heroSeed = seedMallHeroes(db);
         if (heroSeed.warnings.length) {
