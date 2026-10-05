@@ -1,8 +1,28 @@
-name = "idofera-packaging"
+# ============================================================================
+# PRODUCTION IS `--env mall` (Worker `idomall`). ALWAYS pass --env mall.
+#
+# The top-level `name = "idofera-packaging"` below is NOT a deployable target:
+# that worker does not exist on this account, so a bare `wrangler deploy`
+# fails with API error 10007 "This Worker does not exist on your account".
+# Verified 2026-10-05.
+#
+#   npx wrangler deploy --env mall      # production
+#   npx wrangler deploy --env preview   # disposable, isolated D1/R2
+#
+# NOTE: this top-level block is still REQUIRED. Named environments inherit
+# `main`, `compatibility_date`, `compatibility_flags` and `observability` from
+# it -- none of the [env.*] sections redefine those. Deleting the block below
+# would break `wrangler deploy --env mall`; only `name`, `vars`, `triggers`,
+# `assets` and the r2/d1 bindings are genuinely dead, and they are kept
+# commented as such rather than removed, so the inherited base stays intact.
+# ============================================================================
+name = "idofera-packaging"  # NEVER DEPLOYED -- see the header above.
 main = "sites-worker.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
+# Dead: only meaningful for the never-deployed default env. [env.mall] and
+# [env.preview] each define their own complete [vars].
 # Display-only: the health endpoint reports which bound D1 database answered.
 [vars]
 D1_DATABASE_ID = "3e95a550-a091-490b-819d-f0acb7ea8dd8"
@@ -24,7 +44,7 @@ run_worker_first = true
 
 [[r2_buckets]]
 binding = "MALL_IMAGES"
-bucket_name = "idofera-mall-images"
+bucket_name = "idofera-mall-images"  # Dead: [env.mall] binds R2 `idomall`.
 
 [[d1_databases]]
 binding = "DB"
@@ -36,6 +56,11 @@ database_id = "3e95a550-a091-490b-819d-f0acb7ea8dd8"
 # the single source of truth. This default binding is kept only as a frozen
 # read-only rollback target — do NOT write the canon back to it. See
 # docs/05-canon-migration.md.
+#
+# As of 2026-10-05 there is NO deployed worker bound to this database (the
+# `idofera-packaging` script does not exist on the account), so it is a data
+# archive rather than a live rollback target: to roll back, repoint `--env mall`
+# at it in a reviewed change.
 
 # Live Mall target: shortened public name, backed by relational D1 `idofera`.
 # Usage: `npx wrangler dev --env mall` / `npx wrangler deploy --env mall`
