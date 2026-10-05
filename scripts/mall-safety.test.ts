@@ -393,6 +393,9 @@ for (const runtime of ['node', 'worker'] as const) {
     assert.equal((await f.op('mark-out-for-delivery')).status, 400);
     assert.equal((await f.op('mark-out-for-delivery', { courier: 'Test courier' })).status, 200);
     assert.equal(f.scalar('SELECT status FROM delivery_orders'), 'Out for Delivery');
+    assert.equal(f.scalar('SELECT is_pickup_confirmed FROM delivery_orders'), 1);
+    // Dispatch books the Logistics courier cost atomically, like store pickup confirmation.
+    assert.equal(f.scalar("SELECT amount_kobo FROM expenses WHERE category='Logistics'"), 150000);
     assert.throws(() => f.db.exec("UPDATE delivery_orders SET status='Delivered'"));
     assert.equal((await f.op('complete')).status, 200);
     assert.equal(f.scalar('SELECT status FROM delivery_orders'), 'Delivered');
@@ -400,6 +403,8 @@ for (const runtime of ['node', 'worker'] as const) {
     assert.equal((await f.op('refund', { reason: 'Return', returnStock: true, returnReference: 'GRN-TEST' })).status, 200);
     assert.equal(f.scalar('SELECT status FROM delivery_orders'), 'Cancelled');
     assert.ok(String(f.scalar('SELECT notes FROM delivery_orders')).includes('Returned'));
+    // The refunded delivery's Logistics expense is voided (kept for the audit trail).
+    assert.equal(f.scalar("SELECT amount_kobo FROM expenses WHERE category='Logistics'"), 0);
     assert.equal(f.scalar('SELECT receipt_reference FROM mall_returns'), 'GRN-TEST');
     assert.equal(f.scalar('SELECT stock_qty FROM products'), 10);
   });

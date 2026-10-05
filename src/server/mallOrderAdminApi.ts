@@ -380,8 +380,27 @@ async function transitionOrder(exec: MallExecutor, id: string, actor: StaffActor
     const delivery = deliveryData(row);
     const saleItems = items.map((item) => ({ productId: item.product_id, productName: item.product_name, sku: item.sku, quantity: n(item.qty), unitPrice: n(item.unit_price_kobo) / 100, costPrice: n(item.cost_price_kobo) / 100, total: n(item.total_kobo) / 100 }));
     stmts.push({
-      sql: `INSERT OR IGNORE INTO delivery_orders (id, delivery_no, sale_id, invoice_no, customer_id, customer_name, customer_phone, delivery_address, items_json, delivery_fee_kobo, status, is_pickup_confirmed, courier_notes, notes, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending Pickup', 0, NULL, ?, ?, ?, ?)`,
+      // is_pickup_confirmed=1 + the expense below: the Mall settles the courier
+      // cost itself at dispatch, so the store's confirmDeliveryPickup flow sees
+      // the row as already confirmed and cannot create a duplicate expense.
+      sql: `INSERT OR IGNORE INTO delivery_orders (id, delivery_no, sale_id, invoice_no, customer_id, customer_name, customer_phone, delivery_address, items_json, delivery_fee_kobo, status, is_pickup_confirmed, courier_notes, notes, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending Pickup', 1, NULL, ?, ?, ?, ?)`,
       params: [`del-${id}`, `DEL-${s(row.order_no).replace(/^MALL-/, '')}`, row.linked_sale_id, s(invoice[0]?.receipt_no), row.customer_id, row.customer_name, row.customer_phone, s(delivery.address), JSON.stringify(saleItems), row.delivery_fee_kobo, `Created from Mall order ${row.order_no}. ${s(delivery.note)}`, actor.displayName, at, at],
+    });
+    // Same Logistics expense the store books on pickup confirmation — booked in
+    // the same transaction as the dispatch so it can never be missing while the
+    // delivery row exists. Deterministic id lets the refund path void it exactly.
+    stmts.push({
+      sql: `INSERT OR IGNORE INTO expenses (id, title, category, amount_kobo, description, spent_by, payment_method, date, is_historical, sale_id, created_at) VALUES (?, ?, 'Logistics', ?, ?, ?, 'Cash', ?, 0, ?, ?)`,
+      params: [
+        `exp-mall-del-${id}`,
+        `Logistics Delivery Fee - DEL-${s(row.order_no).replace(/^MALL-/, '')} (${s(invoice[0]?.receipt_no)})`,
+        row.delivery_fee_kobo,
+        `Delivery fee expense auto-created on Mall dispatch for ${row.customer_name}. Order ${row.order_no}, Invoice ${s(invoice[0]?.receipt_no)}. Courier: ${body.courier.trim()}${s(delivery.address) ? '. Address: ' + s(delivery.address) : ''}`,
+        actor.displayName,
+        at.slice(0, 10),
+        row.linked_sale_id,
+        at,
+      ],
     });
   }
   if (action === 'mark-out-for-delivery') stmts.push({sql:"UPDATE delivery_orders SET status='Out for Delivery',courier_notes=?,updated_at=? WHERE sale_id=?",params:[body.courier.trim(),at,row.linked_sale_id]});
@@ -409,6 +428,9 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
   const stmts: MallStmt[] = [{ sql: `UPDATE mall_orders SET status = 'refunded' WHERE id = ?`, params: [id] }];
   stmts.push({sql:'INSERT INTO mall_returns(order_id,disposition,receipt_reference,reason,actor_id,created_at) VALUES (?,?,?,?,?,?)',params:[id,returnStock?'restocked':'not_restocked',s(body?.returnReference).trim().slice(0,120),reason,actor.id,at]});
   stmts.push({sql:"UPDATE delivery_orders SET status='Cancelled',updated_at=?,notes=COALESCE(notes,'') || ? WHERE sale_id=?",params:[at,` | Mall refund: ${reason}${returnStock ? ' | Returned' : ''}`,row.linked_sale_id]});
+  // Void the Logistics expense booked at dispatch (kept, not deleted, so the
+  // audit trail survives); annotate it with the refund reason.
+  stmts.push({sql:"UPDATE expenses SET amount_kobo = 0, description = COALESCE(description,'') || ? WHERE id = ?",params:[` | Voided on Mall refund: ${reason}`,`exp-mall-del-${id}`]});
   stmts.push({ sql: `UPDATE payments SET status = 'refunded', raw_json = ? WHERE order_id = ?`, params: [JSON.stringify({ orderNo: row.order_no, refundedBy: actor.displayName, refundedAt: at, reason, returnStock }), id] });
   // Parity with the client-side refundSale(). A Mall refund is a FULL refund, so it
   // has to settle the relational finance fields too: writing only `status` left

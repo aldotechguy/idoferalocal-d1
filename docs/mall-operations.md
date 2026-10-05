@@ -230,6 +230,28 @@ v11 rollout drops the v10 trigger before recreating it, and remaps existing rows
 (`In Transit` → `Out for Delivery`, `Returned` → `Cancelled` plus a returned-note)
 so historical Mall-created deliveries render correctly in the store UI.
 
+### Logistics expense cascade (courier cost)
+
+The store's Deliveries & Pickups books a Logistics expense when a pickup is
+confirmed; the Mall books the same expense at dispatch, inside the same atomic
+transaction that creates the delivery row and sets `Out for Delivery`:
+
+- Expense id is deterministic (`exp-mall-del-<order id>`), amount is the
+  checkout `delivery_fee_kobo`, category `Logistics`, `sale_id` linked. The
+  delivery row is created with `is_pickup_confirmed = 1`, so the store's
+  `confirmDeliveryPickup` flow sees it already confirmed and cannot double-book.
+- `updateDeliveryPickup` in the store recognizes Mall-managed rows (via the
+  `Created from Mall order` note) and passes only contact fields through; a
+  store-side fee edit on a Mall delivery would desync the expense from the paid
+  Mall total, so it is ignored.
+- A Mall refund voids the expense (amount 0, description annotated) in the same
+  refund transaction rather than deleting it, so the audit trail survives.
+
+No schema-marker change is needed for this behavior: it is written by the Mall
+workflow code, not by DDL, and no migration can reconstruct an expense for a
+row that never booked one — dispatched Mall orders predating this change simply
+have no Logistics expense, which matches what they physically paid for.
+
 Refunds require a reason and explicit stock disposition. Restocking goods after
 dispatch or customer collection requires a goods-received reference. The return
 record persists disposition, reference, reason, actor, and time. Partial refunds,

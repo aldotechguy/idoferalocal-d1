@@ -4991,9 +4991,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const now = new Date().toISOString();
-    const finalFee = updates.deliveryFee !== undefined ? Math.max(0, Number(updates.deliveryFee)) : existing.deliveryFee;
+    // Mall-linked deliveries are managed by the Mall fulfilment workflow: the
+    // dispatch transaction already booked the Logistics expense and set
+    // isPickupConfirmed. Letting this flow rewrite the fee would desync the
+    // expense from the paid Mall order total, so only contact fields pass through.
+    const isMallManaged = /Created from Mall order /.test(existing.notes || '');
+    const finalFee = !isMallManaged && updates.deliveryFee !== undefined ? Math.max(0, Number(updates.deliveryFee)) : existing.deliveryFee;
     const feeDiff = finalFee - (existing.deliveryFee || 0);
-    const finalIsPickupConfirmed = updates.isPickupConfirmed !== undefined ? updates.isPickupConfirmed : existing.isPickupConfirmed;
+    const finalIsPickupConfirmed = isMallManaged ? true : (updates.isPickupConfirmed !== undefined ? updates.isPickupConfirmed : existing.isPickupConfirmed);
     const finalCustomerName = updates.customerName !== undefined ? updates.customerName : existing.customerName;
     const finalCustomerPhone = updates.customerPhone !== undefined ? updates.customerPhone : existing.customerPhone;
     const finalDeliveryAddress = updates.deliveryAddress !== undefined ? updates.deliveryAddress : existing.deliveryAddress;
