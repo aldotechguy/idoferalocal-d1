@@ -295,7 +295,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
       ? (editCustomerName.trim() || 'Walk-in Customer')
       : (editCustomerId ? (customers.find(c => c.id === editCustomerId)?.name || editCustomerName) : (editCustomerName.trim() || 'Walk-in Customer'));
 
-    updateSale(
+    const saved = updateSale(
       editSaleTarget.id,
       {
         customerId: finalCustomerId,
@@ -328,7 +328,9 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
       isSuperAdmin
     );
 
-    setEditSaleTarget(null);
+    // A refused edit (restricted role, or the sale no longer exists) must keep the
+    // editor open — closing here discarded the user's work with only a toast.
+    if (saved) setEditSaleTarget(null);
   };
 
   // Helper to extract YYYY-MM-DD from timestamp string

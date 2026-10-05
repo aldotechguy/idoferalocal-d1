@@ -142,6 +142,9 @@ export function saleRow(r: any, itemsBySale: Map<string, any[]>) {
     createdBy: r.created_by || '', orderTakenBy: r.order_taken_by || undefined,
     isHistorical: b(r.is_historical) || undefined,
     expenseId: r.expense_id || undefined, createdAt: r.created_at,
+    // Same `|| undefined` contract as paymentBreakdown/overageApplied, so a sale
+    // that has never been edited keeps its pre-v12 shape (no updatedAt key).
+    updatedAt: r.updated_at || undefined,
   };
 }
 export function purchaseRow(r: any, itemsByPo: Map<string, any[]>, recvByPo: Map<string, any[]>) {
@@ -313,6 +316,9 @@ export function saleToRows(doc: any) {
     created_by: s(doc.createdBy), order_taken_by: doc.orderTakenBy ? s(doc.orderTakenBy) : null,
     is_historical: b01(doc.isHistorical), expense_id: doc.expenseId ? s(doc.expenseId) : null,
     created_at: now,
+    // Edit clock (v12). The client stamps updatedAt on every sale edit; without
+    // this column the server dropped it and the snapshot read-back had none.
+    updated_at: doc.updatedAt ? s(doc.updatedAt) : null,
   };
   const lines = (Array.isArray(doc.items) ? doc.items : []).map((it: any, i: number) => ({
     id: `${id}-item-${i}`, sale_id: id,

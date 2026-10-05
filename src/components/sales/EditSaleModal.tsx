@@ -192,7 +192,7 @@ export const EditSaleModal: React.FC<EditSaleModalProps> = ({ sale, onClose, onS
       ? (editCustomerName.trim() || 'Walk-in Customer')
       : (editCustomerId ? (customers.find(c => c.id === editCustomerId)?.name || editCustomerName) : (editCustomerName.trim() || 'Walk-in Customer'));
 
-    updateSale(
+    const saved = updateSale(
       sale.id,
       {
         customerId: finalCustomerId,
@@ -225,6 +225,8 @@ export const EditSaleModal: React.FC<EditSaleModalProps> = ({ sale, onClose, onS
       isSuperAdmin
     );
 
+    // Keep the editor open on a refused edit so the in-progress changes survive.
+    if (!saved) return;
     onClose();
     if (onSaved) onSaved();
   };

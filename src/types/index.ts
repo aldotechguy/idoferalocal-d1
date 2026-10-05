@@ -182,6 +182,13 @@ export interface Sale {
   orderTakenBy?: string;
   convertedBy?: string;
   createdAt: string;
+  /**
+   * Last local edit time. The sync merge ranks competing copies with
+   * `updatedAt || _lastSyncedAt || createdAt`, so without this a sale edit falls
+   * back to `createdAt` and is indistinguishable from an unedited record.
+   * Mirrors the field on PurchaseOrder / DeliveryOrder / WhatsAppPreOrder.
+   */
+  updatedAt?: string;
   isHistorical?: boolean;
   expenseId?: string;
 }

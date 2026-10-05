@@ -158,6 +158,9 @@ export const sales = sqliteTable(
     isHistorical: integer('is_historical').notNull().default(0),
     expenseId: text('expense_id'),
     createdAt: text('created_at').notNull(),
+    // Edit clock the sync merge ranks competing copies with. Nullable: a sale
+    // that has never been edited has no update time.
+    updatedAt: text('updated_at'),
   },
   (t) => [index('idx_sales_created').on(t.createdAt), index('idx_sales_customer').on(t.customerId)],
 );

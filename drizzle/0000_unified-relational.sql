@@ -331,7 +331,8 @@ CREATE TABLE `sales` (
 	`order_taken_by` text,
 	`is_historical` integer DEFAULT 0 NOT NULL,
 	`expense_id` text,
-	`created_at` text NOT NULL
+	`created_at` text NOT NULL,
+	`updated_at` text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `sales_receipt_no_unique` ON `sales` (`receipt_no`);--> statement-breakpoint

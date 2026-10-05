@@ -25,7 +25,10 @@ import { normalizedPhoneSql } from '../shared/mallPhone.js';
 // 'Cancelled' instead of 'Returned' — return disposition stays in notes and
 // mall_returns), replaces the consistency trigger with matching values, and
 // remaps existing rows so the Deliveries & Pickups list renders them.
-export const MALL_SCHEMA_VERSION = 11;
+// v12 adds sales.updated_at: the edit clock the sync merge ranks competing sale
+// copies with. Without it the server silently dropped every client `updatedAt`
+// and a local sale edit became indistinguishable from an unedited record.
+export const MALL_SCHEMA_VERSION = 12;
 
 export const MALL_MERCH_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: 'mall_featured', ddl: 'ALTER TABLE products ADD COLUMN mall_featured INTEGER NOT NULL DEFAULT 0' },
@@ -61,6 +64,11 @@ export const RELATIONAL_FINANCE_COLUMNS: ReadonlyArray<{ name: string; ddl: stri
   { name: 'sale_items.returned_qty', ddl: 'ALTER TABLE sale_items ADD COLUMN returned_qty INTEGER NOT NULL DEFAULT 0' },
   { name: 'purchase_items.shortage_qty', ddl: 'ALTER TABLE purchase_items ADD COLUMN shortage_qty INTEGER NOT NULL DEFAULT 0' },
   { name: 'purchase_items.excess_qty', ddl: 'ALTER TABLE purchase_items ADD COLUMN excess_qty INTEGER NOT NULL DEFAULT 0' },
+  // v12: sales is the only core table still missing an edit clock. purchases,
+  // delivery_orders and whatsapp_preorders all carry updated_at; without it here
+  // the client stamps updatedAt on every sale edit, this mapper drops it, and the
+  // snapshot read-back has none — so a D1 pull can silently revert the edit.
+  { name: 'sales.updated_at', ddl: 'ALTER TABLE sales ADD COLUMN updated_at TEXT' },
 ];
 
 export function isDuplicateColumnError(error: unknown) {

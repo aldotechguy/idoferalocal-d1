@@ -769,6 +769,59 @@ test('automatic save batches only changed records and never reads deltas', () =>
   assert.doesNotMatch(workerSource, /SNAPSHOT_DELTA_LIMIT/);
   assert.doesNotMatch(workerSource, /searchParams\.get\('since'\)/);
 });
+
+test('a sale edit keeps a modification timestamp all the way to D1', () => {
+  const app = fs.readFileSync('src/context/AppContext.tsx', 'utf8');
+  const start = app.indexOf('const updateSale = (');
+  assert.ok(start > 0, 'updateSale must exist');
+  const body = app.slice(start, app.indexOf('// Reconcile Historical Sales', start));
+
+  // The sync merge ranks copies with `updatedAt || _lastSyncedAt || createdAt`,
+  // and createdAt is deliberately preserved as the original transaction time. An
+  // unstamped sale edit is therefore indistinguishable from an unedited record,
+  // so the next D1 read silently reverts it.
+  assert.match(body, /updatedAt: now,/);
+  // saveDocument stamps _lastSyncedAt; a bare putItem on the same key commits
+  // after it and erases that stamp.
+  assert.doesNotMatch(body, /putItem\('sales'/);
+  // A refused edit must report false so the caller keeps the editor open.
+  assert.match(body, /\): boolean => \{/);
+  assert.match(body, /return false;/);
+  assert.match(body, /return true;/);
+
+  // The stamp has to survive the relational store too: without the column the
+  // server drops it and the snapshot read-back has none.
+  const ddl = fs.readFileSync('src/server/relationalDdl.ts', 'utf8');
+  const salesDdl = ddl.split('\n').find((line) => line.includes('CREATE TABLE IF NOT EXISTS sales '));
+  assert.ok(salesDdl, 'the sales table DDL must exist');
+  assert.match(salesDdl, /updated_at text/);
+  assert.match(
+    fs.readFileSync('src/server/mallOperations.ts', 'utf8'),
+    /ALTER TABLE sales ADD COLUMN updated_at TEXT/,
+  );
+  const mapper = fs.readFileSync('src/server/relationalMapper.ts', 'utf8');
+  assert.match(mapper, /updated_at: doc\.updatedAt \? s\(doc\.updatedAt\) : null/);
+  assert.match(mapper, /updatedAt: r\.updated_at \|\| undefined/);
+
+  // Both editors close only on a confirmed write.
+  const salesView = fs.readFileSync('src/components/sales/SalesView.tsx', 'utf8');
+  const editModal = fs.readFileSync('src/components/sales/EditSaleModal.tsx', 'utf8');
+  assert.match(salesView, /const saved = updateSale\(/);
+  assert.match(salesView, /if \(saved\) setEditSaleTarget\(null\);/);
+  assert.match(editModal, /const saved = updateSale\(/);
+  assert.match(editModal, /if \(!saved\) return;/);
+
+  // The Mall staff API writes `sales` with raw SQL and so bypasses the mapper.
+  // Both of those writes mutate a real sale, so both must carry the same clock or
+  // a Mall-side change is indistinguishable from an untouched invoice.
+  const mallAdmin = fs.readFileSync('src/server/mallOrderAdminApi.ts', 'utf8');
+  const mallSalesWrites = mallAdmin.match(/sql: `(?:INSERT INTO|UPDATE) sales[\s\S]*?`,/g) || [];
+  assert.equal(mallSalesWrites.length, 2, 'both raw sales writes must still be present');
+  for (const write of mallSalesWrites) {
+    assert.match(write, /updated_at/, 'every raw sales write must set updated_at');
+  }
+});
+
 test('the Node runtime ships no Cloudflare REST write engine', () => {
   const server = fs.readFileSync('server.ts', 'utf8');
   // The deployed Worker owns D1: no credentials, no REST /query executor, no

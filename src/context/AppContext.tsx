@@ -238,7 +238,7 @@ interface AppContextType {
     },
     performedBy?: string,
     isSuperAdminOverride?: boolean
-  ) => void;
+  ) => boolean;
   deleteSale: (saleId: string, performedBy?: string) => void;
   reconcileHistoricalDeliveryExpenses: (salesList?: Sale[], expensesList?: Expense[]) => { fixedCount: number };
   purgeHistoricalMoneyMovements: () => { purgedCount: number };
@@ -2512,9 +2512,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     performedBy = 'Administrator',
     isSuperAdminOverride = false
-  ) => {
+  ): boolean => {
     const existing = sales.find((s) => s.id === saleId);
-    if (!existing) return;
+    // False = nothing was written. Callers use this to keep the editor open
+    // instead of closing it over a refused edit.
+    if (!existing) return false;
 
     const isHistorical =
       existing.isHistorical ||
@@ -2527,7 +2529,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         message: 'Real-time sales records cannot be edited by standard users. Super-Admin permissions are required to edit real-time records.',
         type: 'error',
       });
-      return;
+      return false;
     }
 
     const now = new Date().toISOString();
@@ -2575,6 +2577,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       totalAmount: calculatedTotal,
       paidAmount: finalPaidAmount,
       overageCreated: newOverageCreated,
+      // The sync merge ranks copies by `updatedAt || _lastSyncedAt || createdAt`.
+      // Without this stamp an edit falls back to createdAt — which is deliberately
+      // preserved as the original transaction time — so the edited sale looks
+      // unedited and a D1 pull silently overwrites it. Siblings in this same
+      // cascade (delivery order, pre-order) already stamp their own updatedAt.
+      updatedAt: now,
     };
 
     // 1. Cascade to Inventory Stock: adjust quantity differences if items were modified (skip non-inventory clearance items)
@@ -2610,10 +2618,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    // 2. Save Sale to State & Persistence
+    // 2. Save Sale to State & Persistence.
+    // saveDocument owns this write: it stamps _lastSyncedAt (the sync merge's
+    // fallback clock) and marks the record dirty. A second bare putItem on the
+    // same key would commit after it without that stamp and win the race.
     setSales((prev) => prev.map((s) => (s.id === saleId ? updatedSale : s)));
     saveDocument('sales', updatedSale);
-    putItem('sales', updatedSale).catch((e) => console.warn('IndexedDB sales put error:', e));
 
     // 3. Cascade down to Delivery Order (deliveryOrders)
     let matchingDeliveryOrder = deliveryOrders.find(
@@ -2750,7 +2760,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Also persist updatedSale with expenseId
       setSales((prev) => prev.map((s) => (s.id === saleId ? updatedSale : s)));
       saveDocument('sales', updatedSale);
-      putItem('sales', updatedSale).catch(() => {});
     } else if (matchingDeliveryOrder?.isPickupConfirmed && newFee > 0) {
       // If delivery pickup was already confirmed, create the Logistics expense
       const expenseTitle = `Logistics Delivery Fee - ${matchingDeliveryOrder.deliveryNo} (${existing.invoiceNo})`;
@@ -2916,7 +2925,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Also ensure updatedSale state reflects the finalized customerId
     setSales((prev) => prev.map((s) => (s.id === saleId ? updatedSale : s)));
     saveDocument('sales', updatedSale);
-    putItem('sales', updatedSale).catch((e) => console.warn('IndexedDB sales put error:', e));
 
     if (newUnpaid > 0 && unpaidDiff > 0 && finalCustomerName) {
       const notif: NotificationItem = {
@@ -2966,6 +2974,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       message: `Sale record ${existing.invoiceNo} saved. Customer outstanding balance: ${settings.currencySymbol}${newUnpaid.toFixed(2)}.`,
       type: 'info',
     });
+    return true;
   };
 
   // Reconcile Historical Sales with Delivery Fees to automatically create/verify Historical Logistics Expenses

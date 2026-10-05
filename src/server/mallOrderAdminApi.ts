@@ -310,9 +310,14 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
     });
   }
   stmts.push({
-    sql: `INSERT INTO sales (id, receipt_no, customer_id, customer_name, type, subtotal_kobo, discount_kobo, tax_kobo, delivery_fee_kobo, total_kobo, paid_kobo, payment_method, payment_breakdown_json, status, notes, created_by, order_taken_by, is_historical, expense_id, created_at)
-      VALUES (?, ?, ?, ?, 'Retail', ?, ?, 0, ?, ?, ?, ?, ?, 'Completed', ?, ?, 'Mall Storefront', 0, NULL, ?)`,
-    params: [saleId, invoiceNo, customerId, row.customer_name, row.subtotal_kobo, row.discount_kobo, row.delivery_fee_kobo, row.total_kobo, row.total_kobo, method, paymentBreakdown ? JSON.stringify(paymentBreakdown) : null, `Converted from Mall order ${row.order_no}.`, actor.displayName, at],
+    // updated_at (v12) is the edit clock the client sync merge ranks competing
+    // copies with. Bounding the sale with a clock means the first POS-side edit
+    // of this invoice can be ordered against it. Requires the v12 ALTER to have
+    // run: this statement names the column explicitly, so a pre-v12 database
+    // would fail the whole atomic batch.
+    sql: `INSERT INTO sales (id, receipt_no, customer_id, customer_name, type, subtotal_kobo, discount_kobo, tax_kobo, delivery_fee_kobo, total_kobo, paid_kobo, payment_method, payment_breakdown_json, status, notes, created_by, order_taken_by, is_historical, expense_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'Retail', ?, ?, 0, ?, ?, ?, ?, ?, 'Completed', ?, ?, 'Mall Storefront', 0, NULL, ?, ?)`,
+    params: [saleId, invoiceNo, customerId, row.customer_name, row.subtotal_kobo, row.discount_kobo, row.delivery_fee_kobo, row.total_kobo, row.total_kobo, method, paymentBreakdown ? JSON.stringify(paymentBreakdown) : null, `Converted from Mall order ${row.order_no}.`, actor.displayName, at, at],
   });
   items.forEach((item, index) => stmts.push({
     sql: `INSERT INTO sale_items (id, sale_id, product_id, product_name, sku, qty, unit_price_kobo, cost_price_kobo, total_kobo, is_wholesale, is_clearance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)`,
@@ -456,8 +461,12 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
     notes: `Refunded from Mall order ${s(row.order_no)}.`,
   };
   stmts.push({
-    sql: `UPDATE sales SET status = 'Refunded', total_refunded_kobo = ?, refunds_json = ?, notes = COALESCE(notes, '') || ? WHERE id = ?`,
-    params: [n(row.total_kobo), JSON.stringify([refundRecord]), ` | Refunded from Mall: ${reason}`, row.linked_sale_id],
+    // updated_at (v12) alongside the finance fields: a Mall refund is a real
+    // mutation of the sale, so it must advance the same edit clock a POS-side
+    // edit does. Without it a refunded sale keeps its pre-refund stamp and the
+    // two changes are indistinguishable to the sync merge.
+    sql: `UPDATE sales SET status = 'Refunded', total_refunded_kobo = ?, refunds_json = ?, notes = COALESCE(notes, '') || ?, updated_at = ? WHERE id = ?`,
+    params: [n(row.total_kobo), JSON.stringify([refundRecord]), ` | Refunded from Mall: ${reason}`, at, row.linked_sale_id],
   });
   // Mark every line fully returned so a later POS refund sees zero remaining qty.
   for (const item of items) {
