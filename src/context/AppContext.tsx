@@ -52,7 +52,7 @@ import {
   INITIAL_MONEY_MOVEMENTS,
 } from '../data/initialData';
 import { saveDocument, removeDocument } from '../firebase/services';
-import { subscribeTabSync } from '../firebase/syncManager';
+import { subscribeTabSync } from '../firebase/services';
 import { useToast } from './ToastContext';
 import { getAllItems, putManyItems, replaceStoreItems, putItem, clearStore, deleteItem, writeD1SnapshotToIndexedDB, type StoreName } from '../db/indexedDB';
 import { initializeD1Storage, queueD1Snapshot, pullLatestFromD1, type D1Snapshot } from '../services/d1StorageService';
@@ -1043,7 +1043,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const clearAuditLogs = () => {
     setAuditLogs([]);
     clearStore('auditLogs').catch((e) => console.warn('IndexedDB clear auditLogs error:', e));
-    localStorage.removeItem('idofera_auditLogs');
   };
 
   // Product CRUD
@@ -1926,7 +1925,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       deleteItem('heldOrders', h.id).catch(() => {});
     });
     setHeldOrders([]);
-    localStorage.removeItem('idofera_heldOrders');
     clearStore('heldOrders').catch((e) => console.warn('IndexedDB clear heldOrders error:', e));
     showToast({ title: 'Held Queue Cleared', message: 'All held orders deleted.', type: 'error' });
   };

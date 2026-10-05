@@ -294,7 +294,7 @@ export function removeCategoryUnsyncedKeys(category: string) {
   dismissCategoryFromUnsynced(category);
 }
 
-export function isItemUnsynced(category: string, id: string, _dateOrCreatedAt?: string): boolean {
+export function isItemUnsynced(category: string, id: string): boolean {
   if (typeof localStorage === 'undefined') return false;
   const variants = getUnsyncedKeyVariants(category, id);
 

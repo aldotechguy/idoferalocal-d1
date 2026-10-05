@@ -89,7 +89,6 @@ export const SettingsView: React.FC = () => {
     pingD1Health,
     triggerSync: triggerCloudSync,
     triggerSyncAll,
-    triggerD1Pull,
     triggerDriveSync,
     restoreDriveBackup,
     prepareDriveRestore,
@@ -1381,7 +1380,7 @@ export const SettingsView: React.FC = () => {
               Showing <strong className="text-slate-900 dark:text-white font-bold">{filteredAuditLogs.length}</strong> of{' '}
               <strong className="text-slate-900 dark:text-white font-bold">{userAuditLogs.length}</strong> total user audit records
             </span>
-            <span>Local IndexedDB Encrypted Audit Storage</span>
+            <span>Local IndexedDB Audit Storage</span>
           </div>
         </div>
       )}
@@ -1416,7 +1415,7 @@ export const SettingsView: React.FC = () => {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 w-full lg:w-auto shrink-0">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 w-full lg:w-auto shrink-0">
               <button
                 type="button"
                 onClick={triggerCloudSync}
@@ -1430,24 +1429,13 @@ export const SettingsView: React.FC = () => {
 
               <button
                 type="button"
-                onClick={triggerD1Pull}
-                disabled={isCloudSyncing}
-                className="h-10 px-4 py-2 bg-sky-500/10 hover:bg-sky-500/20 text-sky-700 dark:text-sky-300 border border-sky-500/30 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 whitespace-nowrap shadow-xs"
-                title="Directly pull and refresh all records from Cloudflare D1 (3e95a550-a091-490b-819d-f0acb7ea8dd8)"
-              >
-                <Download className="w-3.5 h-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
-                <span>Pull from D1</span>
-              </button>
-
-              <button
-                type="button"
                 onClick={triggerSyncAll}
                 disabled={isCloudSyncing}
                 className="h-10 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-emerald-600/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 whitespace-nowrap"
-                title="Push all records from Local Storage (IndexedDB) directly to Cloudflare D1 (3e95a550-a091-490b-819d-f0acb7ea8dd8)"
+                title="Push ALL local records to Cloudflare D1, overwriting cloud copies with the local versions (use only to repair a diverged cloud)"
               >
                 <Database className="w-3.5 h-3.5 shrink-0" />
-                <span>{isCloudSyncing ? 'Syncing All...' : 'Sync All'}</span>
+                <span>{isCloudSyncing ? 'Syncing All...' : 'Force Overwrite Cloud'}</span>
               </button>
 
               <button

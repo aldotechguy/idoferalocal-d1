@@ -6,7 +6,7 @@ import { saveDocument, removeDocument } from '../firebase/services';
 import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
 import { auth, googleProvider } from '../firebase/config';
 import { setGoogleDriveAccessToken } from '../services/googleDriveService';
-import { subscribeTabSync } from '../firebase/syncManager';
+import { subscribeTabSync } from '../firebase/services';
 import { StepUpModal } from '../components/modals/StepUpModal';
 
 export const isSuperUser = (user: UserProfile | null | undefined): boolean => {
@@ -124,7 +124,7 @@ export const STANDARD_ADMIN_USER: UserProfile = {
  * workspace now shows the sign-in screen instead of a phantom session.
  */
 export const INITIAL_USERS: UserProfile[] = [
-  {...STANDARD_ADMIN_USER, id: 'usr-placeholder-admin', isProtected: false},
+  { ...STANDARD_ADMIN_USER, id: 'usr-placeholder-admin', isProtected: false },
 ];
 
 export const DEMO_USERS: Record<UserRole, UserProfile> = {
@@ -345,10 +345,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const response = await fetch('/api/auth/step-up', {
         method: 'POST',
         credentials: 'include',
-        headers: {'content-type': 'application/json'},
-        body: JSON.stringify({password}),
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password }),
       });
-      const data = await response.json() as {ok?: boolean; canSuperAdmin?: boolean; error?: string};
+      const data = await response.json() as { ok?: boolean; canSuperAdmin?: boolean; error?: string };
       if (!response.ok || !data.ok) {
         setStepUpError(data.error || 'That password could not be confirmed.');
         return false;
@@ -372,11 +372,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const send = () => fetch(url, {
       ...init,
       credentials: 'include',
-      headers: {'content-type': 'application/json', ...(init.headers || {})},
+      headers: { 'content-type': 'application/json', ...(init.headers || {}) },
     });
     const first = await send();
     if (first.status !== 403) return first;
-    const body = await first.clone().json().catch(() => ({})) as {code?: string; error?: string};
+    const body = await first.clone().json().catch(() => ({})) as { code?: string; error?: string };
     if (body.code === 'SUPER_ADMIN_GROUP_REQUIRED') {
       showToast({
         title: 'Identity Provider Check Required',
@@ -398,9 +398,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       headers['authorization'] = `Bearer ${token}`;
       headers['x-session-token'] = token;
     }
-    const response = await fetch('/api/auth/users', {credentials: 'include', headers});
+    const response = await fetch('/api/auth/users', { credentials: 'include', headers });
     if (!response.ok) return;
-    const data = await response.json() as {users?: UserProfile[]};
+    const data = await response.json() as { users?: UserProfile[] };
     if (data.users?.length) setUsers(sanitizeUsersList(data.users));
   };
 
@@ -412,7 +412,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       headers['authorization'] = `Bearer ${token}`;
       headers['x-session-token'] = token;
     }
-    fetch('/api/auth/session', {credentials: 'include', headers, cache: 'no-store'})
+    fetch('/api/auth/session', { credentials: 'include', headers, cache: 'no-store' })
       .then(async (response) => {
         // An expired Cloudflare Access cookie sends the request off to the IdP;
         // the redirected cross-origin answer cannot be read as JSON. One
@@ -426,11 +426,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
           return null;
         }
-        return response.ok ? response.json() : {user: null};
+        return response.ok ? response.json() : { user: null };
       })
       .then(async (payload) => {
         if (!active || !payload) return;
-        const {user, entranceAllowed, accessEmail, registered, canSuperAdmin: canAct} = payload as {
+        const { user, entranceAllowed, accessEmail, registered, canSuperAdmin: canAct } = payload as {
           user: UserProfile | null;
           entranceAllowed?: boolean;
           accessEmail?: string;
@@ -783,9 +783,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUsers((prev) => [newUser, ...prev]);
     // Creating the account is privileged: the prompt/retry keeps this local
     // creation in sync with what the server actually accepts.
-    privilegedRequest('/api/auth/users', {method: 'PUT', body: JSON.stringify({user: newUser, password: newUser.password})})
+    privilegedRequest('/api/auth/users', { method: 'PUT', body: JSON.stringify({ user: newUser, password: newUser.password }) })
       .then((response) => { if (!response.ok) throw new Error('Server rejected the new user.'); })
-      .catch((error) => showToast({title: 'Server Account Error', message: error.message, type: 'error'}));
+      .catch((error) => showToast({ title: 'Server Account Error', message: error.message, type: 'error' }));
     saveDocument('users', newUser);
     showToast({
       title: 'New User Created',
@@ -826,7 +826,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!target) return;
     targetName = target.displayName;
     const updated = { ...target, ...updates };
-    privilegedRequest('/api/auth/users', {method: 'PUT', body: JSON.stringify({user: updated, password: updates.password})})
+    privilegedRequest('/api/auth/users', { method: 'PUT', body: JSON.stringify({ user: updated, password: updates.password }) })
       .catch((error) => console.warn('Server user update warning:', error));
     saveDocument('users', updated);
     setUsers((prev) => prev.map((u) => (u.id === id ? updated : u)));
@@ -866,7 +866,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUsers((prev) => prev.filter((u) => u.id !== id));
     // Deleting an account is privileged: the server demands a fresh password
     // confirmation (403 STEP_UP_REQUIRED), which privilegedRequest prompts for.
-    privilegedRequest(`/api/auth/users/${encodeURIComponent(id)}`, {method: 'DELETE'})
+    privilegedRequest(`/api/auth/users/${encodeURIComponent(id)}`, { method: 'DELETE' })
       .then((response) => { if (!response.ok) console.warn('Server user deletion rejected:', response.status); })
       .catch((error) => console.warn('Server user deletion warning:', error));
     removeDocument('users', id);
@@ -885,12 +885,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Password must be at least 8 characters long.');
     }
 
-    const response = await fetch('/api/auth/password', {method: 'POST', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({oldPassword, newPassword})});
-    const result = await response.json() as {error?: string; passwordLastChanged?: string};
+    const response = await fetch('/api/auth/password', { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ oldPassword, newPassword }) });
+    const result = await response.json() as { error?: string; passwordLastChanged?: string };
     if (!response.ok) throw new Error(result.error || 'Password update failed.');
     const now = result.passwordLastChanged || new Date().toISOString();
-    setCurrentUser((user) => user ? {...user, passwordLastChanged: now} : user);
-    setUsers((items) => items.map((user) => user.id === currentUser.id ? {...user, passwordLastChanged: now} : user));
+    setCurrentUser((user) => user ? { ...user, passwordLastChanged: now } : user);
+    setUsers((items) => items.map((user) => user.id === currentUser.id ? { ...user, passwordLastChanged: now } : user));
 
     showToast({
       title: 'Password Updated',
@@ -926,11 +926,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     // Resetting ANOTHER account's password is the most sensitive staff action;
     // the server re-checks privilege and the fresh step-up on this call.
-    const response = await privilegedRequest('/api/auth/password', {method: 'POST', body: JSON.stringify({targetUserId, newPassword})});
-    const result = await response.json() as {error?: string; passwordLastChanged?: string};
+    const response = await privilegedRequest('/api/auth/password', { method: 'POST', body: JSON.stringify({ targetUserId, newPassword }) });
+    const result = await response.json() as { error?: string; passwordLastChanged?: string };
     if (!response.ok) throw new Error(result.error || 'Password reset failed.');
     const now = result.passwordLastChanged || new Date().toISOString();
-    setUsers((items) => items.map((user) => user.id === targetUserId ? {...user, passwordLastChanged: now} : user));
+    setUsers((items) => items.map((user) => user.id === targetUserId ? { ...user, passwordLastChanged: now } : user));
 
     showToast({
       title: 'Password Reset Successful',
@@ -942,8 +942,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loginWithEmail = async (identifier: string, p: string) => {
     setLoading(true);
     try {
-      const response = await fetch('/api/auth/login', {method: 'POST', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({identifier, password: p})});
-      const data = await response.json() as {user?: UserProfile; sessionToken?: string; token?: string; error?: string; canSuperAdmin?: boolean};
+      const response = await fetch('/api/auth/login', { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ identifier, password: p }) });
+      const data = await response.json() as { user?: UserProfile; sessionToken?: string; token?: string; error?: string; canSuperAdmin?: boolean };
       if (!response.ok || !data.user) throw new Error(data.error || 'Authentication failed.');
       if (data.sessionToken || data.token) {
         localStorage.setItem('idofera_session_token', data.sessionToken || data.token || '');
@@ -962,7 +962,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           // The password that just signed us in is a valid step-up proof too;
           // mint it now so provisioning never opens a second prompt.
           await stepUp(p);
-          await Promise.all(pendingProvision.map((user) => privilegedRequest('/api/auth/users', {method: 'PUT', body: JSON.stringify({user, password: user.password})})));
+          await Promise.all(pendingProvision.map((user) => privilegedRequest('/api/auth/users', { method: 'PUT', body: JSON.stringify({ user, password: user.password }) })));
         }
       }
       await refreshServerUsers();
@@ -1011,8 +1011,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       if (!credential?.accessToken) throw new Error('Google did not provide a verifiable access token.');
-      const response = await fetch('/api/auth/google', {method: 'POST', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({accessToken: credential.accessToken})});
-      const data = await response.json() as {user?: UserProfile; sessionToken?: string; token?: string; error?: string; canSuperAdmin?: boolean};
+      const response = await fetch('/api/auth/google', { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ accessToken: credential.accessToken }) });
+      const data = await response.json() as { user?: UserProfile; sessionToken?: string; token?: string; error?: string; canSuperAdmin?: boolean };
       if (!response.ok || !data.user) throw new Error(data.error || 'Google authentication failed.');
       if (typeof data.canSuperAdmin === 'boolean') setCanSuperAdmin(data.canSuperAdmin);
       persistSsoEmail(null);
@@ -1021,7 +1021,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       setCurrentUser(data.user);
       await refreshServerUsers();
-      showToast({title: 'Google Authentication Successful', message: `Welcome back, ${data.user.displayName}!`, type: 'success'});
+      showToast({ title: 'Google Authentication Successful', message: `Welcome back, ${data.user.displayName}!`, type: 'success' });
     } catch (err: any) {
       console.warn('Google Auth Popup process notice:', err);
       if (err?.code === 'auth/popup-closed-by-user') {
@@ -1068,7 +1068,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // and the signed-in UI in place, with no way to retry cleanly).
     let serverConfirmed = true;
     try {
-      const response = await fetch('/api/auth/logout', {method: 'POST', credentials: 'include', headers});
+      const response = await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', headers });
       serverConfirmed = response.ok;
     } catch {
       serverConfirmed = false;

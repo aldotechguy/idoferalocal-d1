@@ -294,23 +294,6 @@ export function useCloudSync() {
     }
   }, [isSyncing, showToast, pingD1Health]);
 
-  const triggerD1Pull = useCallback(async () => {
-    if (isSyncing) return;
-    if (!navigator.onLine) {
-      showToast({title: 'Offline Mode', message: 'Cannot pull from Cloudflare D1 while offline.', type: 'warning'});
-      return;
-    }
-    setIsSyncing(true);
-    try {
-      window.dispatchEvent(new CustomEvent('idofera_pull_d1'));
-      await pingD1Health();
-    } catch (err: any) {
-      showToast({title: 'D1 Pull Failed', message: err?.message || 'Could not pull from Cloudflare D1.', type: 'error'});
-    } finally {
-      setIsSyncing(false);
-    }
-  }, [isSyncing, showToast]);
-
   // Trigger Google Drive Backup Restore
   const prepareDriveRestore = useCallback(async (): Promise<DriveRestorePreview | null> => {
     if (isSyncing) return null;
@@ -393,12 +376,11 @@ export function useCloudSync() {
     authorizeDrive: requestGoogleDriveAuthorization,
     triggerSync: triggerD1Sync,
     triggerSyncAll: () => triggerD1Sync(true),
-    triggerD1Pull,
     triggerDriveSync,
     restoreDriveBackup,
     prepareDriveRestore,
     driveRestorePreview,
   }), [isOnline, d1Health, isCheckingHealth, pingD1Health, isSyncing, unsyncedRecordsCount, hasDriveUnsynced,
     lastDriveBackupFile, lastDriveBackupTime, driveAuthStatus, isDriveAuthModalOpen,
-    triggerD1Sync, triggerD1Pull, triggerDriveSync, restoreDriveBackup, prepareDriveRestore, driveRestorePreview]);
+    triggerD1Sync, triggerDriveSync, restoreDriveBackup, prepareDriveRestore, driveRestorePreview]);
 }
