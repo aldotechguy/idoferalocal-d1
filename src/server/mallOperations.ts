@@ -20,7 +20,12 @@ import { normalizedPhoneSql } from '../shared/mallPhone.js';
 // GRN-variance columns the unified relational store needs so the snapshot
 // mappers can round-trip main's c75f81e fields instead of silently dropping
 // them (and so the derived INSERTs never name a column the table lacks).
-export const MALL_SCHEMA_VERSION = 10;
+// v11 unifies Mall-written delivery_order statuses with the store's
+// DeliveryStatus vocabulary ('Out for Delivery' instead of 'In Transit',
+// 'Cancelled' instead of 'Returned' — return disposition stays in notes and
+// mall_returns), replaces the consistency trigger with matching values, and
+// remaps existing rows so the Deliveries & Pickups list renders them.
+export const MALL_SCHEMA_VERSION = 11;
 
 export const MALL_MERCH_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: 'mall_featured', ddl: 'ALTER TABLE products ADD COLUMN mall_featured INTEGER NOT NULL DEFAULT 0' },
@@ -129,11 +134,18 @@ export const MALL_OPERATIONS_DDL = [
   `CREATE INDEX IF NOT EXISTS idx_mall_normalized_phone ON mall_orders(${phone})`,
   `CREATE INDEX IF NOT EXISTS idx_customer_normalized_phone ON customers(${normalizedPhoneSql('phone')})`,
   `CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)`,
+  // Drop the v10 trigger so CREATE IF NOT EXISTS can install the v11 wording.
+  // The values below mirror the store's DeliveryStatus type exactly.
+  `DROP TRIGGER IF EXISTS mall_delivery_consistency`,
   `CREATE TRIGGER IF NOT EXISTS mall_delivery_consistency BEFORE UPDATE OF status ON delivery_orders
     WHEN EXISTS(SELECT 1 FROM mall_orders o WHERE o.linked_sale_id=NEW.sale_id AND
-      ((o.status='out_for_delivery' AND NEW.status!='In Transit') OR (o.status='completed' AND NEW.status!='Delivered') OR
-       (o.status='refunded' AND NEW.status NOT IN ('Returned','Cancelled'))))
+      ((o.status='out_for_delivery' AND NEW.status!='Out for Delivery') OR (o.status='completed' AND NEW.status!='Delivered') OR
+       (o.status='refunded' AND NEW.status!='Cancelled')))
     BEGIN SELECT RAISE(ABORT,'USE_MALL_FULFILMENT_WORKFLOW'); END`,
+  // v11 legacy repair: remap Mall-written statuses no longer in the vocabulary.
+  // Return disposition stays recorded in mall_returns / notes, never lost.
+  `UPDATE delivery_orders SET status='Out for Delivery' WHERE status='In Transit'`,
+  `UPDATE delivery_orders SET status='Cancelled', notes=COALESCE(notes,'') || ' | Returned (Mall refund)' WHERE status='Returned'`,
   `CREATE TRIGGER IF NOT EXISTS mall_cart_parent_delete AFTER DELETE ON mall_carts BEGIN DELETE FROM mall_cart_items WHERE cart_id=OLD.id; END`,
   ...['INSERT', 'UPDATE'].flatMap((operation) => [
     `CREATE TRIGGER IF NOT EXISTS mall_cart_valid_${operation} BEFORE ${operation} ON mall_cart_items WHEN NEW.qty <= 0 OR NEW.qty > 1000 OR typeof(NEW.qty) != 'integer' OR NEW.unit_price_kobo < 0 OR NOT EXISTS(SELECT 1 FROM mall_carts WHERE id=NEW.cart_id) OR NOT EXISTS(SELECT 1 FROM products WHERE id=NEW.product_id) BEGIN SELECT RAISE(ABORT,'MALL_INVALID_CART_LINE'); END`,
@@ -169,7 +181,7 @@ export function webhookConfigured(config: MallConfig) {
   try {
     const url = new URL(config.MALL_WEBHOOK_URL || '');
     return url.protocol === 'https:' && !url.username && !url.password &&
-      !['localhost','127.0.0.1','[::1]'].includes(url.hostname) && (config.MALL_WEBHOOK_SECRET?.length || 0) >= 32;
+      !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) && (config.MALL_WEBHOOK_SECRET?.length || 0) >= 32;
   } catch { return false; }
 }
 
@@ -191,10 +203,10 @@ export async function mallReadiness(exec: MallExecutor) {
   try {
     // One sqlite_master lookup answers the oversell-trigger probe AND the
     // schema-object probe that used to be separate round trips.
-    const expected = ['mall_write_guards','mall_checkout_attempts','mall_order_events','mall_outbox','mall_returns','mall_rate_limits','mall_metrics','idx_mall_normalized_phone','idx_mall_cart_product_unique','idx_mall_active_session','mall_order_created','mall_order_audited','mall_delivery_consistency'];
+    const expected = ['mall_write_guards', 'mall_checkout_attempts', 'mall_order_events', 'mall_outbox', 'mall_returns', 'mall_rate_limits', 'mall_metrics', 'idx_mall_normalized_phone', 'idx_mall_cart_product_unique', 'idx_mall_active_session', 'mall_order_created', 'mall_order_audited', 'mall_delivery_consistency'];
     const required = [...expected, 'trg_products_no_oversell'];
     const present = await exec.queryAll(
-      `SELECT name FROM sqlite_master WHERE name IN (${required.map(()=>'?').join(',')})`, required,
+      `SELECT name FROM sqlite_master WHERE name IN (${required.map(() => '?').join(',')})`, required,
     );
     const names = new Set(present.map((row: any) => String(row.name)));
     checks.stockTrigger = names.has('trg_products_no_oversell');
@@ -222,7 +234,7 @@ export async function mallReadiness(exec: MallExecutor) {
       (SELECT id FROM mall_outbox WHERE status='dead' OR (status!='delivered' AND created_at < ?) LIMIT 1) AS stuck,
       (SELECT id FROM mall_outbox WHERE status='delivered' LIMIT 1) AS delivered,
       (SELECT id FROM mall_orders WHERE status IN ('processing','packed','ready_for_pickup','out_for_delivery') AND created_at<? LIMIT 1) AS stale`,
-      [new Date(now-30*60_000).toISOString(), new Date(now-48*3600_000).toISOString()]))[0] as any;
+      [new Date(now - 30 * 60_000).toISOString(), new Date(now - 48 * 3600_000).toISOString()]))[0] as any;
     checks.scheduler = !!state?.scheduler_at && Date.now() - Date.parse(state.scheduler_at) < 15 * 60_000;
     checks.notifications = !state?.stuck;
     checks.webhookDelivery = !!state?.delivered;
@@ -246,7 +258,7 @@ export async function mallMetrics(exec: MallExecutor) {
     // Bounded window: the dashboard metric history grows one row per day per
     // metric forever, and an unbounded ORDER BY read every one of them.
     metrics: await exec.queryAll('SELECT * FROM mall_metrics WHERE day >= ? ORDER BY day DESC,metric LIMIT 100',
-      [new Date(Date.now()-90*86400_000).toISOString().slice(0,10)]),
+      [new Date(Date.now() - 90 * 86400_000).toISOString().slice(0, 10)]),
   };
 }
 
@@ -263,8 +275,8 @@ export const MALL_RATE_LIMITS = { checkout: 10, tracking: 5, cart: 60, catalog: 
 export function mallRateLimitGroup(pathname: string): keyof typeof MALL_RATE_LIMITS {
   return pathname.includes('/checkout') ? 'checkout'
     : pathname.includes('/orders') || pathname.includes('/customer/lookup') ? 'tracking'
-    : pathname.includes('/cart') ? 'cart'
-    : 'catalog';
+      : pathname.includes('/cart') ? 'cart'
+        : 'catalog';
 }
 
 /**
@@ -318,16 +330,16 @@ function pruneRateLimitWindows(currentWindow: number): void {
 }
 
 const tooManyRequests = () =>
-  Object.assign(new Error('Too many requests. Please wait a minute.'), {mallStatus: 429});
+  Object.assign(new Error('Too many requests. Please wait a minute.'), { mallStatus: 429 });
 
 export async function mallRateLimit(exec: MallExecutor, request: Request) {
   if (!exec.clientIp) return;
   const path = new URL(request.url).pathname;
   const group = mallRateLimitGroup(path);
   const limit = MALL_RATE_LIMITS[group];
-  const window = Math.floor(Date.now()/60_000);
-  const bytes = await crypto.subtle.digest('SHA-256',new TextEncoder().encode(`${window}:${exec.clientIp}`));
-  const hash = Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2,'0')).join('');
+  const window = Math.floor(Date.now() / 60_000);
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${window}:${exec.clientIp}`));
+  const hash = Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
   const key = `${group}:${window}:${hash}`;
   const local = (rateLimitWindows.get(key) || 0) + 1;
   rateLimitWindows.set(key, local);
@@ -340,15 +352,15 @@ export async function mallRateLimit(exec: MallExecutor, request: Request) {
   if (every > 1 && local % every !== 0) return;
   const rows = await exec.queryAll(`INSERT INTO mall_rate_limits(key,count,expires_at) VALUES (?,?,?)
     ON CONFLICT(key) DO UPDATE SET count=MAX(mall_rate_limits.count + 1, excluded.count) RETURNING count`,
-  [key, local, (window+2)*60_000]);
+    [key, local, (window + 2) * 60_000]);
   const count = Math.max(local, Number(rows[0]?.count || 0));
   if (count > limit) throw tooManyRequests();
 }
 
 export async function signMallWebhook(secret: string, timestamp: string, body: string) {
-  const key = await crypto.subtle.importKey('raw',new TextEncoder().encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);
-  const signature = await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(`${timestamp}.${body}`));
-  return Array.from(new Uint8Array(signature),b=>b.toString(16).padStart(2,'0')).join('');
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${timestamp}.${body}`));
+  return Array.from(new Uint8Array(signature), b => b.toString(16).padStart(2, '0')).join('');
 }
 
 export async function drainMallOutbox(exec: MallExecutor, send?: typeof fetch, now = Date.now()) {
@@ -361,7 +373,7 @@ export async function drainMallOutbox(exec: MallExecutor, send?: typeof fetch, n
   const deliver = send ?? fetch;
   const config = exec.config!;
   const { batch, gapMs } = mallDrainPacing(config);
-  const rows = await exec.queryAll("SELECT * FROM mall_outbox WHERE (status='pending' AND next_attempt_at<=?) OR (status='sending' AND lease_until<?) ORDER BY created_at LIMIT ?",[now,now,batch]);
+  const rows = await exec.queryAll("SELECT * FROM mall_outbox WHERE (status='pending' AND next_attempt_at<=?) OR (status='sending' AND lease_until<?) ORDER BY created_at LIMIT ?", [now, now, batch]);
   // Pacing counts EMISSIONS, not rows: a row we failed to claim is skipped
   // above and never emits anything, so it must not cost a pause. The first
   // emission is never delayed (the common single-event case stays instant) and
@@ -371,46 +383,46 @@ export async function drainMallOutbox(exec: MallExecutor, send?: typeof fetch, n
   let emitted = 0;
   for (const row of rows) {
     const token = crypto.randomUUID();
-    const changed = await exec.runBatch([{sql:"UPDATE mall_outbox SET status='sending',lease_token=?,lease_until=?,attempts=attempts+1 WHERE id=? AND ((status='pending' AND next_attempt_at<=?) OR (status='sending' AND lease_until<?))",params:[token,now+120_000,row.id,now,now]}]);
+    const changed = await exec.runBatch([{ sql: "UPDATE mall_outbox SET status='sending',lease_token=?,lease_until=?,attempts=attempts+1 WHERE id=? AND ((status='pending' AND next_attempt_at<=?) OR (status='sending' AND lease_until<?))", params: [token, now + 120_000, row.id, now, now] }]);
     if (!changed[0]) continue;
     if (emitted > 0 && gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
     emitted += 1;
     try {
       const order = row.order_id ? (await exec.queryAll(`SELECT o.order_no,o.customer_phone,o.customer_name,o.customer_email,o.total_kobo,o.status,
         o.delivery_address_json AS fulfilment_json,p.reference AS payment_reference,p.status AS payment_status,p.provider AS payment_method
-        FROM mall_orders o LEFT JOIN payments p ON p.order_id=o.id WHERE o.id=? LIMIT 1`,[row.order_id]))[0] : null;
-      const body = JSON.stringify({id:row.id,event:row.event,occurredAt:row.created_at,data:JSON.parse(row.payload_json),order, instructions:publicMallConfig(config)});
-      const timestamp = String(Math.floor(Date.now()/1000));
-      const response = await deliver(config.MALL_WEBHOOK_URL || 'http://localhost/api/mall-webhook',{method:'POST',redirect:'error',signal:AbortSignal.timeout(10_000),headers:{'content-type':'application/json','x-mall-event-id':row.id,'x-mall-timestamp':timestamp,'x-mall-signature':`sha256=${await signMallWebhook(config.MALL_WEBHOOK_SECRET!,timestamp,body)}`},body});
+        FROM mall_orders o LEFT JOIN payments p ON p.order_id=o.id WHERE o.id=? LIMIT 1`, [row.order_id]))[0] : null;
+      const body = JSON.stringify({ id: row.id, event: row.event, occurredAt: row.created_at, data: JSON.parse(row.payload_json), order, instructions: publicMallConfig(config) });
+      const timestamp = String(Math.floor(Date.now() / 1000));
+      const response = await deliver(config.MALL_WEBHOOK_URL || 'http://localhost/api/mall-webhook', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000), headers: { 'content-type': 'application/json', 'x-mall-event-id': row.id, 'x-mall-timestamp': timestamp, 'x-mall-signature': `sha256=${await signMallWebhook(config.MALL_WEBHOOK_SECRET!, timestamp, body)}` }, body });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       await response.body?.cancel();
-      await exec.runBatch([{sql:"UPDATE mall_outbox SET status='delivered',delivered_at=?,lease_token=NULL,lease_until=NULL,last_error=NULL WHERE id=? AND lease_token=?",params:[new Date().toISOString(),row.id,token]}]);
+      await exec.runBatch([{ sql: "UPDATE mall_outbox SET status='delivered',delivered_at=?,lease_token=NULL,lease_until=NULL,last_error=NULL WHERE id=? AND lease_token=?", params: [new Date().toISOString(), row.id, token] }]);
     } catch (error) {
       const attempts = row.attempts + 1;
       // Persist the real cause. The old constant string made the queue
       // undiagnosable: "Webhook delivery failed" was identical for an HTTP 401,
       // a DNS failure, and a receiver that threw before answering.
       const reason = `Delivery failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200);
-      await exec.runBatch([{sql:"UPDATE mall_outbox SET status=?,next_attempt_at=?,lease_token=NULL,lease_until=NULL,last_error=? WHERE id=? AND lease_token=?",params:[attempts>=10?'dead':'pending',now+Math.min(3600,2**attempts*30)*1000,reason,row.id,token]}]);
+      await exec.runBatch([{ sql: "UPDATE mall_outbox SET status=?,next_attempt_at=?,lease_token=NULL,lease_until=NULL,last_error=? WHERE id=? AND lease_token=?", params: [attempts >= 10 ? 'dead' : 'pending', now + Math.min(3600, 2 ** attempts * 30) * 1000, reason, row.id, token] }]);
     }
   }
 }
 
-export async function runMallMaintenance(exec: MallExecutor, expire: (id:string)=>Promise<Response>, send?:typeof fetch) {
-  const now=Date.now();
-  await exec.runBatch([{sql:"INSERT OR IGNORE INTO mall_outbox(id,event,payload_json,next_attempt_at,created_at) VALUES (?,'MALL_HEARTBEAT','{}',0,?)",params:[`heartbeat:${new Date(now).toISOString().slice(0,13)}`,new Date(now).toISOString()]}]);
-  const configured=Number(exec.config?.MALL_UNPAID_EXPIRY_HOURS || 48);
-  const hours=Number.isFinite(configured) && configured>=1 && configured<=720 ? configured : 48;
-  const old=await exec.queryAll("SELECT o.id FROM mall_orders o WHERE o.status IN ('pending','confirmed') AND o.linked_sale_id IS NULL AND o.created_at<? ORDER BY o.created_at LIMIT 20",[new Date(now-hours*3600_000).toISOString()]);
+export async function runMallMaintenance(exec: MallExecutor, expire: (id: string) => Promise<Response>, send?: typeof fetch) {
+  const now = Date.now();
+  await exec.runBatch([{ sql: "INSERT OR IGNORE INTO mall_outbox(id,event,payload_json,next_attempt_at,created_at) VALUES (?,'MALL_HEARTBEAT','{}',0,?)", params: [`heartbeat:${new Date(now).toISOString().slice(0, 13)}`, new Date(now).toISOString()] }]);
+  const configured = Number(exec.config?.MALL_UNPAID_EXPIRY_HOURS || 48);
+  const hours = Number.isFinite(configured) && configured >= 1 && configured <= 720 ? configured : 48;
+  const old = await exec.queryAll("SELECT o.id FROM mall_orders o WHERE o.status IN ('pending','confirmed') AND o.linked_sale_id IS NULL AND o.created_at<? ORDER BY o.created_at LIMIT 20", [new Date(now - hours * 3600_000).toISOString()]);
   // One bad order must not cancel the whole maintenance run: cart cleanup, the
   // outbox drain and the scheduler freshness marker all ran after a single
   // expiry failure before, flipping readiness.scheduler off for an unrelated
   // reason. Log per-order failures and keep draining the rest.
-  let expiryFailures=0;
-  for(const row of old) {
+  let expiryFailures = 0;
+  for (const row of old) {
     try {
-      const response=await expire(row.id);
-      if(!response.ok && response.status!==409) throw new Error(`HTTP ${response.status}`);
+      const response = await expire(row.id);
+      if (!response.ok && response.status !== 409) throw new Error(`HTTP ${response.status}`);
     } catch (error) {
       expiryFailures++;
       console.warn('[mall-maintenance] unpaid order expiry failed:', row.id, error instanceof Error ? error.message : String(error));
@@ -418,21 +430,21 @@ export async function runMallMaintenance(exec: MallExecutor, expire: (id:string)
   }
   if (expiryFailures) console.warn(`[mall-maintenance] ${expiryFailures} unpaid order(s) failed to expire and stay queued for the next run.`);
   await exec.runBatch([
-    {sql:"DELETE FROM mall_carts WHERE id IN (SELECT c.id FROM mall_carts c WHERE c.updated_at<? LIMIT 100)",params:[now-30*86400_000]},
-    {sql:'DELETE FROM mall_cart_items WHERE NOT EXISTS(SELECT 1 FROM mall_carts c WHERE c.id=mall_cart_items.cart_id)'},
-    {sql:'DELETE FROM mall_rate_limits WHERE expires_at<?',params:[now]},
-    {sql:"DELETE FROM mall_outbox WHERE status='delivered' AND delivered_at<?",params:[new Date(now-30*86400_000).toISOString()]},
-    {sql:'DELETE FROM mall_metrics WHERE day<?',params:[new Date(now-90*86400_000).toISOString().slice(0,10)]},
+    { sql: "DELETE FROM mall_carts WHERE id IN (SELECT c.id FROM mall_carts c WHERE c.updated_at<? LIMIT 100)", params: [now - 30 * 86400_000] },
+    { sql: 'DELETE FROM mall_cart_items WHERE NOT EXISTS(SELECT 1 FROM mall_carts c WHERE c.id=mall_cart_items.cart_id)' },
+    { sql: 'DELETE FROM mall_rate_limits WHERE expires_at<?', params: [now] },
+    { sql: "DELETE FROM mall_outbox WHERE status='delivered' AND delivered_at<?", params: [new Date(now - 30 * 86400_000).toISOString()] },
+    { sql: 'DELETE FROM mall_metrics WHERE day<?', params: [new Date(now - 90 * 86400_000).toISOString().slice(0, 10)] },
   ]);
-  const stale=await exec.queryAll("SELECT id,order_no FROM mall_orders WHERE status IN ('processing','packed','ready_for_pickup','out_for_delivery') AND created_at<? LIMIT 50",[new Date(now-24*3600_000).toISOString()]);
-  const alertStatements:MallStmt[]=stale.flatMap(row=>{
-    const id=`stale:${row.id}:${new Date(now).toISOString().slice(0,10)}`;
+  const stale = await exec.queryAll("SELECT id,order_no FROM mall_orders WHERE status IN ('processing','packed','ready_for_pickup','out_for_delivery') AND created_at<? LIMIT 50", [new Date(now - 24 * 3600_000).toISOString()]);
+  const alertStatements: MallStmt[] = stale.flatMap(row => {
+    const id = `stale:${row.id}:${new Date(now).toISOString().slice(0, 10)}`;
     return [
-      {sql:"INSERT OR IGNORE INTO mall_outbox(id,order_id,event,payload_json,next_attempt_at,created_at) VALUES (?,?,'STAFF_ATTENTION_REQUIRED',?,0,?)",params:[id,row.id,JSON.stringify({orderNo:row.order_no}),new Date(now).toISOString()]},
-      {sql:"INSERT OR IGNORE INTO notifications(id,title,message,type,is_read,created_at) VALUES (?,'Mall order needs attention',?,'mall_order',0,?)",params:[id,row.order_no,new Date(now).toISOString()]},
+      { sql: "INSERT OR IGNORE INTO mall_outbox(id,order_id,event,payload_json,next_attempt_at,created_at) VALUES (?,?,'STAFF_ATTENTION_REQUIRED',?,0,?)", params: [id, row.id, JSON.stringify({ orderNo: row.order_no }), new Date(now).toISOString()] },
+      { sql: "INSERT OR IGNORE INTO notifications(id,title,message,type,is_read,created_at) VALUES (?,'Mall order needs attention',?,'mall_order',0,?)", params: [id, row.order_no, new Date(now).toISOString()] },
     ];
   });
-  if(alertStatements.length) await exec.runBatch(alertStatements);
-  await drainMallOutbox(exec,send);
-  await exec.runBatch([{sql:"INSERT INTO mall_job_runs(name,last_success_at) VALUES ('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at",params:[new Date().toISOString()]}]);
+  if (alertStatements.length) await exec.runBatch(alertStatements);
+  await drainMallOutbox(exec, send);
+  await exec.runBatch([{ sql: "INSERT INTO mall_job_runs(name,last_success_at) VALUES ('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at", params: [new Date().toISOString()] }]);
 }

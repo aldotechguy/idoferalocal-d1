@@ -384,7 +384,7 @@ async function transitionOrder(exec: MallExecutor, id: string, actor: StaffActor
       params: [`del-${id}`, `DEL-${s(row.order_no).replace(/^MALL-/, '')}`, row.linked_sale_id, s(invoice[0]?.receipt_no), row.customer_id, row.customer_name, row.customer_phone, s(delivery.address), JSON.stringify(saleItems), row.delivery_fee_kobo, `Created from Mall order ${row.order_no}. ${s(delivery.note)}`, actor.displayName, at, at],
     });
   }
-  if (action === 'mark-out-for-delivery') stmts.push({sql:"UPDATE delivery_orders SET status='In Transit',courier_notes=?,updated_at=? WHERE sale_id=?",params:[body.courier.trim(),at,row.linked_sale_id]});
+  if (action === 'mark-out-for-delivery') stmts.push({sql:"UPDATE delivery_orders SET status='Out for Delivery',courier_notes=?,updated_at=? WHERE sale_id=?",params:[body.courier.trim(),at,row.linked_sale_id]});
   if (action === 'complete' && zone !== 'pickup') stmts.push({sql:"UPDATE delivery_orders SET status='Delivered',updated_at=? WHERE sale_id=?",params:[at,row.linked_sale_id]});
   // Transitions write audit_logs and (on dispatch) a delivery_order — both
   // client-visible stores: bump the revision.
@@ -408,7 +408,7 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
   const at = nowIso();
   const stmts: MallStmt[] = [{ sql: `UPDATE mall_orders SET status = 'refunded' WHERE id = ?`, params: [id] }];
   stmts.push({sql:'INSERT INTO mall_returns(order_id,disposition,receipt_reference,reason,actor_id,created_at) VALUES (?,?,?,?,?,?)',params:[id,returnStock?'restocked':'not_restocked',s(body?.returnReference).trim().slice(0,120),reason,actor.id,at]});
-  stmts.push({sql:"UPDATE delivery_orders SET status=?,updated_at=?,notes=COALESCE(notes,'') || ? WHERE sale_id=?",params:[returnStock?'Returned':'Cancelled',at,` | Mall refund: ${reason}`,row.linked_sale_id]});
+  stmts.push({sql:"UPDATE delivery_orders SET status='Cancelled',updated_at=?,notes=COALESCE(notes,'') || ? WHERE sale_id=?",params:[at,` | Mall refund: ${reason}${returnStock ? ' | Returned' : ''}`,row.linked_sale_id]});
   stmts.push({ sql: `UPDATE payments SET status = 'refunded', raw_json = ? WHERE order_id = ?`, params: [JSON.stringify({ orderNo: row.order_no, refundedBy: actor.displayName, refundedAt: at, reason, returnStock }), id] });
   // Parity with the client-side refundSale(). A Mall refund is a FULL refund, so it
   // has to settle the relational finance fields too: writing only `status` left

@@ -392,13 +392,14 @@ for (const runtime of ['node', 'worker'] as const) {
     assert.equal((await f.op('mark-ready')).status, 409);
     assert.equal((await f.op('mark-out-for-delivery')).status, 400);
     assert.equal((await f.op('mark-out-for-delivery', { courier: 'Test courier' })).status, 200);
-    assert.equal(f.scalar('SELECT status FROM delivery_orders'), 'In Transit');
+    assert.equal(f.scalar('SELECT status FROM delivery_orders'), 'Out for Delivery');
     assert.throws(() => f.db.exec("UPDATE delivery_orders SET status='Delivered'"));
     assert.equal((await f.op('complete')).status, 200);
     assert.equal(f.scalar('SELECT status FROM delivery_orders'), 'Delivered');
     assert.equal((await f.op('refund', { reason: 'Return', returnStock: true })).status, 400);
     assert.equal((await f.op('refund', { reason: 'Return', returnStock: true, returnReference: 'GRN-TEST' })).status, 200);
-    assert.equal(f.scalar('SELECT status FROM delivery_orders'), 'Returned');
+    assert.equal(f.scalar('SELECT status FROM delivery_orders'), 'Cancelled');
+    assert.ok(String(f.scalar('SELECT notes FROM delivery_orders')).includes('Returned'));
     assert.equal(f.scalar('SELECT receipt_reference FROM mall_returns'), 'GRN-TEST');
     assert.equal(f.scalar('SELECT stock_qty FROM products'), 10);
   });
@@ -1874,12 +1875,14 @@ test('buy-again seeks session history and product IDs instead of scanning a 10K 
   f.db.exec('COMMIT; ANALYZE');
 
   let captured: { sql: string; params: any[] } | undefined;
-  const instrumented: MallExecutor = { ...f.exec, queryAll: async (sql, params = []) => {
-    // Isolate this rail: the three shared homepage rails have separate coverage.
-    if (!sql.includes('last_purchase')) return [];
-    captured = { sql, params };
-    return f.exec.queryAll(sql, params);
-  } };
+  const instrumented: MallExecutor = {
+    ...f.exec, queryAll: async (sql, params = []) => {
+      // Isolate this rail: the three shared homepage rails have separate coverage.
+      if (!sql.includes('last_purchase')) return [];
+      captured = { sql, params };
+      return f.exec.queryAll(sql, params);
+    }
+  };
   const response = await handleMallApi(new Request('http://test/api/mall/home', {
     headers: { 'x-mall-session': session },
   }), instrumented);
@@ -1943,10 +1946,12 @@ test('top-sellers ranks by key and sums sales from the covering index, not per-p
   f.db.exec('COMMIT; ANALYZE');
 
   let rail;
-  const instrumented = { ...f.exec, queryAll: async (sql, params = []) => {
-    if (!rail && sql.includes('AS sold_qty')) rail = { sql };
-    return f.exec.queryAll(sql, params);
-  } };
+  const instrumented = {
+    ...f.exec, queryAll: async (sql, params = []) => {
+      if (!rail && sql.includes('AS sold_qty')) rail = { sql };
+      return f.exec.queryAll(sql, params);
+    }
+  };
   const response = await handleMallApi(new Request('http://test/api/mall/home', {
     headers: { 'x-mall-session': session },
   }), instrumented);

@@ -210,6 +210,26 @@ requires a courier. Pickup orders cannot dispatch, delivery orders cannot enter 
 pickup branch. Mall completion/refund synchronizes the related delivery row; direct
 conflicting changes through the generic delivery model are rejected.
 
+### Delivery status vocabulary (schema marker v11)
+
+Mall-written `delivery_orders` rows use the store's `DeliveryStatus` values
+exactly, so the Deliveries & Pickups list and the Mall order timeline agree:
+
+- `Pending Pickup` on dispatch-row creation
+- `Out for Delivery` on dispatch (previously `In Transit`, which the generic UI
+  had no status for)
+- `Delivered` on completion
+- `Cancelled` on refund, with the return disposition recorded in `notes`
+  ("Returned (Mall refund)") and in `mall_returns.disposition` — a Mall refund
+  no longer writes a `Returned` status the generic model does not have.
+
+The `mall_delivery_consistency` trigger enforces these values (out_for_delivery →
+`Out for Delivery`, completed → `Delivered`, refunded → `Cancelled` only). It is
+replaced, not edited, because trigger DDL is `CREATE TRIGGER IF NOT EXISTS`; the
+v11 rollout drops the v10 trigger before recreating it, and remaps existing rows
+(`In Transit` → `Out for Delivery`, `Returned` → `Cancelled` plus a returned-note)
+so historical Mall-created deliveries render correctly in the store UI.
+
 Refunds require a reason and explicit stock disposition. Restocking goods after
 dispatch or customer collection requires a goods-received reference. The return
 record persists disposition, reference, reason, actor, and time. Partial refunds,

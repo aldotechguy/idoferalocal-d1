@@ -212,7 +212,7 @@ expect('Refund Outflow written', scalar(`SELECT COUNT(*) FROM money_movements WH
 expect('stock restored (8 + 22)', scalar('SELECT SUM(stock_qty) FROM products'), 30);
 expect('customer metrics rolled back', scalar(`SELECT loyalty_points + purchase_history_count FROM customers WHERE name = 'Emeka Okon'`), 0);
 expect('mall_returns restock row', scalar('SELECT disposition FROM mall_returns'), 'restocked');
-expect('delivery order returned', scalar('SELECT status FROM delivery_orders'), 'Returned');
+expect('delivery order cancelled on refund', scalar('SELECT status FROM delivery_orders'), 'Cancelled');
 
 printRows('sales (one Completed, one Refunded)', `SELECT id, receipt_no, customer_name, status, total_kobo AS total, payment_method, notes FROM sales`);
 printRows('money_movements (Sale Inflow + Refund Outflow)', `SELECT id, date, type, subtype, source_account, dest_account, amount_kobo AS amount, notes, ref_id FROM money_movements`);
