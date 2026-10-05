@@ -880,6 +880,110 @@ test('unpaid expiry restores stock once, cleans abandoned carts and emits cancel
   assert.equal(f.scalar("SELECT status FROM mall_order_events WHERE action='CANCEL_MALL_ORDER'"), 'cancelled');
 });
 
+test("the two-cron split keeps the drain independent of the sweep", async t => {
+  const f = await fixture('node'); t.after(() => f.db.close()); await f.checkout();
+  // The drain is gated on a >=32-char HMAC secret (webhookSecretReady), so a bare
+  // fixture config would return before claiming anything and prove nothing.
+  f.exec.config = { ...f.exec.config, MALL_WEBHOOK_SECRET: 'maintenance-split-secret-0123456789abcdef', MALL_OUTBOX_DRAIN_GAP_MS: '0' };
+  f.db.exec("UPDATE mall_orders SET created_at='2020-01-01T00:00:00.000Z';UPDATE mall_carts SET updated_at=0");
+  const never = async () => { throw new Error('the drain path must not run unpaid expiry'); };
+  const send = async () => new Response(null, { status: 204 });
+
+  // The ten-minute 'drain' cron: delivers the queued order event and refreshes
+  // readiness, but must NOT touch expiry or the cleanup DELETEs. Without this,
+  // splitting the cron would silently stop unpaid orders ever being released.
+  f.db.exec("UPDATE mall_outbox SET status='pending',next_attempt_at=0,attempts=0");
+  let drained = 0;
+  await runMallMaintenance(f.exec, never, (async () => { drained += 1; return new Response(null, { status: 204 }); }) as unknown as typeof send, { mode: 'drain' });
+  assert.ok(drained >= 1, 'the drain cron must deliver queued events');
+  assert.equal(f.scalar("SELECT status FROM mall_outbox WHERE event='ORDER_RECEIVED'"), 'delivered');
+  assert.equal(f.scalar('SELECT status FROM mall_orders'), 'pending', 'drain must not expire unpaid orders');
+  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_carts'), 1, 'drain must not run cart cleanup');
+  assert.ok(f.scalar("SELECT last_success_at FROM mall_job_runs WHERE name='maintenance'"), 'drain owns the readiness marker');
+
+  // The hourly 'sweep' cron: does the batch work, and — critically — must NOT
+  // refresh the marker. Letting it do so would keep readiness.scheduler green
+  // off the back of unrelated cleanup even if the drain cron stopped firing.
+  f.db.exec("DELETE FROM mall_job_runs");
+  const expire = (id: string) => handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/cancel`, { method: 'POST', body: JSON.stringify({ reason: 'Expired unpaid' }) }), f.exec, actor);
+  await runMallMaintenance(f.exec, expire, send, { mode: 'sweep' });
+  assert.equal(f.scalar('SELECT status FROM mall_orders'), 'cancelled', 'sweep expires unpaid orders');
+  assert.equal(f.scalar('SELECT stock_qty FROM products'), 10, 'expiry restores stock');
+  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_carts'), 0, 'sweep cleans abandoned carts');
+  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_job_runs'), 0, 'a sweep must never write the readiness marker');
+
+  // The default mode is the full run, which is what the Node runtime and every
+  // existing caller rely on. It does both halves AND owns the marker.
+  await runMallMaintenance(f.exec, never, send);
+  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_job_runs'), 1, "the default mode must own the readiness marker");
+});
+
+test('the scheduler cadence and the readiness window stay coupled', async t => {
+  const f = await fixture('node'); t.after(() => f.db.close()); await f.checkout();
+  const age = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+  const ready = async () => (await mallReadiness(f.exec)).checks.scheduler;
+
+  // The drain cron is every ten minutes, so three missed runs is the tolerance
+  // the window must absorb. Widening the cron without widening this check is
+  // the one change that turns the Mall's own readiness against itself.
+  f.db.exec("DELETE FROM mall_job_runs");
+  f.db.exec("INSERT INTO mall_job_runs(name,last_success_at) VALUES ('maintenance','" + age(29) + "')");
+  assert.equal(await ready(), true, 'one missed run must not fail readiness');
+  f.db.exec("UPDATE mall_job_runs SET last_success_at='" + age(31) + "'");
+  assert.equal(await ready(), false, 'three missed runs must fail readiness');
+});
+
+test('the abandoned-cart sweep is indexed and the delivery ledger is bounded', async t => {
+  const f = await fixture('node'); t.after(() => f.db.close());
+  // The 30-day cart delete filtered mall_carts on updated_at with no index on it,
+  // so every scheduler run full-scanned the table.
+  const plan = f.db.prepare(
+    "EXPLAIN QUERY PLAN DELETE FROM mall_carts WHERE id IN (SELECT c.id FROM mall_carts c WHERE c.updated_at<? LIMIT 100)"
+  ).all(9999999999999) as any[];
+  assert.match(JSON.stringify(plan), /idx_mall_carts_updated/, 'the abandoned-cart sweep must use idx_mall_carts_updated');
+
+  // mall_webhook_deliveries was the only cron-written table with no retention
+  // rule. Thirty days is far past the receiver's seven-day dedupe window, so a
+  // recent row must survive the sweep.
+  const old = new Date(Date.now() - 40 * 86400_000).toISOString();
+  const fresh = new Date(Date.now() - 2 * 86400_000).toISOString();
+  f.db.exec(`INSERT INTO mall_webhook_deliveries(id,event_id,event,status,delivered_at) VALUES ('w-old','e1','ORDER_RECEIVED','sent','${old}')`);
+  f.db.exec(`INSERT INTO mall_webhook_deliveries(id,event_id,event,status,delivered_at) VALUES ('w-new','e2','ORDER_RECEIVED','sent','${fresh}')`);
+  await runMallMaintenance(f.exec, async () => new Response(null, { status: 204 }));
+  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_webhook_deliveries WHERE id='w-old'"), 0, 'a 40-day-old ledger row is pruned');
+  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_webhook_deliveries WHERE id='w-new'"), 1, 'a recent row inside the dedupe window must survive');
+});
+
+test('the order-timeline prune is indexed and never orphans an in-flight order', async t => {
+  const f = await fixture('node'); t.after(() => f.db.close()); await f.checkout();
+  // idx_mall_events_order LEADS with order_id, so it cannot serve a created_at
+  // predicate: without this index the prune would full-scan the timeline every
+  // hourly sweep — the same trap mall_carts had.
+  const plan = f.db.prepare('EXPLAIN QUERY PLAN DELETE FROM mall_order_events WHERE created_at<?').all('2000-01-01') as any[];
+  assert.match(JSON.stringify(plan), /idx_mall_events_created/, 'the timeline prune must use idx_mall_events_created');
+
+  const daysAgo = (n: number) => new Date(Date.now() - n * 86400_000).toISOString();
+  const orderId = f.scalar('SELECT id FROM mall_orders') as string;
+  // This order is still `pending`, so it represents one still in flight.
+  f.db.exec(`INSERT INTO mall_order_events(id,order_id,action,actor_id,details,status,created_at)
+    VALUES ('e-ancient-open','${orderId}','ORDER_RECEIVED','storefront','ancient','pending','${daysAgo(500)}')`);
+  // A closed order whose order row is gone entirely (the common case once an
+  // order is archived out of mall_orders).
+  f.db.exec(`INSERT INTO mall_order_events(id,order_id,action,actor_id,details,status,created_at)
+    VALUES ('e-ancient-gone','order-does-not-exist','ORDER_RECEIVED','storefront','ancient','completed','${daysAgo(500)}')`);
+  f.db.exec(`INSERT INTO mall_order_events(id,order_id,action,actor_id,details,status,created_at)
+    VALUES ('e-recent','${orderId}','ORDER_RECEIVED','storefront','recent','pending','${daysAgo(3)}')`);
+
+  await runMallMaintenance(f.exec, async () => new Response(null, { status: 204 }));
+
+  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_order_events WHERE id='e-ancient-open'"), 1,
+    'a 500-day-old event must survive while its order is still in flight');
+  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_order_events WHERE id='e-ancient-gone'"), 0,
+    'an event whose order no longer exists is prunable');
+  assert.equal(f.scalar("SELECT COUNT(*) FROM mall_order_events WHERE id='e-recent'"), 1,
+    'an in-window event is never touched');
+});
+
 test('database guards reject invalid records and legacy phone expression indexes match exact values', async t => {
   const f = await fixture('node'); t.after(() => f.db.close());
   assert.throws(() => f.db.exec('UPDATE mall_cart_items SET qty=0'));

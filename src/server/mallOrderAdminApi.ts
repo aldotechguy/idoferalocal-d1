@@ -2,7 +2,7 @@ import type { MallExecutor, MallStmt } from './mallApi.js';
 import { n, s } from './relationalMapper.js';
 import { revisionBumpStatement, runOrderBatch } from './mallSafety.js';
 import { normalizedPhoneSql, normalizeMallPhone } from '../shared/mallPhone.js';
-import { mallMetrics, runMallMaintenance } from './mallOperations.js';
+import { mallMetrics, runMallMaintenance, type MallMaintenanceOptions } from './mallOperations.js';
 import { registerMallCacheInvalidator } from './mallApi.js';
 import { MAX_MALL_SEARCH_CHARS } from '../shared/mallSearch.js';
 
@@ -584,8 +584,8 @@ async function staffMallRoute(request: Request, exec: MallExecutor, actor: Staff
   }
 }
 
-export async function maintainMall(exec: MallExecutor, send?: typeof fetch) {
+export async function maintainMall(exec: MallExecutor, send?: typeof fetch, options?: MallMaintenanceOptions) {
   return runMallMaintenance(exec, id => handleStaffMallApi(new Request(`https://internal/api/staff/mall-orders/${encodeURIComponent(id)}/cancel`,{
     method:'POST',body:JSON.stringify({reason:'Unpaid order expired; reserved stock released.'}),
-  }),exec,{id:'mall-scheduler',displayName:'Mall scheduler',role:'Administrator'}), send);
+  }),exec,{id:'mall-scheduler',displayName:'Mall scheduler',role:'Administrator'}), send, options);
 }

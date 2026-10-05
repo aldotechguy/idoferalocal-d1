@@ -72,8 +72,23 @@ directory = "./dist"
 binding = "ASSETS"
 run_worker_first = true
 
+# TWO crons, deliberately split by responsibility (src/server/mallOperations.ts
+# `MallMaintenanceMode`). The handler branches on `controller.cron`:
+#
+#   "*/10 * * * *" -> mode 'drain'  heartbeat + outbox drain + readiness marker.
+#                     Notification latency stays 0-10 minutes; this is the path
+#                     that owns readiness.scheduler, so a dead drain is still
+#                     detected (3 missed runs = 30 min, see mallReadiness).
+#   "7 * * * *"    -> mode 'sweep'  unpaid expiry, cleanup DELETEs, stale-order
+#                     alerts, delivery-ledger retention. Minute 7 is off every
+#                     "*/10" boundary so the two never share a minute.
+#
+# Running both bodies on every trigger cost ~3,264 D1 statements/day on a system
+# with no orders at all; this split is ~768/day with identical behaviour. The
+# sweep path deliberately does NOT refresh mall_job_runs, so it can never mask a
+# dead drain.
 [env.mall.triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/10 * * * *", "7 * * * *"]
 
 [[env.mall.d1_databases]]
 binding = "DB"
@@ -142,7 +157,8 @@ MALL_PICKUP_HOURS = "10AM - 6PM"
   # documented trigger for Gmail's 550-5.7.1 UnsolicitedMessageError
   # (docs/gmail-deliverability-fix.md). These are the safe defaults; a blank or
   # unparseable value falls back to them rather than to "no throttle".
-  # Worst case is now 3 events (6 emails) spaced 2s apart, per 5-minute run.
+  # Worst case is now 3 events (6 emails) spaced 2s apart, per drain run
+  # (the drain cron runs every ten minutes; see [env.mall.triggers]).
   MALL_OUTBOX_DRAIN_BATCH = "3"
   MALL_OUTBOX_DRAIN_GAP_MS = "2000"
 

@@ -31,9 +31,10 @@ defines the live `mall` environment (`name = "idomall"`), backed by relational D
 Set all Mall secrets as Wrangler variables on the `mall` environment — never pass them
 on the public command line. A local `.env` mirrors the variable names and is the
 canonical list of required secrets; verify it is git-ignored before deployment.
-configured five-minute Cron Trigger for both environments. Verify cron deployment
+two configured Cron Triggers per environment (a ten-minute drain and an hourly
+sweep — see "Scheduler split" below). Verify cron deployment
 and an external process supervisor for Node. At most 20 expired orders are processed
-per maintenance invocation to bound database work; oldest orders are processed first,
+per sweep invocation to bound database work; oldest orders are processed first,
 and a single failed expiry is logged and left queued for the next run instead of
 aborting that run's cart cleanup, outbox drain and scheduler marker. Monitor the
 expiry backlog and raise the per-run bound deliberately if volume requires it.
@@ -96,6 +97,36 @@ dead letters. Successful deliveries are retained for 30 days; undelivered events
 are not silently removed. The receiver URL is privileged configuration: never point
 it at an internal/private endpoint or accept it from public input.
 
+### Scheduler split: two crons, one handler
+
+`scheduled()` branches on `controller.cron`, so one Worker runs two schedules with
+different jobs. `MallMaintenanceMode` in `src/server/mallOperations.ts` is the enum;
+`mode` defaults to `'all'`, which is what the Node runtime and every existing caller
+rely on.
+
+| Cron | Mode | Does | Writes the readiness marker? |
+| --- | --- | --- | --- |
+| `*/10 * * * *` | `drain` | heartbeat, outbox drain | **yes** |
+| `7 * * * *` | `sweep` | unpaid expiry, cleanup DELETEs, stale alerts, ledger retention | **no** |
+
+- Minute 7 is deliberately off every `*/10` boundary so the two never share a minute.
+- **Only the drain path owns `mall_job_runs`.** The marker is the signal that
+  notifications are still flowing, so letting a working hourly cleanup refresh it
+  would keep `readiness.scheduler` green even if the drain cron had stopped entirely.
+- The cron comparison exact-matches one expression on purpose. An unrecognised or
+  absent cron string resolves to `'drain'`, never `'sweep'`: a typo must fail toward
+  draining the queue, not toward silently skipping expiry and cleanup.
+- **The readiness windows are coupled to this cadence and must be widened in the same
+  change that widens the cron.** `readiness.scheduler` allows 30 minutes (three missed
+  ten-minute runs) and the stuck-notification window is 60 minutes. Narrowing the cron
+  without narrowing the tolerance, or the reverse, turns the Mall's own launch check
+  against it.
+- Notification latency is 0–10 minutes. Backoff still tops out at one hour and
+  dead-lettering still takes 10 attempts, but attempts can only land on ten-minute
+  ticks, so a permanently failing event reaches `dead` in ~2.5h rather than ~1.7h.
+- Throughput: 3 rows × 6 runs/hour = ~18 events/hour (≈36 emails/hour). The drain is
+  not the binding constraint at normal order volume.
+
 ### Drain pacing (burst protection)
 
 A drain is paced, and the pacing is deliberate rather than incidental. Sending was
@@ -114,14 +145,38 @@ trigger for `550-5.7.1 UnsolicitedMessageError` (see `docs/gmail-deliverability-
   skipped and never costs a pause, because it emits nothing.
 - The lease `UPDATE` runs inside the loop, so each row's two-minute lease starts on
   its own turn. The gap can never push a claim past its expiry.
+- **The `MALL_HEARTBEAT` probe sorts last, never merely late.** It is an hourly
+  liveness check, so during a backlog it would otherwise consume one of only `batch`
+  slots ahead of a real customer order event.
 - **A blank or unparseable value falls back to the default, never to "no throttle."**
   Failing open would restore the exact burst this exists to prevent. Only an explicit
   `MALL_OUTBOX_DRAIN_GAP_MS=0` disables pacing.
-- Throughput: 3 rows × 12 runs/hour = ~36 events/hour (≈72 emails/hour). The drain
-  is not the binding constraint at normal order volume. Worst case adds 4s per run.
 - If buyers report late dispatch notices, raise the gap rather than the batch:
   `MALL_OUTBOX_DRAIN_GAP_MS="10000"` spreads the same volume over a longer window,
   which is the lever that actually affects reputation.
+
+### Retention
+
+Every table the scheduler writes is bounded. The two windows are named constants
+(`MALL_DELIVERY_RETENTION_DAYS`, `MALL_EVENT_RETENTION_DAYS`) so changing a
+retention policy is a one-line change, not a hunt through SQL.
+
+| Table | Rule | Why |
+| --- | --- | --- |
+| `mall_outbox` | delivered rows pruned after 30 days | |
+| `mall_rate_limits` | pruned on expiry | |
+| `mall_metrics` | pruned after 90 days | |
+| `mall_webhook_deliveries` | 30 days (`MALL_DELIVERY_RETENTION_DAYS`) | ~4x the receiver's 7-day dedupe window, so nothing that could still suppress a duplicate email is dropped |
+| `mall_order_events` | 365 days (`MALL_EVENT_RETENTION_DAYS`) | the staff-facing order timeline, so the window is a product decision, not a mechanical one |
+
+- `mall_order_events` rows are **only pruned when their order is terminal**
+  (`completed`/`cancelled`/`refunded`) or the order row no longer exists. An order
+  that is still in flight keeps its entire audit trail regardless of age, so a
+  stalled or long-running order can never lose its history to a sweep.
+- Both prunes need their own index. `idx_mall_events_order` leads with `order_id`,
+  so it cannot serve a `created_at` predicate; `idx_mall_events_created` exists for
+  exactly that. Without it the retention rule would trade an unbounded row count
+  for a full table scan on every hourly sweep — the same trap `mall_carts` had.
 
 ## Email notifications (deployed receiver)
 
@@ -130,7 +185,7 @@ but not unauthenticated — every request must carry a valid `sha256=` HMAC sign
 it must stay exempt from the staff-entrance gate (a staff cookie cannot be presented by
 the scheduler) while never being reachable without the signature check.
 
-Delivery is IN PROCESS. The five-minute scheduler builds the signed POST and hands it
+Delivery is IN PROCESS. The scheduler builds the signed POST and hands it
 straight to the receiver function instead of fetching `MALL_WEBHOOK_URL` over the
 network. The URL is a hostname this Worker's own route matches, and Cloudflare answers a
 self-referential fetch with error 1042 ("Internal request count exceeded") once the

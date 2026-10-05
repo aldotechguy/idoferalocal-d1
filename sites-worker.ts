@@ -1092,8 +1092,21 @@ async function serveAsset(request: Request, env: Env) {
 }
 
 export default {
-  async scheduled(_controller: unknown, env: Env): Promise<void> {
+  async scheduled(controller: unknown, env: Env): Promise<void> {
     await ensureSchema(env);
+    // Two crons drive this handler (see [env.mall.triggers]): a ten-minute drain
+    // and an hourly sweep. Cloudflare hands back the matched expression as
+    // `controller.cron`, so the handler splits on it rather than repeating all
+    // the work 144 times a day.
+    //
+    // The comparison EXACT-MATCHES one expression on purpose. An unrecognised or
+    // absent cron string resolves to `'drain'`, never to `'sweep'`: a typo in
+    // wrangler.toml must fail toward draining the queue and keeping readiness
+    // green, not toward silently skipping expiry and cleanup. Note that `'drain'`
+    // still writes the readiness marker, and only `'sweep'` steps aside from it.
+    const mode = (controller as { cron?: string } | undefined)?.cron === '7 * * * *'
+      ? 'sweep'
+      : 'drain';
     await maintainMall({
       config: env, queryAll: makeD1QueryAll(env), runBatch: async stmts => {
         const result = await env.DB.batch(toD1Statements(env, stmts));
@@ -1113,7 +1126,7 @@ export default {
         body: init?.body as string,
       });
       return await handleMallWebhook(request, env);
-    });
+    }, { mode });
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);

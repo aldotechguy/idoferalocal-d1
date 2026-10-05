@@ -144,7 +144,7 @@ const MALL_STATUS_EVENTS: Record<string, string> = {
  *
  * `data` is the payload captured by the trigger at event time; `liveStatus` is
  * the order status read at SEND time. `data.status` must win: the drain runs on
- * a five-minute cron with exponential retry, so an `out_for_delivery` event can
+ * a cron with exponential retry, so an `out_for_delivery` event can
  * be delivered minutes later, after the order already reached `completed`.
  * Reading the live row there would mislabel a dispatch as a delivery.
  */

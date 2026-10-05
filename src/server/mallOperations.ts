@@ -28,7 +28,13 @@ import { normalizedPhoneSql } from '../shared/mallPhone.js';
 // v12 adds sales.updated_at: the edit clock the sync merge ranks competing sale
 // copies with. Without it the server silently dropped every client `updatedAt`
 // and a local sale edit became indistinguishable from an unedited record.
-export const MALL_SCHEMA_VERSION = 12;
+// v13 adds idx_mall_carts_updated: the abandoned-cart maintenance sweep filters
+// mall_carts on updated_at and had no index on it, so every scheduler run
+// full-scanned the table. It also adds idx_mall_events_created, because
+// idx_mall_events_order leads with order_id and so cannot serve the order-timeline
+// retention sweep's created_at predicate at all (see MALL_SAFETY_DDL and
+// MALL_OPERATIONS_DDL).
+export const MALL_SCHEMA_VERSION = 13;
 
 export const MALL_MERCH_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: 'mall_featured', ddl: 'ALTER TABLE products ADD COLUMN mall_featured INTEGER NOT NULL DEFAULT 0' },
@@ -125,10 +131,32 @@ export function mallDrainPacing(config: MallConfig = {}) {
 
 const phone = normalizedPhoneSql('customer_phone');
 const orderStates = "'pending','confirmed','processing','packed','ready_for_pickup','out_for_delivery','completed','cancelled','refunded'";
+
+/**
+ * Retention windows for the two cron-written tables that otherwise grow forever.
+ *
+ * `mall_order_events` is the staff-facing order timeline, so its window is a
+ * PRODUCT decision rather than a mechanical one, and it is deliberately the
+ * longest of the two: 365 days keeps every order a shop would plausibly still
+ * be asked about, dispute, or reconcile, while still bounding the table. Lower
+ * it by changing this constant only — the sweep reads it, and nothing else does.
+ */
+export const MALL_EVENT_RETENTION_DAYS = 365;
+/**
+ * The delivery ledger is pure send bookkeeping, and the receiver's dedupe query
+ * only looks back 7 days (`mallWebhook.ts`). Thirty days is therefore ~4x the
+ * window that can still suppress a duplicate email.
+ */
+export const MALL_DELIVERY_RETENTION_DAYS = 30;
 export const MALL_OPERATIONS_DDL = [
   `CREATE TABLE IF NOT EXISTS mall_schema_versions(version INTEGER PRIMARY KEY, installed_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS mall_order_events(id TEXT PRIMARY KEY, order_id TEXT NOT NULL, action TEXT NOT NULL, actor_id TEXT NOT NULL, details TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_mall_events_order ON mall_order_events(order_id, created_at)`,
+  // Retention sweep support. `idx_mall_events_order` LEADS with order_id, so it
+  // cannot serve a `WHERE created_at < ?` predicate at all: pruning the timeline
+  // would full-scan the table, trading an unbounded row count for a full scan on
+  // every hourly sweep. This is the same trap `mall_carts` had.
+  `CREATE INDEX IF NOT EXISTS idx_mall_events_created ON mall_order_events (created_at)`,
   `CREATE TABLE IF NOT EXISTS mall_outbox(id TEXT PRIMARY KEY, order_id TEXT, event TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sending','delivered','dead')), attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL, lease_token TEXT, lease_until INTEGER, last_error TEXT, created_at TEXT NOT NULL, delivered_at TEXT)`,
   `CREATE INDEX IF NOT EXISTS idx_mall_outbox_due ON mall_outbox(status,next_attempt_at)`,
   `CREATE TABLE IF NOT EXISTS mall_job_runs(name TEXT PRIMARY KEY, last_success_at TEXT NOT NULL)`,
@@ -236,14 +264,25 @@ export async function mallReadiness(exec: MallExecutor) {
     // Scheduler recency, stuck/dead notifications, proof a notification was
     // delivered, and the stalled-fulfilment queue all read the same handful of
     // tables: one statement, four independent checks.
+    // Readiness windows are COUPLED TO THE CRON CADENCE and must be widened in
+    // the same change that widens the cron, or the Mall fails its own launch
+    // check. The drain cron is now every TEN minutes (was every five), so both
+    // windows below give THREE missed runs of margin, exactly as the old 15
+    // minutes gave three missed runs of a five-minute cron:
+    //   * scheduler 30 min = 3 missed ten-minute runs.
+    //   * stuck      60 min = 6 missed ten-minute runs. This one is the
+    //     subtler of the two: halving the run rate halves the number of drains
+    //     available inside the window, so at the default batch of 3 a merely
+    //     slow backlog has to clear 3 runs per hour instead of 6. Widening it
+    //     to 60 min restores at least as much tolerance as before.
     const now = Date.now();
     const state = (await exec.queryAll(`SELECT
       (SELECT last_success_at FROM mall_job_runs WHERE name='maintenance') AS scheduler_at,
       (SELECT id FROM mall_outbox WHERE status='dead' OR (status!='delivered' AND created_at < ?) LIMIT 1) AS stuck,
       (SELECT id FROM mall_outbox WHERE status='delivered' LIMIT 1) AS delivered,
       (SELECT id FROM mall_orders WHERE status IN ('processing','packed','ready_for_pickup','out_for_delivery') AND created_at<? LIMIT 1) AS stale`,
-      [new Date(now - 30 * 60_000).toISOString(), new Date(now - 48 * 3600_000).toISOString()]))[0] as any;
-    checks.scheduler = !!state?.scheduler_at && Date.now() - Date.parse(state.scheduler_at) < 15 * 60_000;
+      [new Date(now - 60 * 60_000).toISOString(), new Date(now - 48 * 3600_000).toISOString()]))[0] as any;
+    checks.scheduler = !!state?.scheduler_at && Date.now() - Date.parse(state.scheduler_at) < 30 * 60_000;
     checks.notifications = !state?.stuck;
     checks.webhookDelivery = !!state?.delivered;
     checks.fulfilmentQueue = !state?.stale;
@@ -381,7 +420,12 @@ export async function drainMallOutbox(exec: MallExecutor, send?: typeof fetch, n
   const deliver = send ?? fetch;
   const config = exec.config!;
   const { batch, gapMs } = mallDrainPacing(config);
-  const rows = await exec.queryAll("SELECT * FROM mall_outbox WHERE (status='pending' AND next_attempt_at<=?) OR (status='sending' AND lease_until<?) ORDER BY created_at LIMIT ?", [now, now, batch]);
+  // The heartbeat sorts LAST, never merely late: it is an hourly liveness probe,
+  // so during a backlog it was consuming one of only `batch` slots ahead of a real
+  // customer order event. `(event='MALL_HEARTBEAT')` is 0 for every order event
+  // and 1 for the probe, so ordinary events keep their exact created_at ordering
+  // among themselves and the probe yields to all of them.
+  const rows = await exec.queryAll("SELECT * FROM mall_outbox WHERE (status='pending' AND next_attempt_at<=?) OR (status='sending' AND lease_until<?) ORDER BY (event='MALL_HEARTBEAT'), created_at LIMIT ?", [now, now, batch]);
   // Pacing counts EMISSIONS, not rows: a row we failed to claim is skipped
   // above and never emits anything, so it must not cost a pause. The first
   // emission is never delayed (the common single-event case stays instant) and
@@ -416,43 +460,116 @@ export async function drainMallOutbox(exec: MallExecutor, send?: typeof fetch, n
   }
 }
 
-export async function runMallMaintenance(exec: MallExecutor, expire: (id: string) => Promise<Response>, send?: typeof fetch) {
+/**
+ * What a single maintenance invocation is allowed to do.
+ *
+ * The Worker runs TWO crons against this function (see wrangler.toml):
+ *   * every ten minutes -> `drain`: heartbeat, outbox drain, readiness marker.
+ *   * minute 7 hourly   -> `sweep`: unpaid expiry, cleanup deletes, stale alerts.
+ *
+ * Splitting them removes ~2/3 of the daily D1 traffic: the sweep work is six
+ * DELETEs plus two indexed SELECTs that produce nothing on a quiet system, and
+ * it does not need to run 144 times a day.
+ *
+ * A BOOLEAN IS NOT ENOUGH HERE, and that is the whole point of the enum. The
+ * readiness marker must be written by the drain path and NOT by the sweep path,
+ * otherwise a working hourly cleanup masks a dead drain. But `mode: 'sweep'`
+ * also means "run the sweeps", and the callers that must keep writing the
+ * marker are the ones that run everything: the Node runtime (server.ts drives
+ * this on a 60s interval with no cron string at all), every existing test, and
+ * the `scheduled({}, env)` handler tests. A `sweep?: boolean` cannot express
+ * "run everything and own the marker" independently of "run everything", which
+ * is why an earlier `!sweep` guard silently stranded the Node runtime with no
+ * marker ever written and its readiness permanently false.
+ *
+ * `mode` therefore DEFAULTS TO `'all'`, and that default is load-bearing: only
+ * an explicit mode changes behaviour, so an unrecognised or absent cron
+ * expression fails toward doing the whole job rather than silently skipping it.
+ */
+export type MallMaintenanceMode =
+  /** Everything, and own the readiness marker. Node runtime and tests. */
+  | 'all'
+  /** Drain only. Heartbeat, outbox drain, readiness marker. The ten-minute cron. */
+  | 'drain'
+  /** Sweep only. Expiry, cleanup, stale alerts. No readiness marker. The hourly cron. */
+  | 'sweep';
+
+export interface MallMaintenanceOptions {
+  mode?: MallMaintenanceMode;
+}
+
+export async function runMallMaintenance(
+  exec: MallExecutor,
+  expire: (id: string) => Promise<Response>,
+  send?: typeof fetch,
+  options: MallMaintenanceOptions = {},
+) {
+  const mode = options.mode ?? 'all';
+  const sweep = mode !== 'drain';
+  const ownsMarker = mode !== 'sweep';
   const now = Date.now();
   await exec.runBatch([{ sql: "INSERT OR IGNORE INTO mall_outbox(id,event,payload_json,next_attempt_at,created_at) VALUES (?,'MALL_HEARTBEAT','{}',0,?)", params: [`heartbeat:${new Date(now).toISOString().slice(0, 13)}`, new Date(now).toISOString()] }]);
-  const configured = Number(exec.config?.MALL_UNPAID_EXPIRY_HOURS || 48);
-  const hours = Number.isFinite(configured) && configured >= 1 && configured <= 720 ? configured : 48;
-  const old = await exec.queryAll("SELECT o.id FROM mall_orders o WHERE o.status IN ('pending','confirmed') AND o.linked_sale_id IS NULL AND o.created_at<? ORDER BY o.created_at LIMIT 20", [new Date(now - hours * 3600_000).toISOString()]);
-  // One bad order must not cancel the whole maintenance run: cart cleanup, the
-  // outbox drain and the scheduler freshness marker all ran after a single
-  // expiry failure before, flipping readiness.scheduler off for an unrelated
-  // reason. Log per-order failures and keep draining the rest.
-  let expiryFailures = 0;
-  for (const row of old) {
-    try {
-      const response = await expire(row.id);
-      if (!response.ok && response.status !== 409) throw new Error(`HTTP ${response.status}`);
-    } catch (error) {
-      expiryFailures++;
-      console.warn('[mall-maintenance] unpaid order expiry failed:', row.id, error instanceof Error ? error.message : String(error));
+  if (sweep) {
+    const configured = Number(exec.config?.MALL_UNPAID_EXPIRY_HOURS || 48);
+    const hours = Number.isFinite(configured) && configured >= 1 && configured <= 720 ? configured : 48;
+    const old = await exec.queryAll("SELECT o.id FROM mall_orders o WHERE o.status IN ('pending','confirmed') AND o.linked_sale_id IS NULL AND o.created_at<? ORDER BY o.created_at LIMIT 20", [new Date(now - hours * 3600_000).toISOString()]);
+    // One bad order must not cancel the whole maintenance run: cart cleanup, the
+    // outbox drain and the scheduler freshness marker all ran after a single
+    // expiry failure before, flipping readiness.scheduler off for an unrelated
+    // reason. Log per-order failures and keep draining the rest.
+    let expiryFailures = 0;
+    for (const row of old) {
+      try {
+        const response = await expire(row.id);
+        if (!response.ok && response.status !== 409) throw new Error(`HTTP ${response.status}`);
+      } catch (error) {
+        expiryFailures++;
+        console.warn('[mall-maintenance] unpaid order expiry failed:', row.id, error instanceof Error ? error.message : String(error));
+      }
     }
+    if (expiryFailures) console.warn(`[mall-maintenance] ${expiryFailures} unpaid order(s) failed to expire and stay queued for the next run.`);
+    await exec.runBatch([
+      { sql: "DELETE FROM mall_carts WHERE id IN (SELECT c.id FROM mall_carts c WHERE c.updated_at<? LIMIT 100)", params: [now - 30 * 86400_000] },
+      { sql: 'DELETE FROM mall_cart_items WHERE NOT EXISTS(SELECT 1 FROM mall_carts c WHERE c.id=mall_cart_items.cart_id)' },
+      { sql: 'DELETE FROM mall_rate_limits WHERE expires_at<?', params: [now] },
+      { sql: "DELETE FROM mall_outbox WHERE status='delivered' AND delivered_at<?", params: [new Date(now - 30 * 86400_000).toISOString()] },
+      { sql: 'DELETE FROM mall_metrics WHERE day<?', params: [new Date(now - 90 * 86400_000).toISOString().slice(0, 10)] },
+      // The delivery ledger and the order timeline were the only cron-written
+      // tables with no retention rule, so both grew forever: the ledger at ~24
+      // heartbeat rows a day plus one per event, the timeline by one row per
+      // staff action per order. `MALL_DELIVERY_RETENTION_DAYS` (30) is ~4x the
+      // receiver's 7-day dedupe window, so nothing that could still suppress a
+      // duplicate email is ever dropped. `MALL_EVENT_RETENTION_DAYS` (365) is a
+      // product decision — the timeline is what staff read on an order — so it is
+      // exposed as a named constant above rather than inlined here.
+      { sql: 'DELETE FROM mall_webhook_deliveries WHERE delivered_at<?', params: [new Date(now - MALL_DELIVERY_RETENTION_DAYS * 86400_000).toISOString()] },
+      // An order is only ever in a non-terminal state for days, not a year (unpaid
+      // orders expire at MALL_UNPAID_EXPIRY_HOURS, capped at 720h). The guard
+      // still costs nothing and makes the invariant explicit rather than
+      // assumed: an event row survives while its order is still in flight, so a
+      // stalled or long-running order can never lose its audit trail to a
+      // retention sweep. Orders that no longer exist are prunable normally.
+      { sql: `DELETE FROM mall_order_events WHERE created_at<?
+        AND NOT EXISTS (SELECT 1 FROM mall_orders o WHERE o.id=mall_order_events.order_id
+          AND o.status NOT IN ('completed','cancelled','refunded'))`, params: [new Date(now - MALL_EVENT_RETENTION_DAYS * 86400_000).toISOString()] },
+    ]);
+    const stale = await exec.queryAll("SELECT id,order_no FROM mall_orders WHERE status IN ('processing','packed','ready_for_pickup','out_for_delivery') AND created_at<? LIMIT 50", [new Date(now - 24 * 3600_000).toISOString()]);
+    const alertStatements: MallStmt[] = stale.flatMap(row => {
+      const id = `stale:${row.id}:${new Date(now).toISOString().slice(0, 10)}`;
+      return [
+        { sql: "INSERT OR IGNORE INTO mall_outbox(id,order_id,event,payload_json,next_attempt_at,created_at) VALUES (?,?,'STAFF_ATTENTION_REQUIRED',?,0,?)", params: [id, row.id, JSON.stringify({ orderNo: row.order_no }), new Date(now).toISOString()] },
+        { sql: "INSERT OR IGNORE INTO notifications(id,title,message,type,is_read,created_at) VALUES (?,'Mall order needs attention',?,'mall_order',0,?)", params: [id, row.order_no, new Date(now).toISOString()] },
+      ];
+    });
+    if (alertStatements.length) await exec.runBatch(alertStatements);
   }
-  if (expiryFailures) console.warn(`[mall-maintenance] ${expiryFailures} unpaid order(s) failed to expire and stay queued for the next run.`);
-  await exec.runBatch([
-    { sql: "DELETE FROM mall_carts WHERE id IN (SELECT c.id FROM mall_carts c WHERE c.updated_at<? LIMIT 100)", params: [now - 30 * 86400_000] },
-    { sql: 'DELETE FROM mall_cart_items WHERE NOT EXISTS(SELECT 1 FROM mall_carts c WHERE c.id=mall_cart_items.cart_id)' },
-    { sql: 'DELETE FROM mall_rate_limits WHERE expires_at<?', params: [now] },
-    { sql: "DELETE FROM mall_outbox WHERE status='delivered' AND delivered_at<?", params: [new Date(now - 30 * 86400_000).toISOString()] },
-    { sql: 'DELETE FROM mall_metrics WHERE day<?', params: [new Date(now - 90 * 86400_000).toISOString().slice(0, 10)] },
-  ]);
-  const stale = await exec.queryAll("SELECT id,order_no FROM mall_orders WHERE status IN ('processing','packed','ready_for_pickup','out_for_delivery') AND created_at<? LIMIT 50", [new Date(now - 24 * 3600_000).toISOString()]);
-  const alertStatements: MallStmt[] = stale.flatMap(row => {
-    const id = `stale:${row.id}:${new Date(now).toISOString().slice(0, 10)}`;
-    return [
-      { sql: "INSERT OR IGNORE INTO mall_outbox(id,order_id,event,payload_json,next_attempt_at,created_at) VALUES (?,?,'STAFF_ATTENTION_REQUIRED',?,0,?)", params: [id, row.id, JSON.stringify({ orderNo: row.order_no }), new Date(now).toISOString()] },
-      { sql: "INSERT OR IGNORE INTO notifications(id,title,message,type,is_read,created_at) VALUES (?,'Mall order needs attention',?,'mall_order',0,?)", params: [id, row.order_no, new Date(now).toISOString()] },
-    ];
-  });
-  if (alertStatements.length) await exec.runBatch(alertStatements);
   await drainMallOutbox(exec, send);
-  await exec.runBatch([{ sql: "INSERT INTO mall_job_runs(name,last_success_at) VALUES ('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at", params: [new Date().toISOString()] }]);
+  // The readiness marker is written by the DRAIN path only. It is the signal
+  // that notifications are still flowing, so a working hourly sweep must never
+  // refresh it: that would mask a dead or undeployed drain by keeping
+  // readiness.scheduler green off the back of unrelated cleanup work. Both
+  // `'all'` and `'drain'` own it; only `'sweep'` steps aside.
+  if (ownsMarker) {
+    await exec.runBatch([{ sql: "INSERT INTO mall_job_runs(name,last_success_at) VALUES ('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at", params: [new Date().toISOString()] }]);
+  }
 }

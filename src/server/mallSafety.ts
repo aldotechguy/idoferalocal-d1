@@ -41,7 +41,11 @@ export const MALL_SAFETY_DDL = [
   // Staff order list: `ORDER BY o.created_at DESC LIMIT ? OFFSET ?` could not
   // stop early without this, so every page read and sorted the whole table.
   `CREATE INDEX IF NOT EXISTS idx_mall_orders_created ON mall_orders (created_at DESC)`,
-  // Maintenance sweeps: expired rate-limit rows and the bounded metric history.
+  // Maintenance sweeps: abandoned carts, expired rate-limit rows and the bounded
+  // metric history. `mall_carts` had NO index on `updated_at` (only the PK and the
+  // partial `idx_mall_active_session` on session_id), so the 30-day abandoned-cart
+  // delete below full-scanned the whole table on every scheduler run.
+  `CREATE INDEX IF NOT EXISTS idx_mall_carts_updated ON mall_carts (updated_at)`,
   `CREATE INDEX IF NOT EXISTS idx_mall_rate_limits_expires ON mall_rate_limits (expires_at)`,
   `CREATE INDEX IF NOT EXISTS idx_mall_metrics_day ON mall_metrics (day DESC, metric)`,
   // --- Dead-weight indexes ---------------------------------------------------
