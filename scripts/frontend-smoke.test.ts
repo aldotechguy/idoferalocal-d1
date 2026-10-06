@@ -740,8 +740,21 @@ test('open staff workspaces revalidate sessions without polling hidden tabs', ()
 
 test('staff sync stays quiet in the background and counts stay opt-in', () => {
   const hook = fs.readFileSync('src/hooks/useCloudSync.ts', 'utf8');
-  assert.match(hook, /const AUTO_PING_INTERVAL_MS = 15 \* 60 \* 1000;/);
+  // The cadence is sourced from d1StorageService so the badge's label and the
+  // poll interval can never disagree again. Both assertions below hold whatever
+  // the value becomes; the value itself is pinned on the service, where the
+  // badge reads its label from.
+  assert.match(hook, /const AUTO_PING_INTERVAL_MS = D1_AUTO_PING_INTERVAL_MS;/);
   assert.doesNotMatch(hook, /const AUTO_PING_INTERVAL_MS = 5 \* 60 \* 1000;/);
+  const service = fs.readFileSync('src/services/d1StorageService.ts', 'utf8');
+  assert.match(service, /export const D1_AUTO_PING_MINUTES = 15;/);
+  assert.doesNotMatch(service, /export const D1_AUTO_PING_MINUTES = 5;/);
+  // The label is derived, never a literal — three hardcoded "Every 5 minutes"
+  // strings once promised 3x the monitoring the hook actually ran.
+  assert.match(service, /export const D1_AUTO_PING_INTERVAL_LABEL = `Every \$\{D1_AUTO_PING_MINUTES\} minutes`;/);
+  const badge = fs.readFileSync('src/components/common/D1NetworkHealthBadge.tsx', 'utf8');
+  assert.equal(/every 5 minutes|Every 5 minutes|every 5 mins/.test(badge), false, 'the badge must not hardcode a cadence');
+  assert.match(badge, /D1_AUTO_PING_INTERVAL_LABEL/);
   assert.match(hook, /function sharedD1Health\(detail: boolean, force: boolean\)/);
   assert.match(hook, /if \(healthInFlight && !detail\) return healthInFlight;/);
   assert.match(hook, /if \(!detail && !force && lastHealthStatus && Date\.now\(\) - lastHealthPingAt < AUTO_PING_INTERVAL_MS\)/);

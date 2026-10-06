@@ -30,6 +30,7 @@ import {
   flushAutoSyncNow,
   scheduleAutoSync,
   getD1PendingDeletions,
+  D1_AUTO_PING_INTERVAL_MS,
   type D1Snapshot,
   type D1HealthStatus,
   type ChangedRecord,
@@ -40,8 +41,13 @@ import {
  * always-present Header, Settings, and the unsynced-changes modal), so the gate
  * below makes the *first* caller do the work and lets the others reuse its
  * result. Without it, three instances would triple every probe.
+ *
+ * Imported, not declared: the badge renders the cadence to users, and it used to
+ * say "5 minutes" here while this constant said 15 — three hardcoded strings
+ * promising 3x the monitoring that actually ran. Sourcing both from
+ * D1_AUTO_PING_MINUTES makes drift impossible.
  */
-const AUTO_PING_INTERVAL_MS = 15 * 60 * 1000;
+const AUTO_PING_INTERVAL_MS = D1_AUTO_PING_INTERVAL_MS;
 
 let lastHealthPingAt = 0;
 let lastHealthStatus: D1HealthStatus | null = null;
@@ -104,7 +110,10 @@ export function useCloudSync() {
         connected: false,
         latencyMs: 0,
         lastChecked: Date.now(),
-        databaseId: '3e95a550-a091-490b-819d-f0acb7ea8dd8',
+        // 'unknown', never the archived idofera-d1: the probe threw before it
+        // reached the server, so we do not know which database answered. See
+        // the same note in checkD1Health.
+        databaseId: 'unknown',
         revision: 0,
         totalDocuments: 0,
         endpoint: 'Cloudflare D1 Storage API',

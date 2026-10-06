@@ -16,7 +16,7 @@ import {
   EyeOff,
   Check,
 } from 'lucide-react';
-import { D1HealthStatus } from '../../services/d1StorageService';
+import { D1HealthStatus, D1_DEGRADED_LATENCY_MS, D1_AUTO_PING_INTERVAL_LABEL } from '../../services/d1StorageService';
 
 interface D1NetworkHealthBadgeProps {
   health: D1HealthStatus | null;
@@ -50,8 +50,11 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
   }, [isOpen]);
 
   const isConnected = Boolean(health?.connected);
-  const isHealthy = health?.status === 'healthy' || (isConnected && (health?.latencyMs || 0) < 2000);
-  const isDegraded = health?.status === 'degraded' || (isConnected && (health?.latencyMs || 0) >= 2000);
+  // Grades on the SHARED threshold so the two surfaces can never disagree. The
+  // badge used to hardcode 2000 while the service used 3000, so a 2.5s probe
+  // arrived as status:'healthy' and was still drawn amber.
+  const isHealthy = health?.status === 'healthy' || (isConnected && (health?.latencyMs || 0) < D1_DEGRADED_LATENCY_MS);
+  const isDegraded = health?.status === 'degraded' || (isConnected && (health?.latencyMs || 0) >= D1_DEGRADED_LATENCY_MS);
   const isOffline = !isConnected;
 
   // Format the time since last check
@@ -124,7 +127,7 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
         title={
           isOffline
             ? 'Cloudflare D1: Disconnected or Offline. Click to inspect & ping.'
-            : `Cloudflare D1: Connected (${health?.latencyMs || 0}ms latency). Auto-checks every 5 mins. Click to inspect.`
+            : `Cloudflare D1: Connected (${health?.latencyMs || 0}ms latency). ${D1_AUTO_PING_INTERVAL_LABEL}, click to inspect.`
         }
       >
         {/* Status Dot */}
@@ -294,7 +297,7 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
             <div className="flex justify-between items-center text-slate-600 dark:text-slate-300">
               <span className="text-slate-500 dark:text-slate-400 font-sans">Auto-Monitor:</span>
               <span className="font-sans font-medium text-[11px] text-emerald-600 dark:text-emerald-400">
-                Every 5 minutes
+                {D1_AUTO_PING_INTERVAL_LABEL}
               </span>
             </div>
             <div className="flex justify-between items-center text-slate-600 dark:text-slate-300 pt-1 border-t border-slate-200/60 dark:border-slate-700/60">
@@ -351,7 +354,7 @@ export const D1NetworkHealthBadge: React.FC<D1NetworkHealthBadgeProps> = ({
               <span>{isChecking ? 'Pinging D1 Endpoint...' : 'Ping D1 Endpoint Now'}</span>
             </button>
             <p className="text-[10px] text-slate-400 text-center mt-1">
-              Auto-monitors every 5 minutes. Pulls and synchronizes authoritative data on-demand.
+              Auto-monitors {D1_AUTO_PING_INTERVAL_LABEL.toLowerCase()}. Pulls and synchronizes authoritative data on-demand.
             </p>
           </div>
           </div>

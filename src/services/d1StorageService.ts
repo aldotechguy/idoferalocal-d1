@@ -563,8 +563,49 @@ export interface D1HealthStatus {
   status: 'healthy' | 'degraded' | 'offline' | 'error';
 }
 
+/**
+ * Latency, in milliseconds, at which a healthy probe is reported as `degraded`.
+ *
+ * Exported because THREE places decide this independently and two of them
+ * disagreed: the service graded at 3000 while the badge graded at 2000, so a
+ * 2.5s probe was 'healthy' in the payload but drawn amber in the UI. One
+ * constant, imported by both.
+ *
+ * 2000 rather than 3000: the point of the badge is to turn amber before a staff
+ * member notices the slowness and opens the popover. Widen here only, and both
+ * surfaces move together.
+ */
+export const D1_DEGRADED_LATENCY_MS = 2000;
+
+/**
+ * Human-readable auto-monitoring cadence, for display ONLY.
+ *
+ * This used to be hardcoded as "Every 5 minutes" in three places in the badge
+ * while the hook itself polled every 15 — someone raised the interval to save
+ * resources and the UI kept promising 3x the monitoring. Derived from the
+ * minute count of `AUTO_PING_INTERVAL_MS` so the label can never drift from
+ * the behaviour again. The hook imports the minutes from here instead of
+ * declaring its own, which is what keeps them in lockstep.
+ */
+export const D1_AUTO_PING_MINUTES = 15;
+export const D1_AUTO_PING_INTERVAL_MS = D1_AUTO_PING_MINUTES * 60 * 1000;
+export const D1_AUTO_PING_INTERVAL_LABEL = `Every ${D1_AUTO_PING_MINUTES} minutes`;
+
+/**
+ * Milliseconds the health probe may take before it aborts. Bound on every
+ * attempt: without a signal a fetch hangs on the browser default and leaves
+ * `isCheckingHealth` stuck spinning forever.
+ */
+export const D1_HEALTH_TIMEOUT_MS = 12_000;
+
 export async function checkD1Health(detail = false): Promise<D1HealthStatus> {
-  const fallbackDbId = '3e95a550-a091-490b-819d-f0acb7ea8dd8';
+  // Displayed whenever the probe never reached the server. `3e95a550…` used to
+  // live here and was WRONG: that is `idofera-d1`, the archived legacy database
+  // no worker is bound to (wrangler.toml). Pointing an operator at it while
+  // diagnosing a live outage sent them to a database that serves no traffic.
+  // An honest unknown beats a plausible lie, and the successful path overwrites
+  // this with the real env.D1_DATABASE_ID the Worker reports.
+  const fallbackDbId = 'unknown';
   // Counts are opt-in: the default probe reads one revision row, whereas asking
   // for counts scans every document plus five relational tables (~2,185 rows).
   const healthUrl = detail ? '/api/storage/d1/health?detail=1' : '/api/storage/d1/health';
@@ -586,7 +627,7 @@ export async function checkD1Health(detail = false): Promise<D1HealthStatus> {
   try {
     const authHeaders = await getAuthHeaders();
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    const timeoutId = setTimeout(() => controller.abort(), D1_HEALTH_TIMEOUT_MS);
 
     const response = await fetch(healthUrl, {
       headers: { ...authHeaders, 'cache-control': 'no-cache' },
@@ -595,20 +636,28 @@ export async function checkD1Health(detail = false): Promise<D1HealthStatus> {
     });
     clearTimeout(timeoutId);
 
+    // Round-trip: browser -> Cloudflare edge -> D1 -> browser. This is what the
+    // user actually experiences, so it is what `status` grades on.
     const latencyMs = Math.max(1, Math.round(performance.now() - start));
 
     if (response.ok) {
       const data = (await response.json()) as any;
       return {
         connected: Boolean(data.connected),
-        latencyMs: data.latencyMs || latencyMs,
+        // Prefer SERVER-measured latency for display. `latencyMs` used to fall
+        // back to the round trip unconditionally because the Worker never sent
+        // the field, so a 400ms round trip was graded by getLatencyBadge()'s
+        // 150/350ms bands and the badge sat amber on a healthy connection.
+        // `Math.min` with the round trip keeps a lying/frozen server clock from
+        // reporting a number we know is impossible.
+        latencyMs: Math.min(Number(data.latencyMs) || latencyMs, latencyMs) || latencyMs,
         lastChecked: Date.now(),
         databaseId: data.databaseId || fallbackDbId,
         revision: Number(data.revision || 0),
         totalDocuments: data.totalDocuments === undefined ? undefined : Number(data.totalDocuments),
         relational: data.relational,
         endpoint: data.endpoint || 'Cloudflare D1 Primary Edge',
-        status: latencyMs > 3000 ? 'degraded' : 'healthy',
+        status: latencyMs >= D1_DEGRADED_LATENCY_MS ? 'degraded' : 'healthy',
       };
     } else {
       return {
@@ -627,16 +676,23 @@ export async function checkD1Health(detail = false): Promise<D1HealthStatus> {
     const latencyMs = Math.round(performance.now() - start);
     const isTimeout = err?.name === 'AbortError';
 
-    // Quick lightweight retry to prevent transient cold-boot timeout false-positives
-    if (isTimeout) {
+    // Retry ONCE to absorb a cold-boot false negative. Capped for a reason:
+    // an actually-degraded endpoint used to turn every probe into two
+    // concurrent 12s requests — doubling the load precisely when the system
+    // can least afford it, with no backoff and no bound. Retrying only when
+    // the first attempt died FAST (well before its own 12s budget) means a
+    // genuinely slow/timing-out endpoint degrades to 'offline' immediately
+    // instead of being asked twice, concurrently.
+    const diedFast = latencyMs < D1_HEALTH_TIMEOUT_MS / 2;
+    if (isTimeout && diedFast) {
       try {
         const retryStart = performance.now();
-        // Same 12s bound as the first attempt: without a signal this retry could
+        // Same bound as the first attempt: without a signal this retry could
         // hang on the browser default timeout and keep isCheckingHealth stuck.
         const retryRes = await fetch(healthUrl, {
           headers: { 'cache-control': 'no-cache' },
           credentials: 'include',
-          signal: AbortSignal.timeout(12000),
+          signal: AbortSignal.timeout(D1_HEALTH_TIMEOUT_MS),
         });
         if (retryRes.ok) {
           const data = (await retryRes.json()) as any;

@@ -1178,6 +1178,7 @@ export default {
       }
       if (url.pathname === '/api/health') return json({ status: 'ok', app: 'IdoferaLabs API', timestamp: new Date().toISOString() });
       if (url.pathname === '/api/storage/d1/health') {
+        const healthStart = performance.now();
         await ensureSchema(env);
         const revision = await currentWatermark(env);
         // Counting five relational tables costs ~2,185 rows. Liveness only needs
@@ -1213,6 +1214,12 @@ export default {
           totalDocuments: 0,
           relational,
           detail: wantsDetail,
+          // Server-measured, reported so the client can grade on it. Without
+          // this key the client's `data.latencyMs` was always undefined and it
+          // silently fell back to round-trip time, which getLatencyBadge()
+          // classifies into its sub-150ms bands — so a healthy connection was
+          // drawn as 'Normal' or 'High Latency' by the badge.
+          latencyMs: Math.max(1, Math.round(performance.now() - healthStart)),
           endpoint: 'Cloudflare D1 Edge Worker',
           timestamp: new Date().toISOString(),
         });
