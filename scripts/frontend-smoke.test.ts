@@ -835,6 +835,108 @@ test('a sale edit keeps a modification timestamp all the way to D1', () => {
   }
 });
 
+test('an invoice edit cascades every editable field to its linked records', () => {
+  const app = fs.readFileSync('src/context/AppContext.tsx', 'utf8');
+  const start = app.indexOf('const updateSale = (');
+  assert.ok(start > 0, 'updateSale must exist');
+  const body = app.slice(start, app.indexOf('// Reconcile Historical Sales', start));
+
+  // Gap A — flipping status to a refund state must refuse and route through
+  // the refund pipeline (stock restore, refunds[], settlement, treasury).
+  assert.match(body, /Use the Refund Flow/);
+  assert.match(body, /updates\.status === 'Refunded'/);
+  assert.match(body, /updates\.status === 'Partially Refunded'/);
+  // Gap F — a Retail<->Wholesale flip reprices catalogue lines from the book.
+  assert.match(body, /nextType === 'Wholesale' \? catalogue\.wholesalePrice : catalogue\.retailPrice/);
+  // Gap E — leaving Split clears the stale breakdown; entering Split keeps data.
+  assert.match(body, /finalPaymentBreakdown/);
+  assert.match(body, /paymentBreakdown: finalPaymentBreakdown/);
+  // Gap B — delivery-only keys are stripped before the sale is built so they
+  // never pollute the sale blob that saleToRows() cannot persist.
+  assert.match(body, /deliveryOnlyAddress/);
+  assert.match(body, /\.\.\.saleUpdates,/);
+  assert.doesNotMatch(body, /\.\.\.existing,\n\s+\.\.\.updates,\n\s+customerName/);
+  // Gap C — fee-to-zero deletes the orphan delivery; pickup gets by+at stamps;
+  // customerId re-aligns after the ownership transfer resolves.
+  assert.match(body, /deletedDeliveryOrderId/);
+  assert.match(body, /pickupConfirmedBy: finalPickupConfirmed/);
+  assert.match(body, /customerId: updatedSale\.customerId, customerName: updatedSale\.customerName/);
+  // Gap D — expense update uses fresh courier notes + synced title/paidBy, and
+  // the pickup auto-create links its id back onto the sale and the delivery.
+  assert.match(body, /freshCourierNotes/);
+  assert.match(body, /syncedExpenseTitle/);
+  assert.match(body, /updatedSale\.expenseId = newExpense\.id/);
+  assert.match(body, /\.\.\.matchingDeliveryOrder, expenseId: newExpense\.id/);
+  // Gap H — dispatch contact corrections reach the customer directory.
+  assert.match(body, /phone: deliveryOnlyPhone/);
+  assert.match(body, /address: deliveryOnlyAddress/);
+  // Gap G — the pre-order mirrors the sale's own subtotal/discount/fee total.
+  assert.match(body, /Math\.max\(0, subtotal - disc \+ newFee\)/);
+  assert.match(body, /customerId: updatedSale\.customerId \|\| linkedPreOrder\.customerId/);
+  // Gap E (treasury) — editing an invoice must reconcile its Sale Inflow
+  // money movements: remove the stale channel record(s) and rebuild from the
+  // finalized method/paid amount, keeping historical sales free of inflows.
+  assert.match(body, /removedFlows/);
+  assert.match(body, /m\.type === 'Sale Inflow' && m\.referenceId === saleId/);
+  assert.match(body, /if \(!isHistorical\)/);
+  assert.match(body, /destinationAccount: 'Physical Cash'/);
+  assert.match(body, /destinationAccount: 'Biz Account'/);
+  assert.match(body, /finalPaymentMethod === 'Split'/);
+  assert.match(body, /newFlows\.forEach/);
+
+  // Both edit forms must stop offering Refunded as a target — the refund flow
+  // owns that transition, so the edit status selects keep only non-refund
+  // states (plus a read-only echo when the invoice is already refunded).
+  // NOTE: SalesView also has a *list filter* dropdown that legitimately keeps
+  // Refunded/Partially Refunded as filter targets — scope to the edit region.
+  const editModal = fs.readFileSync('src/components/sales/EditSaleModal.tsx', 'utf8');
+  assert.doesNotMatch(editModal, /<option value="Refunded">Refunded<\/option>/);
+  assert.match(editModal, /use Process Refund/);
+  const salesView = fs.readFileSync('src/components/sales/SalesView.tsx', 'utf8');
+  const editRegion = salesView.slice(salesView.indexOf('Edit Sale Record Modal'));
+  assert.ok(editRegion.length > 0, 'the inline edit modal must still exist');
+  assert.doesNotMatch(editRegion, /<option value="Refunded">Refunded<\/option>/);
+  assert.match(editRegion, /use Process Refund/);
+});
+
+test('a loan repayment nets back against owner drawings and loans', () => {
+  const app = fs.readFileSync('src/context/AppContext.tsx', 'utf8');
+  const start = app.indexOf('const treasuryBalances = useMemo');
+  assert.ok(start > 0, 'treasuryBalances reducer must exist');
+  const body = app.slice(start, app.indexOf('}, [moneyMovements]);', start));
+
+  // An Owner Repayment should reduce both the net drawings KPI and the
+  // outstanding-loans ledger — not just ownerLoans — so the dashboard reflects
+  // funds actually returned to the business, not the gross withdrawal.
+  assert.match(body, /mv\.type === 'Owner Repayment'/);
+  // Order-independent: sum drawings and repayments separately, then net.
+  // A repayment recorded before its loan (prepay, or a sync reorder) must not
+  // floor to zero mid-walk and lose the loan.
+  assert.match(body, /grossOwnerDrawings/);
+  assert.match(body, /ownerRepayments \+= amt/);
+  assert.match(body, /netOwnerDrawings = Math\.max\(0, grossOwnerDrawings - ownerRepayments\)/);
+  assert.match(body, /netOwnerLoans = Math\.max\(0, grossOwnerLoans - ownerRepayments\)/);
+  assert.match(body, /totalOwnerDrawings: Number\(netOwnerDrawings\.toFixed\(2\)\)/);
+  assert.match(body, /totalOwnerLoans: Number\(netOwnerLoans\.toFixed\(2\)\)/);
+});
+
+test('a repayment can settle a specific owner loan', () => {
+  const types = fs.readFileSync('src/types/index.ts', 'utf8');
+  assert.match(types, /loanReferenceId\?: string/);
+  assert.match(types, /the movement id of the Owner Loan drawing settled/);
+
+  const modal = fs.readFileSync('src/components/treasury/OwnerWithdrawalModal.tsx', 'utf8');
+  assert.match(modal, /outstandingLoans/);
+  assert.match(modal, /Settle Against Loan/);
+  assert.match(modal, /loanReferenceId: loanReferenceId \|\| undefined/);
+
+  // The link must round-trip through relational storage so it survives a
+  // D1 sync: the mapper writes it to ref_id for repayments and the snapshot
+  // reads it back into loanReferenceId.
+  assert.match(fs.readFileSync('src/server/relationalMapper.ts', 'utf8'), /repaymentLoanLink/);
+  assert.match(fs.readFileSync('src/server/relationalSnapshot.ts', 'utf8'), /loanReferenceId: r\.type === 'Owner Repayment'/);
+});
+
 test('the Node runtime ships no Cloudflare REST write engine', () => {
   const server = fs.readFileSync('server.ts', 'utf8');
   // The deployed Worker owns D1: no credentials, no REST /query executor, no

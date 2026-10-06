@@ -161,14 +161,17 @@ export const ReportsView: React.FC = () => {
     return validSales.filter((s) => s.createdAt && s.createdAt.startsWith(precedingMonthKey));
   }, [validSales, precedingMonthKey]);
 
+  // Net sale amount accounting for any partial refunds
+  const netSaleAmount = (s: any) => Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.totalRefunded) || 0));
+
   // Core Financial Aggregations for Active Period
   const periodRevenue = useMemo(
-    () => periodSales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0),
+    () => periodSales.reduce((acc, s) => acc + netSaleAmount(s), 0),
     [periodSales]
   );
 
   const precedingPeriodRevenue = useMemo(
-    () => precedingPeriodSales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0),
+    () => precedingPeriodSales.reduce((acc, s) => acc + netSaleAmount(s), 0),
     [precedingPeriodSales]
   );
 
@@ -178,12 +181,12 @@ export const ReportsView: React.FC = () => {
   }
 
   const periodRetailSales = useMemo(
-    () => periodSales.filter((s) => s.type === 'Retail').reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0),
+    () => periodSales.filter((s) => s.type === 'Retail').reduce((acc, s) => acc + netSaleAmount(s), 0),
     [periodSales]
   );
 
   const periodWholesaleSales = useMemo(
-    () => periodSales.filter((s) => s.type === 'Wholesale').reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0),
+    () => periodSales.filter((s) => s.type === 'Wholesale').reduce((acc, s) => acc + netSaleAmount(s), 0),
     [periodSales]
   );
 
@@ -244,7 +247,7 @@ export const ReportsView: React.FC = () => {
         map[method] = { count: 0, total: 0 };
       }
       map[method].count += 1;
-      map[method].total += Number(s.totalAmount) || 0;
+      map[method].total += netSaleAmount(s);
     });
     return Object.entries(map)
       .map(([method, data]) => ({

@@ -355,7 +355,7 @@ interface AppContextType {
     subtype?: OwnerWithdrawalSubtype,
     notes?: string,
     performedBy?: string
-  ) => void;
+  ) => string;
   recordOwnerRepayment: (
     paramsOrDestination: RecordOwnerRepaymentParams | LiquidAccountType,
     amount?: number,
@@ -547,8 +547,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const treasuryBalances = useMemo<TreasuryBalances>(() => {
     let biz = 0;
     let cash = 0;
-    let ownerDrawings = 0;
-    let ownerLoans = 0;
+    let grossOwnerDrawings = 0;
+    let grossOwnerLoans = 0;
+    let ownerRepayments = 0;
 
     moneyMovements.forEach((mv) => {
       const amt = Number(mv.amount) || 0;
@@ -565,21 +566,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       if (mv.type === 'Owner Drawing') {
-        ownerDrawings += amt;
+        grossOwnerDrawings += amt;
         if (mv.subtype === 'Owner Loan') {
-          ownerLoans += amt;
+          grossOwnerLoans += amt;
         }
       } else if (mv.type === 'Owner Repayment') {
-        ownerLoans = Math.max(0, ownerLoans - amt);
+        // Loan repayments reverse the drawings/loans position. Sum-then-net
+        // keeps the KPI order-independent: a repayment recorded before its
+        // originating loan (a prepay toward a loan, or movements reordered by
+        // a sync pull) can no longer floor to zero mid-walk and lose the loan.
+        ownerRepayments += amt;
       }
     });
+
+    const netOwnerDrawings = Math.max(0, grossOwnerDrawings - ownerRepayments);
+    const netOwnerLoans = Math.max(0, grossOwnerLoans - ownerRepayments);
 
     return {
       bizAccountBalance: Number(biz.toFixed(2)),
       physicalCashBalance: Number(cash.toFixed(2)),
       totalLiquidCash: Number((biz + cash).toFixed(2)),
-      totalOwnerDrawings: Number(ownerDrawings.toFixed(2)),
-      totalOwnerLoans: Number(ownerLoans.toFixed(2)),
+      totalOwnerDrawings: Number(netOwnerDrawings.toFixed(2)),
+      totalOwnerLoans: Number(netOwnerLoans.toFixed(2)),
     };
   }, [moneyMovements]);
 
@@ -2532,8 +2540,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
+    // Gap A — the refund pipeline owns stock restore, refunds[], customer
+    // settlement and treasury. Flipping `status` here wrote a bare string that
+    // hid the invoice from revenue without any of that, so refund statuses
+    // can only arrive via refundSale (ProcessSaleRefundModal).
+    if (
+      updates.status !== undefined &&
+      (updates.status === 'Refunded' || updates.status === 'Partially Refunded') &&
+      updates.status !== existing.status
+    ) {
+      showToast({
+        title: 'Use the Refund Flow',
+        message: `Status cannot be changed to "${updates.status}" from Edit Invoice — process a refund instead so stock, customer ledger and treasury stay in sync.`,
+        type: 'error',
+      });
+      return false;
+    }
+
     const now = new Date().toISOString();
-    const itemsList = updates.items || existing.items || [];
+    // Gap F — flipping Retail<->Wholesale only saved the flag while line
+    // prices stayed put, so totals were wrong until every line was manually
+    // repriced. Reprice catalogue lines from the price book on a type change;
+    // clearance / non-catalogue lines keep their custom amounts.
+    let itemsList = updates.items || existing.items || [];
+    if (updates.type !== undefined && updates.type !== existing.type) {
+      const nextType = updates.type;
+      itemsList = itemsList.map((line) => {
+        if (!line.productId || line.isClearance || line.productId.startsWith('clearance-')) return line;
+        const catalogue = products.find((p) => p.id === line.productId);
+        if (!catalogue) return line;
+        const unitPrice = nextType === 'Wholesale' ? catalogue.wholesalePrice : catalogue.retailPrice;
+        return {
+          ...line,
+          unitPrice,
+          total: unitPrice * (Number(line.quantity) || 0),
+          isWholesale: nextType === 'Wholesale',
+        };
+      });
+      updates = { ...updates, items: itemsList };
+    }
     const subtotal = itemsList.reduce(
       (acc, item) => acc + (item.total ?? (item.unitPrice || 0) * (item.quantity || 1)),
       0
@@ -2565,10 +2610,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const finalCustomerName = updates.customerName !== undefined ? updates.customerName : existing.customerName;
 
+    // Gap E — paymentMethod is a plain select with no breakdown editor, so a
+    // stale breakdown survived `Split -> Cash` (day KPIs trusted it over the
+    // method) and `Cash -> Split` left no breakdown at all (KPIs fell back to
+    // notes-regex parsing). Keep the record honest: clear it off Split, and
+    // never invent one when entering Split without editor data.
+    const finalPaymentMethod = updates.paymentMethod !== undefined ? updates.paymentMethod : existing.paymentMethod;
+    const finalPaymentBreakdown = finalPaymentMethod === 'Split'
+      ? (updates.paymentBreakdown !== undefined ? updates.paymentBreakdown : existing.paymentBreakdown)
+      : undefined;
+
+    // Gap B — deliveryAddress/Phone/courierNotes/deliveryStatus/
+    // isPickupConfirmed are DeliveryOrder fields (updateSale's extended param
+    // type), not Sale fields. `...updates` spread them onto the saved sale
+    // blob/IndexedDB while saleToRows() has no columns for them, so the
+    // relational copy silently dropped them and a sync round-trip lost them.
+    // Strip them before building the sale; the §3 delivery cascade below is
+    // the only writer of those fields.
+    const {
+      deliveryAddress: deliveryOnlyAddress,
+      deliveryPhone: deliveryOnlyPhone,
+      courierNotes: deliveryOnlyCourierNotes,
+      deliveryStatus: deliveryOnlyStatus,
+      isPickupConfirmed: deliveryOnlyPickup,
+      ...saleUpdates
+    } = updates;
     const updatedSale: Sale = {
       ...existing,
-      ...updates,
+      ...saleUpdates,
       customerName: finalCustomerName,
+      paymentMethod: finalPaymentMethod,
+      paymentBreakdown: finalPaymentBreakdown,
       items: itemsList,
       subtotal,
       discount: disc,
@@ -2631,26 +2703,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
 
     let linkedExpenseId = matchingDeliveryOrder?.expenseId;
+    let deletedDeliveryOrderId: string | null = null;
 
     if (matchingDeliveryOrder) {
-      const updatedDelivery: DeliveryOrder = {
-        ...matchingDeliveryOrder,
-        deliveryFee: newFee,
-        customerName: finalCustomerName || matchingDeliveryOrder.customerName,
-        customerPhone: updates.deliveryPhone !== undefined ? updates.deliveryPhone : matchingDeliveryOrder.customerPhone,
-        deliveryAddress: updates.deliveryAddress !== undefined ? updates.deliveryAddress : matchingDeliveryOrder.deliveryAddress,
-        courierNotes: updates.courierNotes !== undefined ? updates.courierNotes : matchingDeliveryOrder.courierNotes,
-        status: updates.deliveryStatus !== undefined ? updates.deliveryStatus : matchingDeliveryOrder.status,
-        isPickupConfirmed: updates.isPickupConfirmed !== undefined ? updates.isPickupConfirmed : matchingDeliveryOrder.isPickupConfirmed,
-        items: itemsList.length > 0 ? itemsList : matchingDeliveryOrder.items,
-        updatedAt: now,
-      };
+      // Gap C — a fee edited to 0 kept a ₦0 orphan delivery order forever.
+      // Delete it and fall through so the expense branch below cleans up too.
+      if (newFee <= 0 && !deliveryOnlyStatus && !deliveryOnlyAddress && !deliveryOnlyPhone && !deliveryOnlyCourierNotes && !deliveryOnlyPickup) {
+        deletedDeliveryOrderId = matchingDeliveryOrder.id;
+        setDeliveryOrders((prev) => prev.filter((d) => d.id !== deletedDeliveryOrderId));
+        removeDocument('deliveryOrders', deletedDeliveryOrderId);
+        deleteItem('deliveryOrders', deletedDeliveryOrderId).catch((e) => console.warn('IndexedDB deliveryOrder delete error:', e));
+        linkedExpenseId = undefined;
+        matchingDeliveryOrder = undefined as unknown as DeliveryOrder;
+      } else {
+        const finalDeliveryCustomerId = updates.customerId !== undefined ? updates.customerId : matchingDeliveryOrder.customerId;
+        const finalPickupConfirmed = deliveryOnlyPickup !== undefined ? deliveryOnlyPickup : matchingDeliveryOrder.isPickupConfirmed;
+        const updatedDelivery: DeliveryOrder = {
+          ...matchingDeliveryOrder,
+          deliveryFee: newFee,
+          customerId: finalDeliveryCustomerId,
+          customerName: finalCustomerName || matchingDeliveryOrder.customerName,
+          customerPhone: deliveryOnlyPhone !== undefined ? deliveryOnlyPhone : matchingDeliveryOrder.customerPhone,
+          deliveryAddress: deliveryOnlyAddress !== undefined ? deliveryOnlyAddress : matchingDeliveryOrder.deliveryAddress,
+          courierNotes: deliveryOnlyCourierNotes !== undefined ? deliveryOnlyCourierNotes : matchingDeliveryOrder.courierNotes,
+          status: deliveryOnlyStatus !== undefined ? deliveryOnlyStatus : matchingDeliveryOrder.status,
+          isPickupConfirmed: finalPickupConfirmed,
+          // Gap C — pickup attribution was dropped: toggling confirm from the
+          // invoice editor never stamped/cleared by+at, so Deliveries showed
+          // "Confirmed" with no staff or timestamp.
+          pickupConfirmedBy: finalPickupConfirmed ? (matchingDeliveryOrder.pickupConfirmedBy || performedBy) : undefined,
+          pickupConfirmedAt: finalPickupConfirmed ? (matchingDeliveryOrder.pickupConfirmedAt || now) : undefined,
+          items: itemsList.length > 0 ? itemsList : matchingDeliveryOrder.items,
+          updatedAt: now,
+        };
 
-      setDeliveryOrders((prev) => prev.map((d) => (d.id === updatedDelivery.id ? updatedDelivery : d)));
-      saveDocument('deliveryOrders', updatedDelivery);
-      putItem('deliveryOrders', updatedDelivery).catch((e) => console.warn('IndexedDB deliveryOrder put error:', e));
-    } else if (newFee > 0) {
-      // If sale didn't have a delivery order previously, but now has a delivery fee > 0, auto-create one
+        setDeliveryOrders((prev) => prev.map((d) => (d.id === updatedDelivery.id ? updatedDelivery : d)));
+        saveDocument('deliveryOrders', updatedDelivery);
+        putItem('deliveryOrders', updatedDelivery).catch((e) => console.warn('IndexedDB deliveryOrder put error:', e));
+        matchingDeliveryOrder = updatedDelivery;
+      }
+    }
+    if (!matchingDeliveryOrder && !deletedDeliveryOrderId && (newFee > 0 || deliveryOnlyStatus || deliveryOnlyAddress || deliveryOnlyPhone || deliveryOnlyCourierNotes || deliveryOnlyPickup)) {
+      // If sale didn't have a delivery order previously, but now has dispatch
+      // detail (fee or address/phone/notes/status), auto-create one. Gap C —
+      // address/phone-only dispatch detail previously lived only on the sale
+      // blob (dropped by saleToRows), so it vanished on the next sync.
       const deliveryNo = `DEL-${Date.now().toString().slice(-6)}`;
       const newDel: DeliveryOrder = {
         id: generateUniqueId('del'),
@@ -2659,13 +2756,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         invoiceNo: updatedSale.invoiceNo,
         customerId: updatedSale.customerId,
         customerName: finalCustomerName || 'Customer',
-        customerPhone: updates.deliveryPhone || '',
-        deliveryAddress: updates.deliveryAddress || '',
-        courierNotes: updates.courierNotes || '',
+        customerPhone: deliveryOnlyPhone || '',
+        deliveryAddress: deliveryOnlyAddress || '',
+        courierNotes: deliveryOnlyCourierNotes || '',
         items: itemsList,
         deliveryFee: newFee,
-        status: updates.deliveryStatus || 'Pending Pickup',
-        isPickupConfirmed: updates.isPickupConfirmed || false,
+        status: deliveryOnlyStatus || 'Pending Pickup',
+        isPickupConfirmed: deliveryOnlyPickup || false,
+        pickupConfirmedBy: deliveryOnlyPickup ? performedBy : undefined,
+        pickupConfirmedAt: deliveryOnlyPickup ? now : undefined,
         notes: updatedSale.notes || '',
         createdBy: performedBy,
         createdAt: now,
@@ -2712,14 +2811,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (linkedExpense) {
       if (newFee > 0) {
-        // Update linked Logistics expense
+        // Update linked Logistics expense. Gap D — title/paidBy/method were
+        // frozen at creation and the live description used the pre-update
+        // delivery snapshot, so courier notes lagged one save behind.
+        const freshCourierNotes = deliveryOnlyCourierNotes !== undefined
+          ? deliveryOnlyCourierNotes
+          : matchingDeliveryOrder?.courierNotes;
+        const syncedPaymentMethod = finalPaymentMethod === 'Split' ? 'Cash' : (finalPaymentMethod || linkedExpense.paymentMethod);
+        const syncedExpenseTitle = matchingDeliveryOrder && !isHistorical
+          ? `Logistics Delivery Fee - ${matchingDeliveryOrder.deliveryNo} (${existing.invoiceNo})`
+          : linkedExpense.title;
         const updatedExpense: Expense = {
           ...linkedExpense,
+          title: syncedExpenseTitle,
           amount: newFee,
           date: updatedSale.createdAt ? updatedSale.createdAt.split('T')[0] : linkedExpense.date,
           description: isHistorical
             ? `Historical delivery fee expense for ${finalCustomerName}. Sale ${existing.invoiceNo && existing.invoiceNo !== 'N/A' ? existing.invoiceNo : existing.id}.${updatedSale.notes ? ' Notes: ' + updatedSale.notes : ''}`.trim()
-            : `Delivery fee expense for ${finalCustomerName}. ${matchingDeliveryOrder ? `Order ${matchingDeliveryOrder.deliveryNo}, ` : ''}Invoice ${existing.invoiceNo}.${matchingDeliveryOrder?.courierNotes ? ' Courier/Notes: ' + matchingDeliveryOrder.courierNotes : ''}`.trim(),
+            : `Delivery fee expense for ${finalCustomerName}. ${matchingDeliveryOrder ? `Order ${matchingDeliveryOrder.deliveryNo}, ` : ''}Invoice ${existing.invoiceNo}.${freshCourierNotes ? ' Courier/Notes: ' + freshCourierNotes : ''}`.trim(),
+          paidBy: isHistorical ? (updatedSale.createdBy || performedBy) : performedBy,
+          paymentMethod: syncedPaymentMethod,
           isHistorical: isHistorical || linkedExpense.isHistorical,
           saleId: existing.id,
         };
@@ -2778,6 +2889,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setExpenses((prev) => [newExpense, ...prev]);
       saveDocument('expenses', newExpense);
       putItem('expenses', newExpense).catch((e) => console.warn('IndexedDB expense put error:', e));
+      // Gap D — the pickup-confirmed auto-created expense never wrote its id
+      // back, so sale.expenseId / delivery.expenseId stayed empty and the next
+      // edit could not find it by id (only by fuzzy title match).
+      updatedSale.expenseId = newExpense.id;
+      setSales((prev) => prev.map((s) => (s.id === saleId ? updatedSale : s)));
+      saveDocument('sales', updatedSale);
+      if (matchingDeliveryOrder) {
+        const linkedDelivery: DeliveryOrder = { ...matchingDeliveryOrder, expenseId: newExpense.id, updatedAt: now };
+        matchingDeliveryOrder = linkedDelivery;
+        setDeliveryOrders((prev) => prev.map((d) => (d.id === linkedDelivery.id ? linkedDelivery : d)));
+        saveDocument('deliveryOrders', linkedDelivery);
+        putItem('deliveryOrders', linkedDelivery).catch((e) => console.warn('IndexedDB deliveryOrder put error:', e));
+      }
     }
 
     // 5. Cascade down to Customer (ownership transfer, lifetimeValue, outstandingBalance debt & loyalty points)
@@ -2875,6 +2999,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updatedTargetCust = {
           ...targetCust,
           name: finalCustomerName || targetCust.name,
+          // Gap H — deliveryPhone/Address edits never reached the customer
+          // directory, so Customers stayed stale after a dispatch correction.
+          phone: deliveryOnlyPhone !== undefined && deliveryOnlyPhone !== '' ? deliveryOnlyPhone : targetCust.phone,
+          address: deliveryOnlyAddress !== undefined && deliveryOnlyAddress !== '' ? deliveryOnlyAddress : targetCust.address,
           lifetimeValue: Math.max(0, (targetCust.lifetimeValue || 0) + totalDiff),
           loyaltyPoints: Math.max(0, (Number(targetCust.loyaltyPoints) || 0) + pointsDiff),
           outstandingBalance: netCredit < 0 ? Math.round(Math.abs(netCredit) * 100) / 100 : 0,
@@ -2922,7 +3050,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    // Also ensure updatedSale state reflects the finalized customerId
+    // Also ensure updatedSale state reflects the finalized customerId. Gap C —
+    // the §3 delivery sync above ran before ownership was resolved, so a
+    // transfer left delivery.customerId pointing at the old owner while the
+    // sale moved on. Re-align both sides to the finalized id.
+    if (updatedSale.customerId !== matchingDeliveryOrder?.customerId && (matchingDeliveryOrder || deletedDeliveryOrderId === null)) {
+      const currentDelivery = matchingDeliveryOrder
+        || deliveryOrders.find((d) => d.saleId === saleId || (existing.invoiceNo && d.invoiceNo === existing.invoiceNo));
+      if (currentDelivery && currentDelivery.customerId !== updatedSale.customerId) {
+        const realigned: DeliveryOrder = { ...currentDelivery, customerId: updatedSale.customerId, customerName: updatedSale.customerName || currentDelivery.customerName, updatedAt: now };
+        matchingDeliveryOrder = realigned;
+        setDeliveryOrders((prev) => prev.map((d) => (d.id === realigned.id ? realigned : d)));
+        saveDocument('deliveryOrders', realigned);
+        putItem('deliveryOrders', realigned).catch((e) => console.warn('IndexedDB deliveryOrder put error:', e));
+      }
+    }
     setSales((prev) => prev.map((s) => (s.id === saleId ? updatedSale : s)));
     saveDocument('sales', updatedSale);
 
@@ -2946,20 +3088,112 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         (existing.invoiceNo && po.convertedInvoiceNo === existing.invoiceNo)
     );
     if (linkedPreOrder) {
-      const updatedPreOrderTotal = Math.max(
-        0,
-        (linkedPreOrder.subtotal || 0) - (linkedPreOrder.discount || 0) + newFee
-      );
+      // Gap G — the pre-order sync only carried deliveryFee, so item/discount
+      // edits on the invoice left the linked pre-order total stale. Mirror the
+      // sale's own subtotal/discount/fee formula plus identity fields.
+      const updatedPreOrderTotal = Math.max(0, subtotal - disc + newFee);
       const updatedPreOrder: WhatsAppPreOrder = {
         ...linkedPreOrder,
         deliveryFee: newFee,
         totalAmount: updatedPreOrderTotal,
+        customerId: updatedSale.customerId || linkedPreOrder.customerId,
         customerName: finalCustomerName || linkedPreOrder.customerName,
+        customerPhone: deliveryOnlyPhone !== undefined && deliveryOnlyPhone !== '' ? deliveryOnlyPhone : linkedPreOrder.customerPhone,
+        deliveryAddress: deliveryOnlyAddress !== undefined && deliveryOnlyAddress !== '' ? deliveryOnlyAddress : linkedPreOrder.deliveryAddress,
+        notes: updatedSale.notes !== undefined ? updatedSale.notes : linkedPreOrder.notes,
         updatedAt: now,
       };
       setWhatsAppPreOrders((prev) => prev.map((po) => (po.id === updatedPreOrder.id ? updatedPreOrder : po)));
       saveDocument('whatsAppPreOrders', updatedPreOrder);
       putItem('whatsAppPreOrders', updatedPreOrder).catch((e) => console.warn('IndexedDB whatsAppPreOrder put error:', e));
+    }
+
+    // 6. Cascade to Money Movements (Treasury).
+    // processSale wrote one Sale Inflow per payment channel for live sales, but
+    // no invoice edit ever reconciled them — a payment-type change left the old
+    // subtype/destinationAccount/amount in place, so the till and the bank ran
+    // on stale figures. Rebuild live-sale inflows from the finalized values.
+    if (!isHistorical) {
+      const removedFlows = moneyMovements.filter(
+        (m) => m.type === 'Sale Inflow' && m.referenceId === saleId
+      );
+      removedFlows.forEach((m) => {
+        removeDocument('moneyMovements', m.id);
+        deleteItem('moneyMovements', m.id).catch(() => {});
+      });
+      if (removedFlows.length > 0) {
+        setMoneyMovements((prev) => prev.filter((m) => !(m.type === 'Sale Inflow' && m.referenceId === saleId)));
+      }
+
+      // Store Credit is a customer overage (not liquid cash) — no inflow.
+      const newFlows: MoneyMovement[] = [];
+      const inflowBase = {
+        date: updatedSale.createdAt || now,
+        type: 'Sale Inflow' as const,
+        referenceNo: existing.invoiceNo,
+        referenceId: saleId,
+        performedBy,
+        createdAt: now,
+      };
+      if (finalPaymentMethod === 'Cash') {
+        if (finalPaidAmount > 0) {
+          newFlows.push({
+            ...inflowBase,
+            id: generateUniqueId('mm'),
+            subtype: 'Cash Sale',
+            destinationAccount: 'Physical Cash',
+            amount: finalPaidAmount,
+            notes: `Cash sale: ${existing.invoiceNo} (${settings.currencySymbol}${finalPaidAmount.toFixed(2)})`,
+          });
+        }
+      } else if (finalPaymentMethod === 'Mobile Transfer' || finalPaymentMethod === 'Bank Transfer' || finalPaymentMethod === 'Card') {
+        if (finalPaidAmount > 0) {
+          newFlows.push({
+            ...inflowBase,
+            id: generateUniqueId('mm'),
+            subtype: finalPaymentMethod,
+            destinationAccount: 'Biz Account',
+            amount: finalPaidAmount,
+            notes: `${finalPaymentMethod} sale: ${existing.invoiceNo} (${settings.currencySymbol}${finalPaidAmount.toFixed(2)})`,
+          });
+        }
+      } else if (finalPaymentMethod === 'Split') {
+        const breakdown = finalPaymentBreakdown || {};
+        const cashPart = Math.max(0, Number(breakdown['Cash']) || 0);
+        const transferPart = Math.max(0,
+          (Number(breakdown['Mobile Transfer']) || 0) +
+          (Number(breakdown['Bank Transfer']) || 0) +
+          (Number(breakdown['Card']) || 0),
+        );
+        if (cashPart > 0) {
+          newFlows.push({
+            ...inflowBase,
+            id: generateUniqueId('mm'),
+            subtype: 'Split - Cash Portion',
+            destinationAccount: 'Physical Cash',
+            amount: cashPart,
+            notes: `Split sale cash portion: ${existing.invoiceNo} (${settings.currencySymbol}${cashPart.toFixed(2)})`,
+          });
+        }
+        if (transferPart > 0) {
+          newFlows.push({
+            ...inflowBase,
+            id: generateUniqueId('mm'),
+            subtype: 'Split - Transfer/Card Portion',
+            destinationAccount: 'Biz Account',
+            amount: transferPart,
+            notes: `Split sale bank portion: ${existing.invoiceNo} (${settings.currencySymbol}${transferPart.toFixed(2)})`,
+          });
+        }
+      }
+
+      if (newFlows.length > 0) {
+        setMoneyMovements((prev) => [...newFlows, ...prev]);
+        newFlows.forEach((mm) => {
+          saveDocument('moneyMovements', mm);
+          putItem('moneyMovements', mm).catch(() => {});
+        });
+      }
     }
 
     logAudit(
@@ -4480,7 +4714,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (amount <= 0 || isNaN(amount)) {
       showToast({ title: 'Invalid Amount', message: 'Withdrawal amount must be greater than zero.', type: 'error' });
-      return;
+      return '';
     }
 
     const sourceBalance = sourceAccount === 'Biz Account' ? (treasuryBalances.bizAccountBalance ?? 0) : (treasuryBalances.physicalCashBalance ?? 0);
@@ -4490,7 +4724,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         message: `Cannot withdraw ${settings.currencySymbol}${amount.toLocaleString()}. Available in ${sourceAccount}: ${settings.currencySymbol}${sourceBalance.toLocaleString()}.`,
         type: 'error',
       });
-      return;
+      return '';
     }
 
     const now = new Date().toISOString();
@@ -4523,6 +4757,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       message: `Withdrew ${settings.currencySymbol}${amount.toLocaleString()} (${subtype}) from ${sourceAccount}.`,
       type: 'warning',
     });
+    return mm.id;
   };
 
   const recordOwnerRepayment = (
@@ -4535,6 +4770,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let amount: number;
     let notes: string | undefined;
     let referenceNo: string | undefined;
+    let loanReferenceId: string | undefined;
     let performedBy: string;
     let date: string;
 
@@ -4543,6 +4779,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       amount = Number(paramsOrDestination.amount) || 0;
       notes = paramsOrDestination.notes;
       referenceNo = paramsOrDestination.referenceNo;
+      loanReferenceId = paramsOrDestination.loanReferenceId;
       performedBy = paramsOrDestination.performedBy || 'Owner';
       date = paramsOrDestination.date || new Date().toISOString();
     } else {
@@ -4567,6 +4804,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       destinationAccount,
       amount,
       referenceNo: referenceNo || `REP-${Date.now().toString().slice(-6)}`,
+      loanReferenceId,
       performedBy,
       notes: notes || `Owner repayment/deposit into ${destinationAccount}`,
       createdAt: now,

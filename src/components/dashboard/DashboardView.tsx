@@ -91,9 +91,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   // UTC+1, so a 00:30 WAT sale carries the previous UTC date — toISOString()
   // would drop it from Today's Sales.
   const todayStr = localIsoDate(now);
+  const netSaleAmount = (s: any) => Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.totalRefunded) || 0));
   const todaySales = validSales
     .filter((s) => s.createdAt && s.createdAt.startsWith(todayStr))
-    .reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
+    .reduce((acc, s) => acc + netSaleAmount(s), 0);
 
   // Scoped strictly to the current LOCAL calendar month (resets when the month
   // flips). Comparing a UTC timestamp prefix to a local month key dropped sales
@@ -102,14 +103,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
     () => validSales.filter((s) => localMonthKey(s.createdAt) === currentMonthStr),
     [validSales, currentMonthStr],
   );
-  const monthlyRevenue = currentMonthSales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
+  const monthlyRevenue = currentMonthSales.reduce((acc, s) => acc + netSaleAmount(s), 0);
 
   // Prior month sales for comparison
   const priorMonthSales = useMemo(
     () => validSales.filter((s) => localMonthKey(s.createdAt) === priorMonthStr),
     [validSales, priorMonthStr],
   );
-  const priorMonthRevenue = priorMonthSales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
+  const priorMonthRevenue = priorMonthSales.reduce((acc, s) => acc + netSaleAmount(s), 0);
 
   let monthlyChangeStr = `${currentMonthShort} active`;
   let monthlyChangeType: 'positive' | 'negative' | 'neutral' = 'neutral';
@@ -197,7 +198,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
     for (const sale of validSales) {
       const bucket = sale.createdAt ? byDay.get(localIsoDate(new Date(sale.createdAt))) : undefined;
       if (!bucket) continue;
-      bucket.revenue += Number(sale.totalAmount) || 0;
+      bucket.revenue += netSaleAmount(sale);
       bucket.sales += 1;
       bucket.units += (sale.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 1), 0);
     }

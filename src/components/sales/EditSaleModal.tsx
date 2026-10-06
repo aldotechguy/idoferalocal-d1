@@ -645,12 +645,16 @@ export const EditSaleModal: React.FC<EditSaleModalProps> = ({ sale, onClose, onS
                 value={editStatus}
                 onChange={(e) => setEditStatus(e.target.value as SaleStatus)}
                 className="w-full px-3 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl text-xs font-bold text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500"
+                title={sale.status === 'Refunded' || sale.status === 'Partially Refunded' ? 'Refunded invoices are read-only here — use Process Refund to adjust returns.' : 'Refunds are processed via Process Refund, not by flipping status here.'}
               >
                 <option value="Completed">Completed</option>
                 <option value="Draft">Draft</option>
                 <option value="Held">Held</option>
-                <option value="Refunded">Refunded</option>
+                {(sale.status === 'Refunded' || sale.status === 'Partially Refunded') && (
+                  <option value={sale.status}>{sale.status} (read-only — use Process Refund)</option>
+                )}
               </select>
+              <p className="text-[10px] text-slate-500 mt-1">Refunds run through Process Refund so stock, ledger and treasury stay in sync.</p>
             </div>
 
             <div>

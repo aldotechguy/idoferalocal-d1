@@ -13,17 +13,22 @@ export function loadSales(byCol: Map<string, DocRow[]>, stmts: Stmt[], ctx: Ctx)
   const byReceipt = new Map<string, SaleDoc>();
   for (const d of byCol.get('sales') || []) {
     const s = parsePayload(ctx, d); if (!s) continue;
-    const receipt = str(s.invoiceNo || s.id || d.docId);
+    const rawReceipt = str(s.invoiceNo).trim();
+    const isPlaceholder = rawReceipt === '' || /^n\/?a$/i.test(rawReceipt) || rawReceipt === '-';
+    const receipt = isPlaceholder ? str(s.id || d.docId) : rawReceipt;
     const prev = byReceipt.get(receipt);
     if (!prev || str(s.createdAt, '') >= str(prev.s.createdAt, '')) byReceipt.set(receipt, { d, s });
   }
   for (const { d, s } of byReceipt.values()) {
     const id = str(s.id || d.docId);
+    const rawReceipt = str(s.invoiceNo).trim();
+    const isPlaceholder = rawReceipt === '' || /^n\/?a$/i.test(rawReceipt) || rawReceipt === '-';
+    const receiptNo = isPlaceholder ? id : rawReceipt;
     ctx.salesCount++;
     ctx.salesTotalKobo += toKobo(s.totalAmount);
     stmts.push({
       sql: `INSERT INTO sales (id, receipt_no, customer_id, customer_name, type, subtotal_kobo, discount_kobo, tax_kobo, delivery_fee_kobo, total_kobo, paid_kobo, payment_method, payment_breakdown_json, status, notes, created_by, order_taken_by, is_historical, expense_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, total_kobo=excluded.total_kobo;`,
-      params: [id, str(s.invoiceNo || id), s.customerId ? str(s.customerId) : null, str(s.customerName), str(s.type, 'Retail'), toKobo(s.subtotal), toKobo(s.discount), toKobo(s.tax), toKobo(s.deliveryFee), toKobo(s.totalAmount), toKobo(s.paidAmount), str(s.paymentMethod, 'Cash'), s.paymentBreakdown ? JSON.stringify(s.paymentBreakdown) : null, str(s.status, 'Completed'), s.notes ? str(s.notes) : null, str(s.createdBy), s.orderTakenBy ? str(s.orderTakenBy) : null, bool01(s.isHistorical), s.expenseId ? str(s.expenseId) : null, str(s.createdAt, nowIso())],
+      params: [id, receiptNo, s.customerId ? str(s.customerId) : null, str(s.customerName), str(s.type, 'Retail'), toKobo(s.subtotal), toKobo(s.discount), toKobo(s.tax), toKobo(s.deliveryFee), toKobo(s.totalAmount), toKobo(s.paidAmount), str(s.paymentMethod, 'Cash'), s.paymentBreakdown ? JSON.stringify(s.paymentBreakdown) : null, str(s.status, 'Completed'), s.notes ? str(s.notes) : null, str(s.createdBy), s.orderTakenBy ? str(s.orderTakenBy) : null, bool01(s.isHistorical), s.expenseId ? str(s.expenseId) : null, str(s.createdAt, nowIso())],
     });
     (Array.isArray(s.items) ? s.items : []).forEach((it: any, i: number) => {
       placeholder(stmts, ctx, str(it.productId), str(it.productName), it);

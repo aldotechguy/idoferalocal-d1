@@ -50,7 +50,11 @@ console.log(`seeded ${stmts.length} stmts`);
 const { stores: snap } = await buildSnapshot(tx.queryAll);
 const salesTotal = (snap.sales as any[]).reduce((a, x) => a + Number(x.totalAmount || 0), 0);
 console.log('snapshot collections:', Object.keys(snap).map((k) => `${k}=${(snap[k] as any[]).length}`).join(' '));
-console.log('sales total naira:', salesTotal, 'expected 1113680');
+// Expected: 140 sales (131 distinct-invoice + 10 N/A-invoice sales each kept by doc-id),
+// total ₦1,231,375.  The old ETL used `invoiceNo||id` which collapsed all 10 N/A entries
+// onto the same key (keeping newest only). The corrected dedup (isPlaceholder → docId)
+// keeps all 10 as separate, identifiable historical sales — the canonical figure.
+console.log('sales total naira:', salesTotal, 'expected 1231375');
 console.log('products:', (snap.products as any[]).length, 'expected 106 (117 minus 11 clearance excluded from the catalogue)');
 const p0 = (snap.products as any[])[0];
 console.log('sample product keys:', Object.keys(p0).sort().join(','));
@@ -102,7 +106,7 @@ for (const st of prodStmts) tx.run(st.sql, st.params);
 const check = await tx.queryAll('SELECT stock_qty FROM products WHERE id = ?', [(p0 as any).id]);
 console.log('product write round-trip stock_qty:', (check[0] as any).stock_qty, 'expected 777');
 if ((check[0] as any).stock_qty !== 777) throw new Error('product round-trip FAILED');
-if (Math.round(salesTotal) !== 1113680) throw new Error('sales total MISMATCH');
+if (Math.round(salesTotal) !== 1231375) throw new Error('sales total MISMATCH');
 // DRIFT GUARD: the Phase 4 backfill bridge must land on the SAME relational
 // content as the ETL when fed the same documents. One DB is seeded through the
 // ETL loaders, a second through backfillStatementsFromDocumentRows; identical

@@ -460,6 +460,7 @@ export type MoneyMovementType =
   | 'Balance Adjustment'
   | 'Sale Inflow'
   | 'Sale Refund'
+  | 'Refund Outflow'
   | 'Expense Outflow'
   | 'Supplier Payment'
   | 'Customer Debt Payment'
@@ -489,6 +490,8 @@ export interface RecordOwnerRepaymentParams {
   amount: number;
   notes?: string;
   referenceNo?: string;
+  /** Optional link to the originating Owner Loan drawing (its movement id). */
+  loanReferenceId?: string;
   performedBy?: string;
   date?: string;
 }
@@ -517,6 +520,8 @@ export interface MoneyMovement {
   notes?: string;
   referenceNo?: string;
   referenceId?: string; // e.g. saleId, expenseId, poId, customerId
+  /** For Owner Repayments: the movement id of the Owner Loan drawing settled. */
+  loanReferenceId?: string;
   performedBy: string;
   createdAt: string;
 }

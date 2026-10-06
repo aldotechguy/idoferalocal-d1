@@ -278,13 +278,17 @@ export function pricingToRow(ph: any, now: string) {
   };
 }
 export function moneyToRow(m: any, now: string) {
+  // Repayments link to their originating Owner Loan drawing via loanReferenceId.
+  // Reuse the ref_id column (repayments set no other referenceId) so the link
+  // round-trips relationally without a schema migration.
+  const repaymentLoanLink = m.type === 'Owner Repayment' ? m.loanReferenceId : undefined;
   return {
     id: s(m.id), date: s(m.date, now), type: s(m.type, 'Balance Adjustment'),
     subtype: m.subtype ? s(m.subtype) : null,
     source_account: m.sourceAccount ? s(m.sourceAccount) : null,
     dest_account: m.destinationAccount ? s(m.destinationAccount) : null,
     amount_kobo: NairaToKobo(m.amount), notes: m.notes ? s(m.notes) : null,
-    ref_no: m.referenceNo ? s(m.referenceNo) : null, ref_id: m.referenceId ? s(m.referenceId) : null,
+    ref_no: m.referenceNo ? s(m.referenceNo) : null, ref_id: repaymentLoanLink ? s(repaymentLoanLink) : (m.referenceId ? s(m.referenceId) : null),
     performed_by: s(m.performedBy), created_at: s(m.createdAt, now),
   };
 }

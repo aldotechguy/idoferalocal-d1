@@ -63,12 +63,20 @@ const BUSINESS_KEYS: Record<string, string[]> = {
   categories: ['slug'],
 };
 
+/** Placeholder values that must NOT be used as business keys — each sale/purchase with
+ * one of these non-unique values must survive as a distinct document (keyed by its id).
+ * Matches the `isPlaceholder` logic in scripts/etl/part2c.ts and relationalMapper.saleToRows. */
+const PLACEHOLDER_RE = /^(n\/?a|-)$/i;
+
 function businessKeyOf(collection: string, document: any): string | null {
   const fields = BUSINESS_KEYS[collection];
   if (!fields) return null;
   for (const field of fields) {
     const value = s(document?.[field]).trim();
-    if (value) return `${field}:${value.toLowerCase()}`;
+    // Skip blank or placeholder values — they are NOT unique business identifiers.
+    // "N/A" invoiceNo appears on 10+ distinct historical walk-in sales; treating it
+    // as a business key would collapse them all to one, diverging from the ETL.
+    if (value && !PLACEHOLDER_RE.test(value)) return `${field}:${value.toLowerCase()}`;
   }
   return null;
 }
