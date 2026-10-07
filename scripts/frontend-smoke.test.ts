@@ -1481,3 +1481,50 @@ test('canon import holds the clearance / orphan / base64 / money invariants', ()
     db.close();
   }
 });
+
+test('POS-to-Mall sync targets only Mall-originated sale ids', async () => {
+  const { mallOrderIdForSale, syncMallOrderFromPos } = await import('../src/shared/posMallSync.ts');
+  assert.equal(mallOrderIdForSale({ id: 'sale-ord_123' }), 'ord_123', 'the sale id maps back to its Mall order');
+  assert.equal(mallOrderIdForSale({ id: 'sale-imp-77' }), 'imp-77', 'imported sales still resolve (no Mall order will match; the server 404s)');
+  assert.equal(mallOrderIdForSale({ id: 'sale-xyz' }), 'xyz');
+  assert.equal(mallOrderIdForSale({ id: 'walkin-1' }), null, 'a POS walk-in sale has no Mall order');
+  assert.equal(mallOrderIdForSale(null), null);
+  assert.equal(mallOrderIdForSale(undefined), null);
+});
+
+test('POS-to-Mall sync converts naira sale fields into integer kobo', async () => {
+  const { syncMallOrderFromPos } = await import('../src/shared/posMallSync.ts');
+  const calls: { url: string; body: any }[] = [];
+  const originalFetch = globalThis.fetch;
+  // staffMallClient reads a session token before fetching; Node has neither store.
+  const originalLocalStorage = (globalThis as any).localStorage;
+  const originalSessionStorage = (globalThis as any).sessionStorage;
+  (globalThis as any).localStorage = { getItem: () => null, setItem: () => { }, removeItem: () => { } };
+  (globalThis as any).sessionStorage = { getItem: () => null, setItem: () => { }, removeItem: () => { } };
+  (globalThis as any).sessionStorage = { getItem: () => null, setItem: () => { }, removeItem: () => { } };
+  globalThis.fetch = (async (url: any, init: any) => {
+    calls.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : null });
+    return new Response(JSON.stringify({ order: { id: 'ord_123' } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    syncMallOrderFromPos({
+      id: 'sale-ord_123', invoiceNo: 'INV-123', customerName: 'Ada',
+      items: [{ productId: 'p1', productName: 'Widget', sku: 'W1', quantity: 2, unitPrice: 12.5, costPrice: 5, total: 25 }],
+      subtotal: 25, discount: 2.5, tax: 0, totalAmount: 22.5, paidAmount: 22.5,
+    } as any, { orderStatus: 'refunded', paymentStatus: 'refunded' });
+    // The client is fire-and-forget; let the microtask queue drain.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.includes('/api/staff/mall-orders/ord_123/sync-from-pos'));
+    assert.equal(calls[0].body.totalKobo, 2250, '22.50 naira -> 2250 kobo');
+    assert.equal(calls[0].body.discountKobo, 250);
+    assert.equal(calls[0].body.paidKobo, 2250);
+    assert.equal(calls[0].body.orderStatus, 'refunded');
+    assert.equal(calls[0].body.items[0].unitPriceKobo, 1250, '12.50 naira unit -> 1250 kobo');
+    assert.equal(calls[0].body.items[0].qty, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    (globalThis as any).localStorage = originalLocalStorage;
+    (globalThis as any).sessionStorage = originalSessionStorage;
+  }
+});

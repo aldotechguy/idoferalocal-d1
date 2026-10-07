@@ -104,6 +104,10 @@ const MALL_EVENTS: Record<string, Omit<MallEventSpec, 'event'>> = {
   ORDER_INVOICED: { label: 'Order converted to invoice', customer: false },
   ORDER_PREPARING: { label: 'Order being prepared', customer: true },
   ORDER_UPDATED: { label: 'Order status updated', customer: false },
+  // A counter-side invoice edit (items/total/paid amount) changed what the buyer
+  // owes and ordered, so the buyer must see it — unlike the routine status churn
+  // behind ORDER_UPDATED.
+  ORDER_AMENDED: { label: 'Order amended', customer: true },
   DELIVERY_VERIFIED: { label: 'Delivery address verified', customer: false },
   DELIVERY_QUOTED: { label: 'Delivery quoted', customer: false },
   STAFF_ATTENTION_REQUIRED: { label: 'Order needs staff attention', customer: false },
@@ -116,6 +120,7 @@ const MALL_AUDIT_ACTIONS: Record<string, string> = {
   CANCEL_MALL_ORDER: 'ORDER_CANCELLED',
   REFUND_MALL_ORDER: 'ORDER_REFUNDED',
   CONVERT_MALL_ORDER_SALE: 'ORDER_INVOICED',
+  AMEND_MALL_ORDER_FROM_POS: 'ORDER_AMENDED',
   VERIFY_MALL_DELIVERY: 'DELIVERY_VERIFIED',
   QUOTE_MALL_DELIVERY: 'DELIVERY_QUOTED',
   STAFF_ATTENTION_REQUIRED: 'STAFF_ATTENTION_REQUIRED',

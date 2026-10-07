@@ -295,8 +295,43 @@ export async function mallReadiness(exec: MallExecutor) {
   return { ready: Object.values(checks).every(Boolean), checks };
 }
 
+/**
+ * Units and at-cost value committed to Mall orders that have not settled into a
+ * Sale/receivable yet: paid-but-not-fulfilled (processing/packed/dispatched) plus
+ * unpaid pending/confirmed orders still holding their checkout reservation.
+ * cost_price_kobo falls back to 0, so a deleted product cannot break the
+ * aggregate.
+ */
+async function committedStockMetrics(exec: MallExecutor) {
+  const rows = await exec.queryAll(
+    `SELECT o.status, COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(oi.qty), 0) AS units,
+       COALESCE(SUM(oi.qty * COALESCE(p.cost_price_kobo, 0)), 0) AS cost_kobo
+     FROM mall_orders o
+     JOIN mall_order_items oi ON oi.mall_order_id = o.id
+     LEFT JOIN products p ON p.id = oi.product_id
+     WHERE o.status IN ('pending','confirmed','processing','packed','ready_for_pickup','out_for_delivery')
+     GROUP BY o.status`,
+  );
+  const totals = { units: 0, costKobo: 0, orders: 0 };
+  const byStatus = rows.map((row) => {
+    const units = Number(row.units) || 0;
+    const costKobo = Number(row.cost_kobo) || 0;
+    const orders = Number(row.orders) || 0;
+    totals.units += units; totals.costKobo += costKobo; totals.orders += orders;
+    return { status: String(row.status), orders, units, costKobo };
+  });
+  return { ...totals, byStatus };
+}
+
 export async function mallMetrics(exec: MallExecutor) {
   return {
+    // Committed (escrow) stock: units reserved by Mall orders that are paid but not
+    // yet settled into a Sale, plus unpaid orders still inside the checkout window.
+    // Checkout already decremented products.stock_qty, so this inventory is off the
+    // shelf and in the fulfilment pipeline while appearing on no revenue total.
+    // Surfacing the unit count and its at-cost value closes the dashboard's
+    // inventory-valuation black hole.
+    committedStock: await committedStockMetrics(exec),
     readiness: await mallReadiness(exec),
     orders: await exec.queryAll('SELECT status, COUNT(*) AS count, MIN(created_at) AS oldest FROM mall_orders GROUP BY status'),
     payments: await exec.queryAll('SELECT status, COUNT(*) AS count, MIN(created_at) AS oldest FROM payments WHERE order_id IS NOT NULL GROUP BY status'),

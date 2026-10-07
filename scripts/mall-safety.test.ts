@@ -505,7 +505,7 @@ for (const runtime of ['node', 'worker'] as const) {
     const refunds = await Promise.all([f.op('refund', { reason: 'Return', returnStock: true }), f.op('refund', { reason: 'Return', returnStock: true })]);
     assert.ok(refunds.every((r) => r.status === 200));
     assert.equal(f.scalar('SELECT stock_qty FROM products'), 10);
-    assert.equal(f.scalar("SELECT COUNT(*) FROM money_movements WHERE type = 'Refund Outflow'"), 1);
+    assert.equal(f.scalar("SELECT COUNT(*) FROM money_movements WHERE type = 'Sale Refund'"), 1);
     assert.equal((await f.op('mark-packed')).status, 409);
     const c = await fixture(runtime); t.after(() => c.db.close()); await c.checkout();
     const cancellations = await Promise.all([c.op('cancel'), c.op('cancel')]);
@@ -524,7 +524,14 @@ for (const runtime of ['node', 'worker'] as const) {
     f.db.exec(`UPDATE mall_orders SET delivery_address_json=json_set(delivery_address_json,'$.zone','uyo_central')`);
     await f.op('mark-packed');
     const results = await Promise.all([f.op('refund', { reason: 'Returned', returnStock: true }), f.op('mark-out-for-delivery', { courier: 'Test courier' })]);
-    assert.deepEqual(results.map((r) => r.status).sort(), [200, 409]);
+    const statuses = results.map((r) => r.status).sort();
+    // Exactly one operation wins; the loser is always rejected as a client error.
+    //   * refund wins  -> dispatch sees 'refunded' and is rejected with 409
+    //   * dispatch wins -> refund sees 'out_for_delivery' and is rejected with 400,
+    //                     because restocking dispatched goods requires a goods-received
+    //                     reference (the request supplied none)
+    assert.equal(statuses[0], 200);
+    assert.ok(statuses[1] === 409 || statuses[1] === 400, `loser must be rejected, got ${statuses[1]}`);
     const refunded = f.scalar('SELECT status FROM mall_orders') === 'refunded';
     assert.equal(f.scalar('SELECT stock_qty FROM products'), refunded ? 10 : 8);
     assert.equal(f.scalar('SELECT COUNT(*) FROM delivery_orders'), refunded ? 0 : 1);

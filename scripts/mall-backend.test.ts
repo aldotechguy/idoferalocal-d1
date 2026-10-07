@@ -273,9 +273,123 @@ test('delivery fulfilment links into deliveries and refunds restore stock once',
   assert.equal((await refund()).status, 200);
   assert.equal((db.prepare(`SELECT stock_qty FROM products WHERE id = 'prod-1'`).get() as any).stock_qty, 10);
   assert.equal((db.prepare(`SELECT status FROM sales WHERE id = ?`).get(`sale-${id}`) as any).status, 'Refunded');
-  const movement = db.prepare(`SELECT source_account, dest_account FROM money_movements WHERE id = ?`).get(`mm-refund-sale-${id}`) as any;
+  const movement = db.prepare(`SELECT type, source_account, dest_account FROM money_movements WHERE id = ?`).get(`mm-refund-sale-${id}`) as any;
+  // A refund is an outflow of one liquid account: the money leaves the Biz
+  // Account (Card settles there) and there is no destination account.
+  assert.equal(movement.type, 'Sale Refund');
   assert.equal(movement.source_account, 'Biz Account');
-  assert.equal(movement.dest_account, 'Card');
+  assert.equal(movement.dest_account, null);
   assert.equal((await refund()).status, 200);
   assert.equal((db.prepare(`SELECT stock_qty FROM products WHERE id = 'prod-1'`).get() as any).stock_qty, 10);
+});
+/** Settle a checked-out order into a linked sale so the POS-sync tests have a target. */
+async function paidOrder(exec: ReturnType<typeof makeNodeMallExecutor>, db: InstanceType<typeof DatabaseSync>, session: string) {
+  await checkout(exec, session);
+  const id = (db.prepare('SELECT id FROM mall_orders LIMIT 1').get() as any).id as string;
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/confirm`, { method: 'POST', body: '{}' }), exec, actor);
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/collect-payment`, {
+    method: 'POST', body: JSON.stringify({ paymentMethod: 'Cash', amountKobo: 20000 }),
+  }), exec, actor);
+  return id;
+}
+
+const syncBody = (overrides: Record<string, unknown> = {}) => ({
+  subtotalKobo: 30000, totalKobo: 30000, discountKobo: 0, deliveryFeeKobo: 0, paidKobo: 30000,
+  orderStatus: 'processing', paymentStatus: 'paid',
+  items: [{ productId: 'prod-1', name: 'Mall Product', qty: 3, unitPriceKobo: 10000 }],
+  ...overrides,
+});
+
+test('a POS amendment reconciles the Mall order, its lines and the buyer notification', async () => {
+  const { db, exec, session } = fixture();
+  const id = await paidOrder(exec, db, session);
+  assert.equal((db.prepare('SELECT total_kobo FROM mall_orders WHERE id = ?').get(id) as any).total_kobo, 20000);
+
+  const synced = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/sync-from-pos`, {
+    method: 'POST', body: JSON.stringify(syncBody()),
+  }), exec, actor);
+  assert.equal(synced.status, 200);
+
+  const order = db.prepare('SELECT total_kobo, status FROM mall_orders WHERE id = ?').get(id) as any;
+  assert.equal(order.total_kobo, 30000, 'the buyer-visible total follows the counter edit');
+  assert.equal(order.status, 'processing');
+  const lines = db.prepare('SELECT product_id, qty, unit_price_kobo, total_kobo FROM mall_order_items WHERE mall_order_id = ?').all(id) as any[];
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].qty, 3);
+  assert.equal(lines[0].total_kobo, 30000, 'line totals are recomputed from qty x unit');
+  const payment = db.prepare('SELECT amount_kobo, status FROM payments WHERE order_id = ?').get(id) as any;
+  assert.equal(payment.amount_kobo, 30000);
+  assert.equal(payment.status, 'paid');
+  // The audit row is what the outbox trigger turns into the buyer's amendment email.
+  assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'AMEND_MALL_ORDER_FROM_POS'`).get() as any).n, 1);
+});
+
+test('a POS amendment replaces lines wholesale and is idempotent on replay', async () => {
+  const { db, exec, session } = fixture();
+  const id = await paidOrder(exec, db, session);
+
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/sync-from-pos`, {
+    method: 'POST', body: JSON.stringify(syncBody({ items: [
+      { productId: 'prod-1', name: 'Mall Product', qty: 1, unitPriceKobo: 10000 },
+      { productId: 'prod-2', name: 'Added Item', qty: 2, unitPriceKobo: 5000 },
+    ], subtotalKobo: 20000, totalKobo: 20000, paidKobo: 20000 })),
+  }), exec, actor);
+  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM mall_order_items WHERE mall_order_id = ?').get(id) as any).n, 2);
+
+  // Replaying with a single line must drop the second, not leave it orphaned.
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/sync-from-pos`, {
+    method: 'POST', body: JSON.stringify(syncBody()),
+  }), exec, actor);
+  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM mall_order_items WHERE mall_order_id = ?').get(id) as any).n, 1);
+  assert.equal((db.prepare('SELECT total_kobo FROM mall_orders WHERE id = ?').get(id) as any).total_kobo, 30000);
+});
+
+test('a POS amendment is refused for an unpaid order and for non-operating roles', async () => {
+  const { db, exec, session } = fixture();
+  await checkout(exec, session);
+  const id = (db.prepare('SELECT id FROM mall_orders LIMIT 1').get() as any).id as string;
+
+  // No linked sale yet: nothing to reconcile.
+  const unpaid = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/sync-from-pos`, {
+    method: 'POST', body: JSON.stringify(syncBody()),
+  }), exec, actor);
+  assert.equal(unpaid.status, 409);
+
+  const id2 = await paidOrder(exec, db, session);
+  const accountant = { ...actor, role: 'Accountant' };
+  const forbidden = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id2}/sync-from-pos`, {
+    method: 'POST', body: JSON.stringify(syncBody()),
+  }), exec, accountant);
+  assert.equal(forbidden.status, 403);
+});
+
+test('committed Mall stock reports the escrow units and their at-cost value', async () => {
+  const { db, exec, session } = fixture();
+  // A second, higher-cost product so the valuation is not a single-line artefact.
+  const now = new Date().toISOString();
+  db.prepare(`INSERT INTO products (id, sku, name, description, category_name, brand, supplier_name, images_json,
+    cost_price_kobo, retail_price_kobo, wholesale_price_kobo, min_wholesale_qty, min_selling_price_kobo,
+    stock_qty, low_stock_threshold, unit, status, is_mall_listed, mall_price_kobo, created_at, updated_at)
+    VALUES ('prod-2', 'SKU2', 'Costly Product', '', 'Test', 'Test', '', '[]', 7000, 12000, 11000, 10, 7000, 5, 2, 'pcs', 'Active', 1, 12000, ?, ?)`).run(now, now);
+
+  await checkout(exec, session); // 2 x prod-1 = 2 units @ 5000 cost = 10000 kobo
+  const metrics = (await (await handleStaffMallApi(new Request('http://test/api/staff/mall-orders/operations', { method: 'GET' }), exec, actor)).json()) as any;
+  assert.equal(metrics.committedStock.units, 2);
+  assert.equal(metrics.committedStock.costKobo, 10000);
+  assert.equal(metrics.committedStock.orders, 1);
+  assert.equal(metrics.committedStock.byStatus[0].status, 'pending');
+});
+
+test('committed Mall stock falls to zero once the order settles into a sale', async () => {
+  const { db, exec, session } = fixture();
+  const id = await paidOrder(exec, db, session);
+  // Paid but not yet fulfilled: still committed (in the fulfilment pipeline).
+  let metrics = (await (await handleStaffMallApi(new Request('http://test/api/staff/mall-orders/operations', { method: 'GET' }), exec, actor)).json()) as any;
+  assert.equal(metrics.committedStock.units, 2);
+
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/refund`, {
+    method: 'POST', body: JSON.stringify({ reason: 'Returned', returnStock: true, returnReference: 'GRN-1' }),
+  }), exec, actor);
+  metrics = (await (await handleStaffMallApi(new Request('http://test/api/staff/mall-orders/operations', { method: 'GET' }), exec, actor)).json()) as any;
+  assert.equal(metrics.committedStock.units, 0, 'a refunded order no longer holds committed stock');
 });

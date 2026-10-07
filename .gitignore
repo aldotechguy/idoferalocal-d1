@@ -20,6 +20,9 @@ tmp_*.txt
 *.err
 # Local wrangler/miniflare dev state (recreated by `wrangler dev`)
 .wrangler/
+# Throwaway diagnostics: hardcode a local backup/dump path under the ignored
+# /backups/ dir, so they are machine-specific and never reproducible in CI
+scripts/diag-*.ts
 # Editor state (may hold local API keys / machine-specific settings)
 .vscode/
 # Agent/tooling state: worktree copies, session traces and local preferences

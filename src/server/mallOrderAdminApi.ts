@@ -472,7 +472,7 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
   for (const item of items) {
     stmts.push({ sql: `UPDATE sale_items SET returned_qty = qty WHERE sale_id = ? AND product_id = ?`, params: [row.linked_sale_id, item.product_id] });
   }
-  stmts.push({ sql: `INSERT INTO money_movements (id, date, type, subtype, source_account, dest_account, amount_kobo, notes, ref_no, ref_id, performed_by, created_at) VALUES (?, ?, 'Refund Outflow', ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params: [`mm-refund-${row.linked_sale_id}`, at, s(row.payment_provider), paymentDestination(s(row.payment_provider)), s(row.payment_provider), row.total_kobo, reason, row.order_no, row.linked_sale_id, actor.displayName, at] });
+  stmts.push({ sql: `INSERT INTO money_movements (id, date, type, subtype, source_account, dest_account, amount_kobo, notes, ref_no, ref_id, performed_by, created_at) VALUES (?, ?, 'Sale Refund', ?, ?, NULL, ?, ?, ?, ?, ?, ?)`, params: [`mm-refund-${row.linked_sale_id}`, at, `Mall ${s(row.payment_provider) === 'Cash' ? 'Cash' : 'Biz Account'} Refund (Full)`, paymentDestination(s(row.payment_provider)), row.total_kobo, reason, row.order_no, row.linked_sale_id, actor.displayName, at] });
   // Also claw back any store credit this sale created, mirroring refundSale():
   // otherwise a refunded order leaves spendable credit behind on the customer.
   if (row.customer_id) stmts.push({ sql: `UPDATE customers SET purchase_history_count = MAX(0, purchase_history_count - 1), lifetime_value_kobo = MAX(0, lifetime_value_kobo - ?), loyalty_points = MAX(0, loyalty_points - ?), overage_balance_kobo = MAX(0, overage_balance_kobo - COALESCE((SELECT overage_created_kobo FROM sales WHERE id = ?), 0)) WHERE id = ?`, params: [row.total_kobo, Math.floor(n(row.total_kobo) / 10_000), row.linked_sale_id, row.customer_id] });
@@ -496,6 +496,71 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
     if (s(concurrent[0]?.status) === 'refunded') return detail(exec, id);
     throw error;
   }
+  return detail(exec, id);
+}
+
+/**
+ * Bridge: a counter-side POS edit/refund of a Mall-originated sale (`sale-<orderId>`)
+ * back onto the Mall order. The forward cascade (collect-payment) already creates
+ * the sale, items, treasury inflow and customer metrics; without this reverse hop a
+ * staff edit or POS refund left `mall_orders`/`mall_order_items`/`payments` frozen
+ * at checkout time, so the buyer's `/mall/orders` tracking page showed a stale
+ * total, stale lines and a stale status.
+ *
+ * The client sends the POS-side truth it just committed; this endpoint reconciles
+ * the Mall rows to it in one guarded batch and emits AMEND_MALL_ORDER_FROM_POS so
+ * the buyer is emailed the change. Only Administrator/Store Manager/Sales Staff
+ * may call it (the roles that can edit a sale), and only a sale id of the
+ * `sale-<orderId>` shape resolves — a POS walk-in sale has no Mall order to sync.
+ */
+async function syncFromPos(exec: MallExecutor, id: string, actor: StaffActor, body: any) {
+  if (!canOperate(actor)) fail(403, 'You do not have permission to amend Mall orders.');
+  const row = await getOrderRow(exec, id);
+  const status = s(row.status);
+  if (!s(row.linked_sale_id)) fail(409, 'This Mall order has no linked sale to reconcile.');
+  if (status === 'cancelled') fail(409, 'A cancelled Mall order cannot be amended.');
+
+  const totalKobo = n(body?.totalKobo);
+  if (totalKobo < 0) fail(400, 'A non-negative order total is required.');
+  const paidKobo = Math.max(0, n(body?.paidKobo));
+  const discountKobo = Math.max(0, n(body?.discountKobo));
+  const deliveryFeeKobo = Math.max(0, n(body?.deliveryFeeKobo));
+  const items = Array.isArray(body?.items) ? body.items : null;
+  if (!items) fail(400, 'The amended line items are required.');
+
+  const at = nowIso();
+  const stmts: MallStmt[] = [];
+  // Header: totals always; the status only when the caller sends one, so an edit
+  // that merely re-prices an unpaid order cannot flip it to `paid` in the buyer's
+  // view (and a refund that flips it to `refunded` still can).
+  stmts.push({
+    sql: `UPDATE mall_orders SET total_kobo = ?, subtotal_kobo = ?, discount_kobo = ?, delivery_fee_kobo = ?, status = ? WHERE id = ?`,
+    params: [totalKobo, Math.max(0, n(body?.subtotalKobo)), discountKobo, deliveryFeeKobo, s(body?.orderStatus, status), id],
+  });
+  // Replace the lines wholesale: an edit can add, drop or re-price lines, and a
+  // diff would leave orphans behind. Deterministic ids keep the write idempotent.
+  stmts.push({ sql: 'DELETE FROM mall_order_items WHERE mall_order_id = ?', params: [id] });
+  items.forEach((item: any, index: number) => {
+    const qty = Math.max(0, n(item?.qty));
+    const unitKobo = Math.max(0, n(item?.unitPriceKobo));
+    stmts.push({
+      sql: `INSERT INTO mall_order_items (id, mall_order_id, product_id, product_name, qty, unit_price_kobo, total_kobo)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      params: [`${id}-item-${index}`, id, s(item?.productId), s(item?.name, 'Item'), qty, unitKobo, qty * unitKobo],
+    });
+  });
+  stmts.push({
+    sql: `UPDATE payments SET amount_kobo = ?, status = ?, raw_json = ? WHERE order_id = ?`,
+    params: [totalKobo, s(body?.paymentStatus, s(row.payment_status, 'pending')), JSON.stringify({ amendedBy: actor.displayName, amendedAt: at, paidKobo }), id],
+  });
+  // The audit row is what the outbox trigger turns into the buyer's amendment
+  // email, so it must be written even when nothing else changed.
+  stmts.push({
+    sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'AMEND_MALL_ORDER_FROM_POS', 'MallOrder', ?, ?, ?)`,
+    params: [`audit-pos-sync-${id}-${uuid()}`, actor.id, id, `${actor.displayName} amended Mall order ${s(row.order_no)} from the counter POS.`, at],
+  });
+  stmts.push(revisionBumpStatement());
+  await runOrderBatch(exec, row, stmts);
   return detail(exec, id);
 }
 
@@ -578,6 +643,7 @@ async function staffMallRoute(request: Request, exec: MallExecutor, actor: Staff
       if (parts[1] === 'collect-payment') return await finalizePayment(exec, id, actor, body, false);
       if (parts[1] === 'verify-payment') return await finalizePayment(exec, id, actor, body, true);
       if (parts[1] === 'refund') return await refundOrder(exec, id, actor, body);
+      if (parts[1] === 'sync-from-pos') return await syncFromPos(exec, id, actor, body);
       if (STATUS_ACTIONS[parts[1]]) return await transitionOrder(exec, id, actor, parts[1], body);
     }
     return json({ error: 'Unknown staff Mall order route.' }, 404);

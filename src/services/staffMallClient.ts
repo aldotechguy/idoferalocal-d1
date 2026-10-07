@@ -56,4 +56,6 @@ export const staffMallClient = {
   transition: (id: string, action: 'start-processing' | 'mark-packed' | 'mark-ready' | 'mark-out-for-delivery' | 'complete', courier?: string) =>
     request(`/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: JSON.stringify({courier}) }) as Promise<{ order: StaffMallOrder }>,
   refund: (id: string, reason: string, returnStock: boolean, returnReference?:string) => request(`/${encodeURIComponent(id)}/refund`, { method: 'POST', body: JSON.stringify({ reason, returnStock, returnReference }) }) as Promise<{ order: StaffMallOrder }>,
+  syncFromPos: (id: string, body: { subtotalKobo: number; totalKobo: number; discountKobo: number; deliveryFeeKobo: number; paidKobo: number; orderStatus?: string; paymentStatus?: string; items: { productId: string; name: string; qty: number; unitPriceKobo: number }[] }) =>
+    request(`/${encodeURIComponent(id)}/sync-from-pos`, { method: 'POST', body: JSON.stringify(body) }) as Promise<{ order: StaffMallOrder }>,
 };

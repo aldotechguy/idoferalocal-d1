@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useMemo } from 'react';
 import { useAuth } from './AuthContext';
 import { catalogStatus } from '../shared/productStatus';
+import { syncMallOrderFromPos } from '../shared/posMallSync';
 import {
   Product,
   Customer,
@@ -2327,6 +2328,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `${isFullyRefunded ? 'Full' : 'Partial'} refund ${refundNo} for sale ${sale.invoiceNo} (${settings.currencySymbol}${netRefundAmount.toFixed(2)}). Items returned: ${returnedItemsList.reduce((acc, it) => acc + it.quantity, 0)} units across ${returnedItemsList.length} products. Settlement: ${settlementMethod}. Reason: ${reason}`
     );
 
+    // Bridge: mirror the refund onto the Mall order so the buyer's tracking page
+    // flips to the refunded state and reflects the refunded total.
+    syncMallOrderFromPos(updatedSale, {
+      orderStatus: isFullyRefunded ? 'refunded' : 'processing',
+      paymentStatus: isFullyRefunded ? 'refunded' : 'paid',
+      paidAmount: Math.max(0, (Number(updatedSale.totalAmount) || 0) - (Number(updatedSale.totalRefunded) || 0)),
+    });
+
     showToast({
       title: isFullyRefunded ? 'Sale Fully Refunded' : 'Partial Return Processed',
       message: `${refundNo} processed (${settings.currencySymbol}${netRefundAmount.toFixed(2)} settled via ${settlementMethod}). Stock & customer ledger updated.`,
@@ -3195,6 +3204,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
       }
     }
+
+    // Bridge: a Mall-originated sale (sale-<orderId>) is mirrored on the server's
+    // mall_orders. Push the committed edit so the buyer's tracking page (total,
+    // lines, status) stops showing the checkout-time snapshot. Best-effort only.
+    syncMallOrderFromPos(updatedSale, {
+      paymentStatus: newUnpaid <= 0 ? 'paid' : 'pending',
+      paidAmount: finalPaidAmount,
+    });
 
     logAudit(
       'UPDATE_SALE',

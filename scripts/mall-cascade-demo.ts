@@ -213,7 +213,7 @@ printRows('delivery_orders (created at dispatch, closed at delivery)', `SELECT d
 printRows('mall_order_events for the delivery order', `SELECT action, actor_id, details, status, created_at FROM mall_order_events WHERE order_id = '${orderId2}' ORDER BY created_at`);
 
 console.log('\nStage 5 — REFUND: the reverse cascade unwinds every core record of the delivery order.');
-console.log('  mall_returns -> payments/sales refunded -> Refund Outflow -> customer');
+console.log('  mall_returns -> payments/sales refunded -> Sale Refund -> customer');
 console.log('  metrics rolled back -> stock restored -> delivery_order returned.');
 
 const refund = await staffOp(orderId2, 'refund', { reason: 'Damaged on arrival', returnStock: true, returnReference: 'GRN-DEMO-001' });
@@ -222,14 +222,14 @@ expect('refund status', refund.status, 200);
 expect('order refunded', scalar(`SELECT status FROM mall_orders WHERE id = '${orderId2}'`), 'refunded');
 expect('sale flipped to Refunded', scalar(`SELECT status FROM sales WHERE id = 'sale-${orderId2}'`), 'Refunded');
 expect('payment refunded', scalar(`SELECT status FROM payments WHERE order_id = '${orderId2}'`), 'refunded');
-expect('Refund Outflow written', scalar(`SELECT COUNT(*) FROM money_movements WHERE type = 'Refund Outflow'`), 1);
+expect('Sale Refund written', scalar(`SELECT COUNT(*) FROM money_movements WHERE type = 'Sale Refund'`), 1);
 expect('stock restored (8 + 22)', scalar('SELECT SUM(stock_qty) FROM products'), 30);
 expect('customer metrics rolled back', scalar(`SELECT loyalty_points + purchase_history_count FROM customers WHERE name = 'Emeka Okon'`), 0);
 expect('mall_returns restock row', scalar('SELECT disposition FROM mall_returns'), 'restocked');
 expect('delivery order cancelled on refund', scalar('SELECT status FROM delivery_orders'), 'Cancelled');
 
 printRows('sales (one Completed, one Refunded)', `SELECT id, receipt_no, customer_name, status, total_kobo AS total, payment_method, notes FROM sales`);
-printRows('money_movements (Sale Inflow + Refund Outflow)', `SELECT id, date, type, subtype, source_account, dest_account, amount_kobo AS amount, notes, ref_id FROM money_movements`);
+printRows('money_movements (Sale Inflow + Sale Refund)', `SELECT id, date, type, subtype, source_account, dest_account, amount_kobo AS amount, notes, ref_id FROM money_movements`);
 printRows('customers (order 1 keeps its metrics; order 2 rolled back)', `SELECT name, phone, purchase_history_count AS purchases, loyalty_points AS loyalty, lifetime_value_kobo AS lifetime, outstanding_balance_kobo AS outstanding FROM customers`);
 printRows('payments', `SELECT id, order_id, sale_id, provider, amount_kobo, status FROM payments`);
 printRows('products (order 1 sold; order 2 restocked)', `SELECT id, sku, name, stock_qty FROM products`);
@@ -242,7 +242,7 @@ const refundReplay = await staffOp(orderId2, 'refund', { reason: 'Damaged on arr
 console.log(`\n  replayed refund -> HTTP ${refundReplay.status}`);
 expect('refund replay status', refundReplay.status, 200);
 expect('still exactly 2 sales', scalar('SELECT COUNT(*) FROM sales'), 2);
-expect('still exactly 1 Refund Outflow', scalar(`SELECT COUNT(*) FROM money_movements WHERE type = 'Refund Outflow'`), 1);
+expect('still exactly 1 Sale Refund', scalar(`SELECT COUNT(*) FROM money_movements WHERE type = 'Sale Refund'`), 1);
 expect('still exactly 1 mall_returns row', scalar('SELECT COUNT(*) FROM mall_returns'), 1);
 expect('stock unchanged after replay', scalar('SELECT SUM(stock_qty) FROM products'), 30);
 

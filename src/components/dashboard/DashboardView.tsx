@@ -45,6 +45,7 @@ import {
   Cell,
 } from 'recharts';
 import { localIsoDate } from '../../shared/localDate';
+import { useCommittedMallStock } from '../../hooks/useCommittedMallStock';
 
 /** Local calendar month key (YYYY-MM) for a UTC ISO timestamp or date string. */
 const localMonthKey = (timestamp?: string): string => {
@@ -62,6 +63,7 @@ interface DashboardViewProps {
 export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const { products, sales, purchases, expenses, settings, treasuryBalances } = useApp();
   const { currentUser, hasPermission, isPrivacyMode } = useAuth();
+  const committedMallStock = useCommittedMallStock(currentUser);
   const isSalesStaff = currentUser?.role === 'Sales Staff';
   const hideFinancials = isSalesStaff || isPrivacyMode;
   const canAccessLiquidCash = hasPermission(['Administrator', 'Store Manager', 'Accountant']);
@@ -466,6 +468,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
               actionLabel="View Valuation Report"
               isPrivate
             />
+            {/* Escrow: inventory that left the shelf at Mall checkout but has not
+                become a Sale yet. Shown so the inventory-valuation figure above is
+                not read as "on-hand stock is missing" - the units are committed,
+                not lost. Hidden for non-management roles (the hook returns null). */}
+            {committedMallStock && committedMallStock.units > 0 && (
+              <StatCard
+                title="Committed Mall Stock"
+                value={`${committedMallStock.units.toLocaleString()} units`}
+                subtitle={`${settings.currencySymbol}${(committedMallStock.costKobo / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} at cost - ${committedMallStock.orders} open order(s)`}
+                icon={Boxes}
+                change="In fulfilment"
+                changeType="neutral"
+                colorScheme="indigo"
+                onClick={() => onNavigate('mall-orders')}
+                actionLabel="Open Mall Orders"
+                isPrivate
+              />
+            )}
           </>
         )}
       </div>

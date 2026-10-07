@@ -19,11 +19,13 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
+import { useCommittedMallStock } from '../../hooks/useCommittedMallStock';
 import { InvestmentPlannerView } from '../finance/InvestmentPlannerView';
 
 export const ReportsView: React.FC = () => {
   const { sales, products, expenses, settings } = useApp();
-  const { isPrivacyMode } = useAuth();
+  const { isPrivacyMode, currentUser } = useAuth();
+  const committedMallStock = useCommittedMallStock(currentUser);
 
   // Read any pre-selected period intent from navigation (e.g. from Dashboard "Past Month" button)
   const [selectedPeriod, setSelectedPeriod] = useState<string>(() => {
@@ -970,6 +972,12 @@ export const ReportsView: React.FC = () => {
             )}
 
             {/* Inventory Valuation Table */}
+            {reportType === 'InventoryValuation' && committedMallStock && committedMallStock.units > 0 && (
+              <div className="mb-4 p-3 rounded-xl border border-indigo-200 dark:border-indigo-800/60 bg-indigo-50 dark:bg-indigo-950/40 text-xs text-indigo-900 dark:text-indigo-200">
+                <span className="font-bold">Committed Mall stock: {committedMallStock.units.toLocaleString()} units</span>
+                {' '}valued at {isPrivacyMode ? `${cs}••••` : `${cs}${(committedMallStock.costKobo / 100).toFixed(2)}`} cost across {committedMallStock.orders} open Mall order(s). These units already left the shelf at checkout and are excluded from the on-hand valuation below until the order is settled or expires.
+              </div>
+            )}
             {reportType === 'InventoryValuation' && (
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-100 dark:border-slate-800 text-slate-400 uppercase text-[10px] tracking-wider font-bold">
