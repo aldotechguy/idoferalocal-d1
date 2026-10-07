@@ -368,4 +368,114 @@ outflow) are resolved, F4 (sweep readiness) is addressed, and the full write-pat
 reconciliation is re-verified in preview. The storefront itself is sound; the gaps are
 in the back-office propagation that makes the "one system" claim true.
 
+
+---
+
+# Part 2 — Remediation status (2026-10-06)
+
+Reviewed commits `4e51d62` ("production-readiness fixes — treasury, revenue, relational
+drift, cascade demo") and `d3aca3e` ("POS<->Mall sync bridge, committed-stock indicator,
+and email-DNS verification") on `feature/unified-mall`. Verification: full source diff
+review, `tsc --noEmit` (clean), and the three backend suites
+(`mall-backend`+`mall-safety` 108 tests, `frontend-smoke` 67, `access` 23) all green.
+
+## Status of the six findings
+
+| # | Finding | Status |
+|---|---|---|
+| F1 | Mall refund money movement used out-of-vocabulary `Refund Outflow` | **FIXED** |
+| F2 | Delivery-fee Logistics expenses lack a paired `Expense Outflow` money movement | **Open** |
+| F3 | Mall stock-out movement uses non-standard type `Mall Order` | **Open** |
+| F4 | Readiness `scheduler` driven only by drain cron, not the stock-release sweep | **Open** |
+| F5 | Catalog list/search report `sold: 0`; popularity sort inert | Open (documented intentional) |
+| F6 | Unknown `/api/*` returns 401 instead of 404 | Open (cosmetic) |
+
+### F1 — FIXED (correctly, with backward compatibility)
+
+`refundOrder` now writes `type='Sale Refund'`, a POS-parity subtype
+(`Mall Cash/Biz Account Refund (Full)`), and `dest_account=NULL`
+(`mallOrderAdminApi.ts:475`). Because production may already contain legacy
+`Refund Outflow` rows, the fix also:
+
+- adds `'Refund Outflow'` to `MoneyMovementType` (`types/index.ts:463`);
+- teaches the treasury view to match `'Refund Outflow'` under the "Sale Refunds"
+  filter, count it in `totalOutflow`, and style it with the refund badge
+  (`MoneyMovementView.tsx`).
+
+This closes the classification gap without stranding existing rows. Verified by the
+updated test ("a refund is an outflow of one liquid account… `type='Sale Refund'`,
+`dest_account=null`").
+
+### F2, F3, F4 — still open
+
+- **F2** — `confirmDeliveryPickup` (`AppContext.tsx`) and Mall dispatch
+  (`mallOrderAdminApi.ts:397–409`) still `INSERT` the Logistics expense directly with
+  no `Expense Outflow` money movement. `grep "Expense Outflow" src/server/` → no match.
+  The profit (reports) vs. liquid-balance (treasury) divergence for delivery fees
+  remains.
+- **F3** — `stock_movements.type='Mall Order'` (`mallApi.ts:755`) is unchanged and is
+  still absent from `MovementType` (`types/index.ts:72–80`).
+
+## New work added in these commits (all sound)
+
+1. **POS→Mall reverse sync bridge** — `syncFromPos` (`mallOrderAdminApi.ts`) +
+   `syncMallOrderFromPos` (`shared/posMallSync.ts`) mirror a counter-side invoice
+   edit/refund back onto `mall_orders`/`mall_order_items`/`payments`, plus a new
+   `ORDER_AMENDED` buyer-facing outbox event. This closes the asymmetric desync I noted
+   (a POS edit left the buyer's `/mall/orders` page frozen at checkout). Correctly
+   role-gated, idempotent (`sale-<orderId>` keying), and best-effort on the client.
+2. **Committed (escrow) stock** — `committedStockMetrics` in `mallMetrics`, surfaced via
+   `useCommittedMallStock` as a Dashboard card and a Reports inventory-valuation line,
+   so the "pending-checkout valuation black hole" is now explained rather than
+   misread as missing stock.
+3. **Revenue netting** — `netSaleAmount = totalAmount − totalRefunded` applied across
+   Dashboard and Reports reducers, so refunded/partially-refunded sales no longer count
+   full revenue.
+4. **Owner drawings/loans netting** — sum-then-net for repayments so the KPI is
+   order-independent (`AppContext.tsx` treasury memo).
+5. **Invoice-edit treasury reconciliation** — rebuilding `Sale Inflow` money movements
+   from finalized payment values on edit (fixes stale till/bank figures).
+6. **Relational drift** — placeholder business-key guard (`PLACEHOLDER_RE`) so
+   `"N/A"`/`"-"` invoice/receipt values no longer collapse distinct walk-in sales;
+   `loanReferenceId` round-trips via `ref_id`.
+7. **Email-DNS verification** — `scripts/verify-email-dns.ts` + `docs/dns-records.md`
+   for apex SPF/DMARC/DKIM posture (transactional-mail deliverability).
+
+## New issues found in review
+
+**N1 [Low/Medium] — `revisionBumpStatement` is not monotonic under same-millisecond
+writes, and its test is flaky.**
+
+`revisionBumpStatement` (`mallSafety.ts:130–138`) uses `Date.now()` (ms) as the
+watermark value with a strict `WHERE CAST(excluded) > CAST(settings)` guard. Two Mall
+writes landing in the same millisecond therefore do **not** advance the revision, so a
+guarded snapshot client (staff workspace) that issued a 304 could miss the second
+write. The pre-existing test "every mall write batch bumps the sync revision" asserts
+strict monotonic increase and fails intermittently under full-suite timing
+(failed once across two full runs; passes in isolation 3/3). The code comment claims
+`Math.max(now, current + 1)` semantics, but the SQL implements strict `>`, not `>= current + 1`.
+
+**Recommendation:** make the bump `CAST(settings.value_json AS INTEGER) + 1` (floor to
+`now` if the clock lags) so it advances by at least one per write, and harden the test.
+
+**N2 [Low] — `syncFromPos` trusts client `totalKobo` independently of its line items**
+and does not reject an empty `items` array (`[]` passes the `!items` guard), so a
+malformed/buggy client could clear a Mall order's lines or write a total inconsistent
+with `SUM(qty × unit)`. The POS is the trusted source today, so this is defensive only.
+
+## Bottom line (updated)
+
+F1 — the highest-severity financial-classification defect — is correctly fixed, and the
+commits add substantial, well-tested cross-layer reconciliation (POS↔Mall reverse sync,
+committed-stock visibility, revenue netting, invoice-edit treasury reconciliation).
+F2, F3 and F4 remain open and are the material blockers to the "one coherent financial
+and analytics system" claim, together with the N1 revision-monotonicity bug. Deployment
+to `--env mall` was **not** verifiable from this sandbox (no Cloudflare credentials), so
+the live origin may still be running the pre-fix Worker until a `npx wrangler deploy
+--env mall` is performed.
+
+- **F4** — `ownsMarker = mode !== 'sweep'` (`mallOperations.ts:544`) and the drain/sweep
+  cron split are unchanged; a dead sweep still leaves `ready.scheduler` green while
+  unpaid orders stop expiring and reserved stock is never released.
+
 and makes the storefront's own popularity signals inconsistent with the analytics layer.
