@@ -17,6 +17,23 @@ export function isStaffPage(path: string) {
   return /^\/(labs|app)(\/|$)/.test(path);
 }
 
+/** Private API namespaces (entrance-gated). A path is private only when it lives
+ * under one of these prefixes — an unknown `/api/*` path is NOT private and so
+ * falls through to the router, which answers 404 rather than 401. */
+const PRIVATE_API_PREFIXES = ['/api/storage', '/api/ai', '/api/staff', '/api/auth'] as const;
+
+/** Public auth endpoints that must never be entrance-gated (the sign-in flow
+ * itself needs them; gating them re-creates the circular 401 on login). */
+const PUBLIC_AUTH_PATHS = [
+  '/api/auth/entrance',
+  '/api/auth/login',
+  '/api/auth/google',
+  '/api/auth/session',
+  '/api/auth/logout',
+  '/api/auth/lock',
+  '/api/auth/access-logout-url',
+] as const;
+
 export function isPrivateApi(path: string) {
   if (!path.startsWith('/api/')) return false;
   if (path === '/api/health' || path === '/api/mall' || path.startsWith('/api/mall/')) return false;
@@ -24,7 +41,11 @@ export function isPrivateApi(path: string) {
   // /api/mall-webhook with an HMAC signature and no staff cookie, so gating it
   // behind the staff entrance would 401 (then dead-letter) every notification.
   if (path === '/api/mall-webhook') return false;
-  return !['/api/auth/entrance', '/api/auth/login', '/api/auth/google', '/api/auth/session', '/api/auth/logout', '/api/auth/lock', '/api/auth/access-logout-url'].includes(path);
+  const privateNamespace = (PRIVATE_API_PREFIXES as readonly string[]).some(
+    (prefix) => path === prefix || path.startsWith(`${prefix}/`),
+  );
+  if (!privateNamespace) return false;
+  return !(PUBLIC_AUTH_PATHS as readonly string[]).includes(path);
 }
 
 function tokenFromCookie(cookie: string) {

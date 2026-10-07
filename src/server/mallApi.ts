@@ -121,13 +121,6 @@ const catalogSoldColumns = (honorPos: boolean) => `${catalogColumns(honorPos)},
       AND sale.status IN ('Completed', 'Paid', 'Fulfilled', 'Delivered', 'completed', 'paid', 'fulfilled', 'delivered')
   ), 0) AS sold_qty`;
 
-/**
- * Catalog 'popular' fallback after sold_qty left the storefront columns:
- * merchandised ordering first, then recency. The top-sellers rail and product
- * detail still rank by real sold quantities.
- */
-const POPULAR_FALLBACK_SORT = `mall_featured DESC, updated_at DESC, id ASC`;
-
 /** Whitelisted server-side sorts. Select aliases (price_kobo, sold_qty) are valid ORDER BY keys. */
 const CATALOG_SORTS: Record<string, string> = {
   relevance: `mall_featured DESC, (mall_display_order IS NULL) ASC, mall_display_order ASC, updated_at DESC, id ASC`,
@@ -330,9 +323,10 @@ async function getCatalog(exec: MallExecutor, url: URL) {
   const brandFilter = s(url.searchParams.get('brand')).trim().slice(0, 80);
   const sortKey = s(url.searchParams.get('sort'), 'relevance').trim();
   const sort = CATALOG_SORTS[sortKey];
-  // Catalog 'popular' no longer orders by per-row sold quantities; fall back
-  // to merchandised-then-recency ordering.
-  const effectiveSort = sortKey === 'popular' ? POPULAR_FALLBACK_SORT : sort;
+  // 'popular' ranks by real sold quantities, so it pays the sold_qty join; every
+  // other sort keeps the cheap storefront columns (no per-row subquery).
+  const effectiveSort = sort;
+  const columns = sortKey === 'popular' ? catalogSoldColumns(honorPos) : catalogColumns(honorPos);
   const limitParam = url.searchParams.get('limit');
   const limit = Math.min(Math.max(limitParam === null ? 24 : n(limitParam, 24), 1), 60);
   const offset = Math.max(n(url.searchParams.get('offset'), 0), 0);
@@ -375,7 +369,7 @@ async function getCatalog(exec: MallExecutor, url: URL) {
     const order = sortKey === 'relevance'
       ? `(SELECT CAST(key AS INTEGER) FROM json_each(?) WHERE value = products.id)` : effectiveSort;
     const rows = ids.length ? await exec.queryAll(
-      `SELECT ${catalogColumns(honorPos)} FROM products WHERE ${VISIBLE} AND id IN (SELECT value FROM json_each(?))
+      `SELECT ${columns} FROM products WHERE ${VISIBLE} AND id IN (SELECT value FROM json_each(?))
        ORDER BY ${stockOrder}${order} LIMIT ? OFFSET ?`,
       [encodedIds, ...(sortKey === 'relevance' ? [encodedIds] : []), limit, offset],
     ) : [];
@@ -403,7 +397,7 @@ async function getCatalog(exec: MallExecutor, url: URL) {
   // back to the plain count — that only costs an extra query on the rare
   // out-of-range page, not on any normal page view.
   const rows = await exec.queryAll(
-    `SELECT ${catalogColumns(honorPos)}, COUNT(*) OVER() AS page_total FROM products WHERE ${where} ORDER BY ${stockOrder}${effectiveSort} LIMIT ? OFFSET ?`,
+    `SELECT ${columns}, COUNT(*) OVER() AS page_total FROM products WHERE ${where} ORDER BY ${stockOrder}${effectiveSort} LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );
   const total = n((rows[0] as any)?.page_total
@@ -752,7 +746,7 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
       // (prev = post-decrement stock + qty, new = post-decrement stock), so a
       // multi-line order reads half as many rows as before.
       sql: `INSERT INTO stock_movements (id, product_id, product_name, type, qty, prev_stock, new_stock, ref_id, notes, performed_by, created_at)
-            SELECT ?, p.id, ?, 'Mall Order', ?, p.stock_qty + ?, p.stock_qty, ?, ?, ?, ?
+            SELECT ?, p.id, ?, 'Outgoing', ?, p.stock_qty + ?, p.stock_qty, ?, ?, ?, ?
             FROM products p WHERE p.id = ?`,
       params: [
         movementId, it.name, -it.qty, it.qty,

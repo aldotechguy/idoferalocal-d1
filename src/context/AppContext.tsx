@@ -302,7 +302,7 @@ interface AppContextType {
   deletePurchaseOrder: (poId: string, performedBy: string) => void;
 
   // Expense actions
-  addExpense: (exp: Omit<Expense, 'id' | 'createdAt'> & { createdAt?: string }) => void;
+  addExpense: (exp: Omit<Expense, 'id' | 'createdAt'> & { createdAt?: string }) => string;
   deleteExpense: (id: string) => void;
 
   // WhatsApp Pre-Orders actions
@@ -4450,6 +4450,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     logAudit('CREATE_EXPENSE', 'Expense', newExp.id, exp.paidBy, `Logged expense: ${exp.title} (${settings.currencySymbol}${exp.amount.toFixed(2)}) under ${exp.category}.`);
     showToast({ title: 'Expense Logged', message: `Expense "${exp.title}" (${settings.currencySymbol}${exp.amount.toFixed(2)}) recorded.`, type: 'success' });
+    return newExp.id;
   };
 
   const deleteExpense = (id: string) => {
@@ -5171,10 +5172,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const now = new Date().toISOString();
 
-    // Automatically create a new expense record categorized under Logistics
+    // Automatically create a new expense record categorized under Logistics.
+    // Route through addExpense so it also records the Expense Outflow money
+    // movement — keeps the Treasury liquid balance consistent with Reports.
     const expenseTitle = `Logistics Delivery Fee - ${existing.deliveryNo} (${existing.invoiceNo})`;
-    const newExpense: Expense = {
-      id: generateUniqueId('exp'),
+    const expenseId = addExpense({
       title: expenseTitle,
       category: 'Logistics',
       amount: existing.deliveryFee,
@@ -5183,11 +5185,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       paymentMethod: 'Cash',
       date: now.split('T')[0],
       createdAt: now,
-    };
-
-    setExpenses((prev) => [newExpense, ...prev]);
-    saveDocument('expenses', newExpense);
-    putItem('expenses', newExpense).catch((e) => console.warn('IndexedDB expense put error:', e));
+    });
 
     const updatedDeliveryOrder: DeliveryOrder = {
       ...existing,
@@ -5195,7 +5193,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isPickupConfirmed: true,
       pickupConfirmedAt: now,
       pickupConfirmedBy: performedBy,
-      expenseId: newExpense.id,
+      expenseId,
       courierNotes: courierNotes || existing.courierNotes,
       updatedAt: now,
     };

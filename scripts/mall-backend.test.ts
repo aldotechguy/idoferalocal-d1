@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { ensureRelationalSchemaNode, makeNodeMallExecutor } from '../src/server/nodeAdapter.ts';
 import { handleMallApi } from '../src/server/mallApi.ts';
 import { handleStaffMallApi } from '../src/server/mallOrderAdminApi.ts';
+import { revisionBumpStatement } from '../src/server/mallSafety.ts';
 
 const actor = { id: 'staff-1', displayName: 'Test Manager', role: 'Administrator' };
 
@@ -281,6 +282,77 @@ test('delivery fulfilment links into deliveries and refunds restore stock once',
   assert.equal(movement.dest_account, null);
   assert.equal((await refund()).status, 200);
   assert.equal((db.prepare(`SELECT stock_qty FROM products WHERE id = 'prod-1'`).get() as any).stock_qty, 10);
+});
+
+test('dispatch books the Logistics expense and its Expense Outflow movement; refund voids both', async () => {
+  const { db, exec, session } = fixture();
+  // A fixed outer-zone delivery carries a server-priced fee at checkout.
+  const placed = await checkout(exec, session, { deliveryZone: 'uyo_outer', deliveryAddress: 'Shelter Afrique, Uyo' });
+  assert.equal(placed.response.status, 201);
+  assert.equal(placed.body.deliveryFeeKobo, 250000);
+  const id = (db.prepare('SELECT id FROM mall_orders LIMIT 1').get() as any).id;
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/review-delivery`, { method: 'POST', body: JSON.stringify({ confirmed: true }) }), exec, actor);
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/confirm`, { method: 'POST', body: '{}' }), exec, actor);
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/collect-payment`, { method: 'POST', body: JSON.stringify({ paymentMethod: 'Cash', amountKobo: 270000 }) }), exec, actor);
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/mark-packed`, { method: 'POST', body: '{}' }), exec, actor);
+  await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/mark-out-for-delivery`, { method: 'POST', body: JSON.stringify({ courier: 'Test courier' }) }), exec, actor);
+
+  // The delivery fee is a real cash outflow: one Expense Outflow money movement.
+  const mm = db.prepare(`SELECT type, subtype, source_account, amount_kobo FROM money_movements WHERE id = ?`).get(`mm-exp-mall-del-${id}`) as any;
+  assert.equal(mm.type, 'Expense Outflow');
+  assert.equal(mm.subtype, 'Logistics');
+  assert.equal(mm.source_account, 'Physical Cash');
+  assert.equal(mm.amount_kobo, 250000);
+
+  const refund = () => handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/refund`, { method: 'POST', body: JSON.stringify({ reason: 'Returned goods', returnStock: true, returnReference: 'GRN-TEST' }) }), exec, actor);
+  assert.equal((await refund()).status, 200);
+  // The voided expense must unwind its outflow too, or the refund leaves the
+  // courier cost as a permanent outflow on the ledger.
+  assert.equal((db.prepare(`SELECT amount_kobo FROM money_movements WHERE id = ?`).get(`mm-exp-mall-del-${id}`) as any).amount_kobo, 0);
+  assert.equal((db.prepare(`SELECT amount_kobo FROM expenses WHERE id = ?`).get(`exp-mall-del-${id}`) as any).amount_kobo, 0);
+});
+
+test('mall checkout records an Outgoing stock movement in the POS vocabulary', async () => {
+  const { db, exec, session } = fixture();
+  await checkout(exec, session);
+  const movement = db.prepare(`SELECT type, qty, notes FROM stock_movements LIMIT 1`).get() as any;
+  assert.equal(movement.type, 'Outgoing');
+  assert.equal(movement.qty, -2);
+  assert.match(movement.notes, /Mall order/);
+});
+
+test('the sync watermark is monotonic even when two mall writes share a millisecond', async () => {
+  const { db, exec } = fixture();
+  const read = () => Number(JSON.parse(String((db.prepare(`SELECT value_json FROM settings WHERE key = 'sync_watermark'`).get() as any)?.value_json ?? '0')) || 0);
+  const frozen = Date.now();
+  const originalNow = Date.now;
+  (Date as any).now = () => frozen;
+  try {
+    await exec.runBatch([revisionBumpStatement()]);
+    const first = read();
+    await exec.runBatch([revisionBumpStatement()]);
+    const second = read();
+    assert.ok(first > 0, 'the first bump sets the watermark');
+    assert.ok(second > first, 'a same-millisecond write must still advance the watermark');
+  } finally {
+    (Date as any).now = originalNow;
+  }
+});
+
+test('a POS amendment cannot empty the order or carry malformed lines', async () => {
+  const { db, exec, session } = fixture();
+  const id = await paidOrder(exec, db, session);
+  const body = (items: unknown) => JSON.stringify({ subtotalKobo: 30000, totalKobo: 30000, discountKobo: 0, deliveryFeeKobo: 0, paidKobo: 30000, orderStatus: 'processing', paymentStatus: 'paid', items });
+  // Empty items must be rejected, not turn into a wholesale line wipe.
+  const empty = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/sync-from-pos`, { method: 'POST', body: body([]) }), exec, actor);
+  assert.equal(empty.status, 400);
+  // A line with a non-positive quantity or missing product id is malformed.
+  const zeroQty = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/sync-from-pos`, { method: 'POST', body: body([{ productId: 'prod-1', name: 'X', qty: 0, unitPriceKobo: 10000 }]) }), exec, actor);
+  assert.equal(zeroQty.status, 400);
+  const noProduct = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/sync-from-pos`, { method: 'POST', body: body([{ name: 'X', qty: 1, unitPriceKobo: 10000 }]) }), exec, actor);
+  assert.equal(noProduct.status, 400);
+  // The original lines must survive the rejected amendments.
+  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM mall_order_items WHERE mall_order_id = ?').get(id) as any).n, 1);
 });
 /** Settle a checked-out order into a linked sale so the POS-sync tests have a target. */
 async function paidOrder(exec: ReturnType<typeof makeNodeMallExecutor>, db: InstanceType<typeof DatabaseSync>, session: string) {

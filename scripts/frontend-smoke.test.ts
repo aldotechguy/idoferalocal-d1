@@ -152,7 +152,9 @@ test('worker does not turn missing scripts or API routes into the app shell', as
   };
   for (const path of ['/assets/missing.js', '/api/missing']) {
     const response = await worker.fetch(new Request(`https://test${path}`), env as Parameters<typeof worker.fetch>[1]);
-    assert.equal(response.status, path.startsWith('/api/') ? 401 : 404);
+    // An unknown /api/ path is not a private API, so it must 404 like any other
+    // missing route — never 401, which would leak that a private namespace exists.
+    assert.equal(response.status, 404);
   }
   assert.deepEqual(requested, ['/assets/missing.js']);
 });

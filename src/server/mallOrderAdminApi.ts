@@ -407,6 +407,24 @@ async function transitionOrder(exec: MallExecutor, id: string, actor: StaffActor
         at,
       ],
     });
+    // The Logistics expense is a real cash outflow (the courier is paid from the
+    // till), so it must move the liquid ledger exactly as a POS-recorded expense
+    // does — otherwise Reports (expense-based) and Treasury (money-movement-based)
+    // drift by the delivery fee. Deterministic id keeps re-dispatch idempotent and
+    // lets the refund path void it precisely.
+    if (n(row.delivery_fee_kobo) > 0) {
+      stmts.push({
+        sql: `INSERT OR IGNORE INTO money_movements (id, date, type, subtype, source_account, dest_account, amount_kobo, notes, ref_no, ref_id, performed_by, created_at)
+              VALUES (?, ?, 'Expense Outflow', 'Logistics', 'Physical Cash', NULL, ?, ?, ?, ?, ?, ?)`,
+        params: [
+          `mm-exp-mall-del-${id}`, at,
+          row.delivery_fee_kobo,
+          `Logistics Delivery Fee - DEL-${s(row.order_no).replace(/^MALL-/, '')} (${s(invoice[0]?.receipt_no)})`,
+          `DEL-${s(row.order_no).replace(/^MALL-/, '')}`,
+          `exp-mall-del-${id}`, actor.displayName, at,
+        ],
+      });
+    }
   }
   if (action === 'mark-out-for-delivery') stmts.push({sql:"UPDATE delivery_orders SET status='Out for Delivery',courier_notes=?,updated_at=? WHERE sale_id=?",params:[body.courier.trim(),at,row.linked_sale_id]});
   if (action === 'complete' && zone !== 'pickup') stmts.push({sql:"UPDATE delivery_orders SET status='Delivered',updated_at=? WHERE sale_id=?",params:[at,row.linked_sale_id]});
@@ -436,6 +454,10 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
   // Void the Logistics expense booked at dispatch (kept, not deleted, so the
   // audit trail survives); annotate it with the refund reason.
   stmts.push({sql:"UPDATE expenses SET amount_kobo = 0, description = COALESCE(description,'') || ? WHERE id = ?",params:[` | Voided on Mall refund: ${reason}`,`exp-mall-del-${id}`]});
+  // The delivery-fee cash outflow must unwind with the expense, or the refund's
+  // full Sale Refund inflow reversal would still leave the courier cost as a
+  // permanent outflow on the ledger.
+  stmts.push({sql:"UPDATE money_movements SET amount_kobo = 0, notes = COALESCE(notes,'') || ? WHERE id = ?",params:[` | Voided on Mall refund: ${reason}`,`mm-exp-mall-del-${id}`]});
   stmts.push({ sql: `UPDATE payments SET status = 'refunded', raw_json = ? WHERE order_id = ?`, params: [JSON.stringify({ orderNo: row.order_no, refundedBy: actor.displayName, refundedAt: at, reason, returnStock }), id] });
   // Parity with the client-side refundSale(). A Mall refund is a FULL refund, so it
   // has to settle the relational finance fields too: writing only `status` left
@@ -526,7 +548,13 @@ async function syncFromPos(exec: MallExecutor, id: string, actor: StaffActor, bo
   const discountKobo = Math.max(0, n(body?.discountKobo));
   const deliveryFeeKobo = Math.max(0, n(body?.deliveryFeeKobo));
   const items = Array.isArray(body?.items) ? body.items : null;
-  if (!items) fail(400, 'The amended line items are required.');
+  // A wholesale line replacement must not be able to empty the order: an absent
+  // or empty `items` would DELETE every line while leaving a non-zero total.
+  if (!items || items.length === 0) fail(400, 'The amended line items are required.');
+  for (const item of items) {
+    if (n(item?.qty) <= 0) fail(400, 'Each line item needs a positive quantity.');
+    if (!s(item?.productId)) fail(400, 'Each line item needs a product id.');
+  }
 
   const at = nowIso();
   const stmts: MallStmt[] = [];

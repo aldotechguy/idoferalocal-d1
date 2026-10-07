@@ -130,9 +130,15 @@ export function assertSql(condition: string, params: unknown[] = []): MallStmt[]
 export function revisionBumpStatement(): MallStmt {
   const now = Date.now();
   return {
+    // Monotonic even when two Mall writes land in the same millisecond: on
+    // conflict the new value is MAX(now, current + 1), so a same-ms write still
+    // advances by one and a lagging clock can never rewind the watermark. The
+    // `>=` predicate (not `>`) is what lets a same-ms `now` trigger the update.
     sql: `INSERT INTO settings (key, value_json, updated_at) VALUES ('sync_watermark', ?, ?)
-      ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
-      WHERE CAST(excluded.value_json AS INTEGER) > CAST(settings.value_json AS INTEGER)`,
+      ON CONFLICT(key) DO UPDATE SET
+        value_json = MAX(CAST(excluded.value_json AS INTEGER), CAST(settings.value_json AS INTEGER) + 1),
+        updated_at = excluded.updated_at
+      WHERE CAST(excluded.value_json AS INTEGER) >= CAST(settings.value_json AS INTEGER)`,
     params: [JSON.stringify(now), now],
   };
 }

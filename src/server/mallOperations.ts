@@ -278,11 +278,16 @@ export async function mallReadiness(exec: MallExecutor) {
     const now = Date.now();
     const state = (await exec.queryAll(`SELECT
       (SELECT last_success_at FROM mall_job_runs WHERE name='maintenance') AS scheduler_at,
+      (SELECT last_success_at FROM mall_job_runs WHERE name='sweep') AS sweep_at,
       (SELECT id FROM mall_outbox WHERE status='dead' OR (status!='delivered' AND created_at < ?) LIMIT 1) AS stuck,
       (SELECT id FROM mall_outbox WHERE status='delivered' LIMIT 1) AS delivered,
       (SELECT id FROM mall_orders WHERE status IN ('processing','packed','ready_for_pickup','out_for_delivery') AND created_at<? LIMIT 1) AS stale`,
       [new Date(now - 60 * 60_000).toISOString(), new Date(now - 48 * 3600_000).toISOString()]))[0] as any;
     checks.scheduler = !!state?.scheduler_at && Date.now() - Date.parse(state.scheduler_at) < 30 * 60_000;
+    // The hourly sweep (unpaid expiry + stock release) is independent of the
+    // drain, so it gets its own freshness check: 2h = two missed hourly runs.
+    // Coupled to the sweep cron cadence — widen both together.
+    checks.sweep = !!state?.sweep_at && Date.now() - Date.parse(state.sweep_at) < 2 * 3600_000;
     checks.notifications = !state?.stuck;
     checks.webhookDelivery = !!state?.delivered;
     checks.fulfilmentQueue = !state?.stale;
@@ -606,5 +611,12 @@ export async function runMallMaintenance(
   // `'all'` and `'drain'` own it; only `'sweep'` steps aside.
   if (ownsMarker) {
     await exec.runBatch([{ sql: "INSERT INTO mall_job_runs(name,last_success_at) VALUES ('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at", params: [new Date().toISOString()] }]);
+  }
+  // The sweep owns its OWN marker, distinct from `maintenance`. Unpaid-order
+  // expiry and stock release run here, so a dead hourly sweep must surface in
+  // readiness instead of silently leaking reserved inventory while the drain
+  // (and therefore `scheduler`) stays green.
+  if (sweep) {
+    await exec.runBatch([{ sql: "INSERT INTO mall_job_runs(name,last_success_at) VALUES ('sweep',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at", params: [new Date().toISOString()] }]);
   }
 }

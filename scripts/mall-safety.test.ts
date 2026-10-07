@@ -917,12 +917,13 @@ test("the two-cron split keeps the drain independent of the sweep", async t => {
   assert.equal(f.scalar('SELECT status FROM mall_orders'), 'cancelled', 'sweep expires unpaid orders');
   assert.equal(f.scalar('SELECT stock_qty FROM products'), 10, 'expiry restores stock');
   assert.equal(f.scalar('SELECT COUNT(*) FROM mall_carts'), 0, 'sweep cleans abandoned carts');
-  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_job_runs'), 0, 'a sweep must never write the readiness marker');
+  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_job_runs'), 1, 'the sweep writes its own marker only');
+  assert.equal(f.scalar("SELECT name FROM mall_job_runs LIMIT 1"), 'sweep', 'the sweep must never write the drain readiness marker');
 
   // The default mode is the full run, which is what the Node runtime and every
-  // existing caller rely on. It does both halves AND owns the marker.
+  // existing caller rely on. It does both halves AND owns both markers.
   await runMallMaintenance(f.exec, never, send);
-  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_job_runs'), 1, "the default mode must own the readiness marker");
+  assert.equal(f.scalar('SELECT COUNT(*) FROM mall_job_runs'), 2, 'the default mode owns both the drain and sweep markers');
 });
 
 test('the scheduler cadence and the readiness window stay coupled', async t => {
@@ -1918,7 +1919,7 @@ test('oversized snapshot pushes are rejected before any write', async (t) => {
   const after = await (await worker.fetch(new Request('http://test/api/storage/snapshot?fresh=true', { headers: cookie }), env)).json() as any;
   assert.equal(after.stores.products.length, 1);
 });
-test('storefront catalog reads drop the sold_qty join; detail and top rail keep it', async (t) => {
+test('catalog drops the sold_qty join except when ranking by popularity', async (t) => {
   for (const runtime of ['node', 'worker'] as const) {
     const f = await fixture(runtime); t.after(() => f.db.close());
     const queries: string[] = [];
@@ -1928,10 +1929,15 @@ test('storefront catalog reads drop the sold_qty join; detail and top rail keep 
     const soldQueries = () => queries.filter((sql) => sql.includes('FROM sale_items')).length;
 
     queries.length = 0;
-    const browse = await catalog('limit=5&sort=popular');
-    assert.equal(browse.sort, 'popular');
-    assert.equal(browse.products[0].sold, 0, 'catalog rows report sold: 0 after the join left the storefront columns');
+    const browse = await catalog('limit=5');
+    assert.equal(browse.products[0].sold, 0, 'default catalog rows report sold: 0 (cheap columns, no sold join)');
     assert.equal(soldQueries(), 0);
+
+    queries.length = 0;
+    const popular = await catalog('limit=5&sort=popular');
+    assert.equal(popular.sort, 'popular');
+    assert.equal(popular.products[0].sold, 0, 'no canonical sale yet, so popularity still reports sold: 0');
+    assert.equal(soldQueries(), 1, 'popularity pays the sold_qty join so it can rank by real sales');
 
     queries.length = 0;
     const detail = await fetchDetail();
@@ -1947,6 +1953,11 @@ test('storefront catalog reads drop the sold_qty join; detail and top rail keep 
     assert.equal((await f.pay()).status, 200);
     const paid = await fetchDetail();
     assert.equal(paid.product.sold, 2);
+    assert.equal(soldQueries(), 1);
+
+    queries.length = 0;
+    const popularAfter = await catalog('limit=5&sort=popular');
+    assert.equal(popularAfter.products[0].sold, 2, 'popular ranks by real sold quantities after settlement');
     assert.equal(soldQueries(), 1);
 
     queries.length = 0;
