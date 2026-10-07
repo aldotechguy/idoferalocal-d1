@@ -318,11 +318,13 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
         deliveryFee: parsedDeliveryFee,
         totalAmount: calculatedTotal,
         paidAmount: sanitizedPaidAmount,
-        deliveryAddress: editDeliveryAddress.trim() || undefined,
-        deliveryPhone: editDeliveryPhone.trim() || undefined,
-        courierNotes: editCourierNotes.trim() || undefined,
-        deliveryStatus: editDeliveryStatus,
-        isPickupConfirmed: isPickupConfirmed,
+        ...(showDeliveryDetails ? {
+          deliveryAddress: editDeliveryAddress.trim() || undefined,
+          deliveryPhone: editDeliveryPhone.trim() || undefined,
+          courierNotes: editCourierNotes.trim() || undefined,
+          deliveryStatus: editDeliveryStatus,
+          isPickupConfirmed: isPickupConfirmed,
+        } : {}),
       },
       currentUser?.displayName || (isSuperAdmin ? 'Super-Admin' : 'Administrator'),
       isSuperAdmin

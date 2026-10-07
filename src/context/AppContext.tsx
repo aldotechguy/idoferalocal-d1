@@ -763,7 +763,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         else if (isCleared) setWhatsAppPreOrders([]);
         else await putManyItems('whatsAppPreOrders', whatsAppPreOrders);
 
-        if (idbDeliveries && idbDeliveries.length > 0) setDeliveryOrders(idbDeliveries);
+        if (idbDeliveries && idbDeliveries.length > 0) {
+          // Self-heal: strip auto-created orphan deliveries. A bug (now fixed) minted
+          // a Pending-Pickup, zero-fee, contact-less delivery on every invoice edit.
+          // Such shells are indistinguishable from noise and are removed on load.
+          const orphans = idbDeliveries.filter((d) =>
+            (d.status === 'Pending Pickup' || !d.status) &&
+            !d.isPickupConfirmed &&
+            (Number(d.deliveryFee) || 0) === 0 &&
+            !d.deliveryAddress &&
+            !d.customerPhone &&
+            !d.courierNotes
+          );
+          const cleanedDeliveries = idbDeliveries.filter((d) => !orphans.includes(d));
+          if (orphans.length > 0) {
+            orphans.forEach((o) => { deleteItem('deliveryOrders', o.id).catch(() => {}); });
+          }
+          setDeliveryOrders(cleanedDeliveries);
+        }
         else if (isCleared) setDeliveryOrders([]);
         else await putManyItems('deliveryOrders', deliveryOrders);
 
@@ -2752,7 +2769,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         matchingDeliveryOrder = updatedDelivery;
       }
     }
-    if (!matchingDeliveryOrder && !deletedDeliveryOrderId && (newFee > 0 || deliveryOnlyStatus || deliveryOnlyAddress || deliveryOnlyPhone || deliveryOnlyCourierNotes || deliveryOnlyPickup)) {
+    const hasMeaningfulDeliveryDetail = newFee > 0 ||
+      !!deliveryOnlyAddress ||
+      !!deliveryOnlyPhone ||
+      !!deliveryOnlyCourierNotes ||
+      (deliveryOnlyStatus !== undefined && deliveryOnlyStatus !== 'Pending Pickup') ||
+      !!deliveryOnlyPickup;
+    if (!matchingDeliveryOrder && !deletedDeliveryOrderId && hasMeaningfulDeliveryDetail) {
       // If sale didn't have a delivery order previously, but now has dispatch
       // detail (fee or address/phone/notes/status), auto-create one. Gap C —
       // address/phone-only dispatch detail previously lived only on the sale

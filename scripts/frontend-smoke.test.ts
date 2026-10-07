@@ -939,6 +939,23 @@ test('a repayment can settle a specific owner loan', () => {
   assert.match(fs.readFileSync('src/server/relationalSnapshot.ts', 'utf8'), /loanReferenceId: r\.type === 'Owner Repayment'/);
 });
 
+test('an invoice edit does not auto-create a delivery without dispatch detail', () => {
+  const app = fs.readFileSync('src/context/AppContext.tsx', 'utf8');
+  // A bare 'Pending Pickup' status or unconfirmed flag must NOT mint a
+  // delivery order — those were the defaults both editors sent on every save
+  // (the bug that auto-created a Delivery per invoice edit).
+  assert.match(app, /hasMeaningfulDeliveryDetail = newFee > 0/);
+  assert.match(app, /deliveryOnlyStatus !== 'Pending Pickup'/);
+  assert.match(app, /!!deliveryOnlyPickup/);
+
+  // Both editors must only forward delivery fields when the dispatch section
+  // is expanded, so a plain edit never trips the auto-create guard.
+  for (const f of ['src/components/sales/SalesView.tsx', 'src/components/sales/EditSaleModal.tsx']) {
+    const src = fs.readFileSync(f, 'utf8');
+    assert.match(src, /\.\.\.\(showDeliveryDetails \? \{/);
+  }
+});
+
 test('the Node runtime ships no Cloudflare REST write engine', () => {
   const server = fs.readFileSync('server.ts', 'utf8');
   // The deployed Worker owns D1: no credentials, no REST /query executor, no
