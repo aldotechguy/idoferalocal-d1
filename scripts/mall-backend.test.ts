@@ -354,6 +354,19 @@ test('a POS amendment cannot empty the order or carry malformed lines', async ()
   // The original lines must survive the rejected amendments.
   assert.equal((db.prepare('SELECT COUNT(*) AS n FROM mall_order_items WHERE mall_order_id = ?').get(id) as any).n, 1);
 });
+
+test('a POS amendment rejects a total that does not match its line items', async () => {
+  const { db, exec, session } = fixture();
+  const id = await paidOrder(exec, db, session);
+  // Lines sum to 30000 (3 × 10000) but the total claims 50000.
+  const mismatched = await handleStaffMallApi(new Request(`http://test/api/staff/mall-orders/${id}/sync-from-pos`, {
+    method: 'POST',
+    body: JSON.stringify({ subtotalKobo: 30000, totalKobo: 50000, discountKobo: 0, deliveryFeeKobo: 0, paidKobo: 50000, orderStatus: 'processing', paymentStatus: 'paid', items: [{ productId: 'prod-1', name: 'X', qty: 3, unitPriceKobo: 10000 }] }),
+  }), exec, actor);
+  assert.equal(mismatched.status, 400);
+  // The order's original total is untouched by the rejected amendment.
+  assert.equal((db.prepare('SELECT total_kobo FROM mall_orders WHERE id = ?').get(id) as any).total_kobo, 20000);
+});
 /** Settle a checked-out order into a linked sale so the POS-sync tests have a target. */
 async function paidOrder(exec: ReturnType<typeof makeNodeMallExecutor>, db: InstanceType<typeof DatabaseSync>, session: string) {
   await checkout(exec, session);

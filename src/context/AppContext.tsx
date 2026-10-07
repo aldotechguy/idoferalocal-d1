@@ -302,7 +302,7 @@ interface AppContextType {
   deletePurchaseOrder: (poId: string, performedBy: string) => void;
 
   // Expense actions
-  addExpense: (exp: Omit<Expense, 'id' | 'createdAt'> & { createdAt?: string }) => string;
+  addExpense: (exp: Omit<Expense, 'id' | 'createdAt'> & { createdAt?: string }, silent?: boolean) => string;
   deleteExpense: (id: string) => void;
 
   // WhatsApp Pre-Orders actions
@@ -4417,7 +4417,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Expense Tracking
-  const addExpense = (exp: Omit<Expense, 'id' | 'createdAt'> & { createdAt?: string }) => {
+  const addExpense = (exp: Omit<Expense, 'id' | 'createdAt'> & { createdAt?: string }, silent = false) => {
     const newExp: Expense = {
       ...exp,
       id: 'exp-' + Date.now(),
@@ -4449,7 +4449,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     logAudit('CREATE_EXPENSE', 'Expense', newExp.id, exp.paidBy, `Logged expense: ${exp.title} (${settings.currencySymbol}${exp.amount.toFixed(2)}) under ${exp.category}.`);
-    showToast({ title: 'Expense Logged', message: `Expense "${exp.title}" (${settings.currencySymbol}${exp.amount.toFixed(2)}) recorded.`, type: 'success' });
+    if (!silent) showToast({ title: 'Expense Logged', message: `Expense "${exp.title}" (${settings.currencySymbol}${exp.amount.toFixed(2)}) recorded.`, type: 'success' });
     return newExp.id;
   };
 
@@ -5176,6 +5176,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Route through addExpense so it also records the Expense Outflow money
     // movement — keeps the Treasury liquid balance consistent with Reports.
     const expenseTitle = `Logistics Delivery Fee - ${existing.deliveryNo} (${existing.invoiceNo})`;
+    // silent: the pickup toast below already reports the expense — avoid a
+    // duplicate "Expense Logged" toast from addExpense.
     const expenseId = addExpense({
       title: expenseTitle,
       category: 'Logistics',
@@ -5185,7 +5187,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       paymentMethod: 'Cash',
       date: now.split('T')[0],
       createdAt: now,
-    });
+    }, true);
 
     const updatedDeliveryOrder: DeliveryOrder = {
       ...existing,

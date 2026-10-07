@@ -556,6 +556,15 @@ async function syncFromPos(exec: MallExecutor, id: string, actor: StaffActor, bo
     if (!s(item?.productId)) fail(400, 'Each line item needs a product id.');
   }
 
+  // The line items are the authoritative truth of what the buyer ordered, so the
+  // subtotal is derived from them (never trusted from the client) and the client's
+  // total must agree with subtotal − discount + delivery fee. A tolerance of one
+  // naira absorbs per-line rounding drift; anything beyond that is a malformed or
+  // tampered amendment, not a price edit.
+  const itemsSubtotal = items.reduce((sum, it: any) => sum + n(it?.qty) * n(it?.unitPriceKobo), 0);
+  const derivedTotal = itemsSubtotal - discountKobo + deliveryFeeKobo;
+  if (Math.abs(totalKobo - derivedTotal) > 100) fail(400, 'Order total does not match the line items.');
+
   const at = nowIso();
   const stmts: MallStmt[] = [];
   // Header: totals always; the status only when the caller sends one, so an edit
@@ -563,7 +572,7 @@ async function syncFromPos(exec: MallExecutor, id: string, actor: StaffActor, bo
   // view (and a refund that flips it to `refunded` still can).
   stmts.push({
     sql: `UPDATE mall_orders SET total_kobo = ?, subtotal_kobo = ?, discount_kobo = ?, delivery_fee_kobo = ?, status = ? WHERE id = ?`,
-    params: [totalKobo, Math.max(0, n(body?.subtotalKobo)), discountKobo, deliveryFeeKobo, s(body?.orderStatus, status), id],
+    params: [derivedTotal, itemsSubtotal, discountKobo, deliveryFeeKobo, s(body?.orderStatus, status), id],
   });
   // Replace the lines wholesale: an edit can add, drop or re-price lines, and a
   // diff would leave orphans behind. Deterministic ids keep the write idempotent.
@@ -579,7 +588,7 @@ async function syncFromPos(exec: MallExecutor, id: string, actor: StaffActor, bo
   });
   stmts.push({
     sql: `UPDATE payments SET amount_kobo = ?, status = ?, raw_json = ? WHERE order_id = ?`,
-    params: [totalKobo, s(body?.paymentStatus, s(row.payment_status, 'pending')), JSON.stringify({ amendedBy: actor.displayName, amendedAt: at, paidKobo }), id],
+    params: [derivedTotal, s(body?.paymentStatus, s(row.payment_status, 'pending')), JSON.stringify({ amendedBy: actor.displayName, amendedAt: at, paidKobo }), id],
   });
   // The audit row is what the outbox trigger turns into the buyer's amendment
   // email, so it must be written even when nothing else changed.
