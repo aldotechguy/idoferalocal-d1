@@ -154,6 +154,16 @@ const raw = await tx.queryAll('SELECT total_kobo, subtotal_kobo, discount_kobo F
 console.log('sale kobo:', JSON.stringify(raw[0]));
 if ((raw[0] as any).total_kobo !== 30000) throw new Error('kobo conversion mismatch');
 
+// Transaction-time edit (SalesView "Transaction time" -> sale.createdAt ->
+// sales.created_at) must survive an update of an existing invoice. The sales
+// header upsert opts created_at back into the sync columns; every other table
+// keeps it immutable.
+const editedTime = new Date(new Date(now).getTime() + 86_400_000).toISOString();
+apply(upsertToStatements('sales', { ...sale, createdAt: editedTime, updatedAt: new Date().toISOString() }, now));
+const afterTimeEdit = await tx.queryAll('SELECT created_at FROM sales WHERE id = ?', ['sale-1']);
+if ((afterTimeEdit[0] as any).created_at !== editedTime) throw new Error(`transaction-time edit did not persist: ${(afterTimeEdit[0] as any).created_at}`);
+console.log('sale transaction-time edit persisted:', editedTime);
+
 // Full-replace semantics (the PUT /api/storage/snapshot path).
 apply(replaceCollectionStatements('sales', [{ ...sale, id: 'sale-2', invoiceNo: 'INV-TEST-2', totalAmount: 111 }], now));
 const afterReplace = await tx.queryAll('SELECT COUNT(*) AS n FROM sales');

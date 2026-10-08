@@ -6,7 +6,9 @@ export type SqlStmt = { sql: string; params: any[] };
 const cols = (row: Record<string, unknown>) => Object.keys(row);
 const ph = (row: Record<string, unknown>) => Object.keys(row).map(() => '?').join(', ');
 const vals = (row: Record<string, unknown>) => Object.values(row);
-/** Every column except the identity key(s) and immutable created_at stays in sync on upsert. */
+/** Every column except the identity key(s) and immutable created_at stays in sync on upsert.
+ * Sales are the exception: SalesView's "Transaction time" field edits createdAt,
+ * so the sales header upsert opts created_at back in (see the sales branch). */
 const syncCols = (row: Record<string, unknown>, keys: string[] = ['id']) =>
   Object.keys(row).filter((c) => !keys.includes(c) && c !== 'created_at');
 const upSuffix = (conflict: string, updateCols: string[]) =>
@@ -54,7 +56,11 @@ export function coreUpsert(collection: string, document: any): SqlStmt[] | null 
     }
     case 'sales': {
       const { header, lines } = saleToRows(document);
-      const stmts: SqlStmt[] = [upsert('sales', header, 'id', syncCols(header))];
+      // Transaction time is editable from SalesView (createdAt field), so the
+      // sales header opts created_at back into the sync columns. Every other
+      // table keeps it immutable via plain syncCols().
+      const salesSyncCols = [...syncCols(header), 'created_at'];
+      const stmts: SqlStmt[] = [upsert('sales', header, 'id', salesSyncCols)];
       // Header + deterministic `${id}-item-${i}` line ids make this safe: a line
       // id can only exist for this sale, so deleting only ids outside the new
       // set removes orphans without touching unchanged rows (the old blanket
