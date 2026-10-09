@@ -146,12 +146,29 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const monthlyGrossProfit = Math.max(0, monthlyRevenue - monthlyCostOfGoodsSold);
   const monthlyNetProfit = monthlyGrossProfit - monthlyExpenses;
 
-  const totalInventoryValue = products.reduce(
-    (acc, p) => acc + (Number(p.costPrice) || 0) * (Number(p.currentStock) || 0),
+  const activeProds = products.filter((p) => p.status !== 'Archived');
+
+  // "Key Inventory Levels" should surface the most critical SKUs first (lowest
+  // stock relative to its reorder point), not whichever 4 happen to appear first
+  // in the catalog array. Sorting here also keeps archived items out and keeps
+  // a stable denominator for the ratio bar.
+  const criticalStockLeaders = useMemo(() => {
+    return [...activeProds].sort((a, b) => {
+      const ratioOf = (p: (typeof activeProds)[number]) =>
+        (Number(p.minimumStockLevel) || 1) > 0
+          ? (Number(p.currentStock) || 0) / (Number(p.minimumStockLevel) || 1)
+          : Number.MAX_SAFE_INTEGER;
+      return ratioOf(a) - ratioOf(b);
+    }).slice(0, 4);
+  }, [activeProds]);
+
+  // Inventory valuation must mirror the "active catalog items" figure (archived
+  // products are excluded) and must not credit negative stock (committed mall
+  // escrow can drive `currentStock` below zero before the Sale lands).
+  const totalInventoryValue = activeProds.reduce(
+    (acc, p) => acc + Math.max(0, (Number(p.costPrice) || 0) * (Number(p.currentStock) || 0)),
     0
   );
-
-  const activeProds = products.filter((p) => p.status !== 'Archived');
 
   const lowStockCount = activeProds.filter(
     (p) => (Number(p.currentStock) || 0) > 0 && (Number(p.currentStock) || 0) <= (Number(p.minimumStockLevel) || 5)
@@ -165,7 +182,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const yesterdayStr = localIsoDate(yesterday);
   const yesterdaySales = validSales
     .filter((s) => s.createdAt && s.createdAt.startsWith(yesterdayStr))
-    .reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
+    .reduce((acc, s) => acc + netSaleAmount(s), 0);
 
   let todayChangeStr = 'No sales yesterday';
   let todayChangeType: 'positive' | 'negative' | 'neutral' = 'neutral';
@@ -210,16 +227,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
     });
   }, [last7Days, validSales]);
 
-  // Dynamic Category Distribution Data from Real-time Products & Inventory
+  // Dynamic Category Distribution — inventory VALUE (on-hand stock × cost) by
+  // segment. Previously fell back to `retailPrice` when stock value was 0,
+  // which mixed retail Naira into a cost chart for out-of-stock/negative-stock
+  // items and mislabeled the result as "Revenue contribution".
   const categoryTotals = useMemo<Record<string, number>>(() => {
     const totals: Record<string, number> = {};
-    products.forEach((p) => {
+    activeProds.forEach((p) => {
       const cat = p.category || 'General';
-      const val = p.currentStock * p.costPrice;
-      totals[cat] = (totals[cat] || 0) + (val > 0 ? val : p.retailPrice);
+      totals[cat] = (totals[cat] || 0) + Math.max(0, (Number(p.currentStock) || 0) * (Number(p.costPrice) || 0));
     });
     return totals;
-  }, [products]);
+  }, [activeProds]);
 
   const totalCatVal = Object.keys(categoryTotals).reduce((sum, key) => sum + Number(categoryTotals[key] || 0), 0);
   const palette = ['#2563eb', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#6366f1'];
@@ -234,12 +253,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
       : [{ name: 'No Categories', value: 100, color: '#94a3b8' }];
 
   const maxRecentSaleTotal = useMemo(() => {
-    const topSlice = sales.slice(0, 4);
+    const topSlice = validSales.slice(0, 4);
     if (topSlice.length === 0) return 1;
     // Number() guard: a legacy record with a string/NaN total used to poison
-    // Math.max into NaN, which blanked the bar chart scaling.
-    return topSlice.reduce((max, s) => Math.max(max, Number(s.totalAmount) || 0), 1);
-  }, [sales]);
+    // Math.max into NaN, which blanked the bar chart scaling. Net of refunds so
+    // the bar width matches the amount shown in the table.
+    return topSlice.reduce((max, s) => Math.max(max, Number(netSaleAmount(s)) || 0), 1);
+  }, [validSales]);
 
   return (
     <div className="space-y-6 pb-12">
@@ -338,6 +358,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
             <button
               onClick={() => {
                 localStorage.setItem('idofera_reports_period', 'last_month');
+                localStorage.setItem('idofera_reports_type', 'MonthlyBiz');
                 onNavigate('reports');
               }}
               className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3 py-2 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 font-bold rounded-xl text-xs border border-slate-200 dark:border-slate-700 transition-all shadow-2xs"
@@ -456,7 +477,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
             <StatCard
               title="Inventory Valuation"
               value={`${settings.currencySymbol}${totalInventoryValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-              subtitle={`${products.length} active catalog items`}
+              subtitle={`${activeProds.length} active catalog items`}
               icon={Boxes}
               change="Optimal"
               changeType="neutral"
@@ -734,7 +755,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
               <h3 className="text-base font-bold text-slate-900 dark:text-white">
                 Category Distribution
               </h3>
-              <p className="text-xs text-slate-500">Product breakdown by segment</p>
+              <p className="text-xs text-slate-500">Inventory value by segment</p>
             </div>
 
             <div className="h-48 my-2">
@@ -791,8 +812,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-slate-700 dark:text-slate-300">
-                {sales.slice(0, 4).map((sale, idx) => {
-                  const percent = Math.min(100, Math.max(10, Math.round((sale.totalAmount / maxRecentSaleTotal) * 100)));
+                {validSales.slice(0, 4).map((sale, idx) => {
+                  const percent = Math.min(100, Math.max(10, Math.round((netSaleAmount(sale) / maxRecentSaleTotal) * 100)));
                   return (
                     <tr key={`${sale.id}-${idx}`} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
                       <td className="py-2.5 font-bold text-slate-900 dark:text-white">{sale.invoiceNo}</td>
@@ -800,10 +821,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                       <td className="py-2.5 font-bold text-emerald-600 dark:text-emerald-400">
                         <div>
                           {isSalesStaff
-                            ? `${sale.items.reduce((a, b) => a + b.quantity, 0)} items`
+                            ? `${(sale.items || []).reduce((a, b) => a + (Number(b.quantity) || 0), 0)} items`
                             : isPrivacyMode
                             ? '••••••'
-                            : `${settings.currencySymbol}${sale.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                            : `${settings.currencySymbol}${netSaleAmount(sale).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                         </div>
                         {!hideFinancials && (
                           <div className="w-16 h-1 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden mt-1">
@@ -842,7 +863,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
           </div>
 
           <div className="space-y-3">
-            {products.slice(0, 4).map((p) => {
+            {criticalStockLeaders.map((p) => {
               const maxStockBenchmark = Math.max(p.minimumStockLevel * 2.5, 20);
               const stockRatio = Math.min(100, Math.max(8, Math.round((p.currentStock / maxStockBenchmark) * 100)));
               const isCritical = p.currentStock <= 0;
@@ -902,7 +923,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
               <h3 className="text-base font-bold text-slate-900 dark:text-white">
                 Category Distribution
               </h3>
-              <p className="text-xs text-slate-500">Revenue contribution by segment</p>
+              <p className="text-xs text-slate-500">Stock value by segment</p>
             </div>
 
             <div className="h-44 my-2">

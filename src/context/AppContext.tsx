@@ -5339,11 +5339,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         putItem('expenses', newExpense).catch((e) => console.warn('IndexedDB expense put error:', e));
       }
     } else if (!finalIsPickupConfirmed && linkedExpenseId) {
-      // If pickup confirmation is explicitly reset/reverted, clean up the linked expense
+      // If pickup confirmation is explicitly reset/reverted, clean up the linked
+      // expense AND its auto-created "Expense Outflow" money movement. Deleting
+      // the expense row alone left an orphaned outflow behind that still moved
+      // the Treasury liquid balance (the same cascade deleteExpense performs).
       const idToRemove = linkedExpenseId;
       setExpenses((prev) => prev.filter((e) => e.id !== idToRemove));
       removeDocument('expenses', idToRemove);
       deleteItem('expenses', idToRemove).catch((e) => console.warn('IndexedDB expense delete error:', e));
+      setMoneyMovements((prev) => {
+        const removed = prev.filter((m) => m.referenceId === idToRemove);
+        removed.forEach((m) => {
+          removeDocument('moneyMovements', m.id);
+          deleteItem('moneyMovements', m.id).catch(() => {});
+        });
+        return prev.filter((m) => m.referenceId !== idToRemove);
+      });
       linkedExpenseId = undefined;
     }
 

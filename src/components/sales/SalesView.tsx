@@ -69,6 +69,31 @@ const isGuestCustomerName = (name?: string): boolean => {
   return normalized === '' || GUEST_CUSTOMER_NAMES.has(normalized);
 };
 
+/**
+ * Net revenue actually retained from a sale, after any partial/full refund.
+ * Refunded sales are excluded by callers, but Partially Refunded sales are
+ * kept — so a gross `totalAmount` overstates what the business kept. The
+ * receipt and Reports already net this; the day/KPI aggregations must too.
+ */
+const netSaleAmount = (s: Sale): number =>
+  Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.totalRefunded) || 0));
+
+/**
+ * Amount actually tendered. Legacy/imported sales without a `paidAmount` were
+ * recorded as fully paid (the receipt and `processSale` treat `undefined` as
+ * `totalAmount`), yet `<sale>.paidAmount || 0` silently booked them as unpaid.
+ * Normalise to one rule: missing `paidAmount` == paid-in-full.
+ */
+const paidForSale = (s: Sale): number =>
+  s.paidAmount !== undefined ? Math.max(0, Number(s.paidAmount) || 0) : (Number(s.totalAmount) || 0);
+
+/**
+ * Net units sold (sold minus returned) for a sale. Uses each line's
+ * `returnedQuantity` (the per-line net the refund flow maintains).
+ */
+const netUnitsForSale = (s: Sale): number =>
+  (s.items || []).reduce((sum, item) => sum + Math.max(0, (Number(item.quantity) || 0) - (Number(item.returnedQuantity) || 0)), 0);
+
 export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
   const { sales, products, customers, deliveryOrders, settings, refundSale, updateSale, deleteSale } = useApp();
   const { currentUser, isSuperAdmin, hasPermission, isPrivacyMode } = useAuth();
@@ -228,7 +253,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
   // Super-Admin can edit ALL sales records. Regular Admins can edit historical sales records.
   const canEditSale = (sale: Sale): boolean => {
     if (isSuperAdmin) return true;
-    if (currentUser?.role === 'Administrator' || currentUser?.role === 'Admin') {
+    // NB: 'Administrator' only — 'Admin' is not a valid UserRole and never matched.
+    if (currentUser?.role === 'Administrator') {
       return isHistoricalSale(sale);
     }
     return false;
@@ -389,7 +415,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
       const prevDate = new Date(year, month - 1, pDay);
       const dateStr = getLocalDateString(prevDate.toISOString());
       const daySales = salesByDate.get(dateStr) || [];
-      const totalRevenue = daySales.filter(s => s.status !== 'Refunded').reduce((acc, s) => acc + s.totalAmount, 0);
+      const totalRevenue = daySales.filter(s => s.status !== 'Refunded').reduce((acc, s) => acc + netSaleAmount(s), 0);
       grid.push({
         dateString: dateStr,
         dayNumber: pDay,
@@ -404,7 +430,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
       const dateObj = new Date(year, month, d);
       const dateStr = getLocalDateString(dateObj.toISOString());
       const daySales = salesByDate.get(dateStr) || [];
-      const totalRevenue = daySales.filter(s => s.status !== 'Refunded').reduce((acc, s) => acc + s.totalAmount, 0);
+      const totalRevenue = daySales.filter(s => s.status !== 'Refunded').reduce((acc, s) => acc + netSaleAmount(s), 0);
       grid.push({
         dateString: dateStr,
         dayNumber: d,
@@ -426,9 +452,9 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
   // Selected Day Aggregated KPI Metrics
   const selectedDayStats = useMemo(() => {
     const activeSales = selectedDaySales.filter((s) => s.status !== 'Refunded');
-    const totalRevenue = activeSales.reduce((acc, s) => acc + s.totalAmount, 0);
-    const totalPaid = activeSales.reduce((acc, s) => acc + (s.paidAmount || 0), 0);
-    const totalItems = activeSales.reduce((acc, s) => acc + s.items.reduce((sum, item) => sum + item.quantity, 0), 0);
+    const totalRevenue = activeSales.reduce((acc, s) => acc + netSaleAmount(s), 0);
+    const totalPaid = activeSales.reduce((acc, s) => acc + paidForSale(s), 0);
+    const totalItems = activeSales.reduce((acc, s) => acc + netUnitsForSale(s), 0);
     const refundedCount = selectedDaySales.filter((s) => s.status === 'Refunded').length;
 
     // Helper to calculate payment method contributions for the day (including split breakdown)
@@ -438,7 +464,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
     let mobileTransferTxCount = 0;
 
     activeSales.forEach((s) => {
-      const paid = s.paidAmount !== undefined ? s.paidAmount : s.totalAmount;
+      const paid = paidForSale(s);
       if (s.paymentMethod === 'Cash') {
         cashTotal += paid;
         cashTxCount += 1;
@@ -602,21 +628,15 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
 
   // Aggregate KPI metrics
   const stats = useMemo(() => {
-    const totalVolume = filteredSales
-      .filter((s) => s.status !== 'Refunded')
-      .reduce((acc, s) => acc + s.totalAmount, 0);
-
-    const totalPaid = filteredSales
-      .filter((s) => s.status !== 'Refunded')
-      .reduce((acc, s) => acc + (s.paidAmount || 0), 0);
+    const activeFiltered = filteredSales.filter((s) => s.status !== 'Refunded');
+    const totalVolume = activeFiltered.reduce((acc, s) => acc + netSaleAmount(s), 0);
+    const totalPaid = activeFiltered.reduce((acc, s) => acc + paidForSale(s), 0);
 
     const totalUnpaidDebt = Math.max(0, totalVolume - totalPaid);
 
-    const totalItems = filteredSales
-      .filter((s) => s.status !== 'Refunded')
-      .reduce((acc, s) => acc + s.items.reduce((sum, item) => sum + item.quantity, 0), 0);
+    const totalItems = activeFiltered.reduce((acc, s) => acc + netUnitsForSale(s), 0);
 
-    const avgOrderValue = filteredSales.length > 0 ? totalVolume / filteredSales.length : 0;
+    const avgOrderValue = activeFiltered.length > 0 ? totalVolume / activeFiltered.length : 0;
 
     return {
       totalVolume,
@@ -660,8 +680,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
       (Number(s.subtotal) || 0).toFixed(2),
       (Number(s.discount) || 0).toFixed(2),
       (Number(s.tax) || 0).toFixed(2),
-      (Number(s.totalAmount) || 0).toFixed(2),
-      (Number(s.paidAmount) || 0).toFixed(2),
+      netSaleAmount(s).toFixed(2),
+      paidForSale(s).toFixed(2),
       cell(s.paymentMethod),
       cell(s.status),
       cell(s.createdBy),
@@ -1553,6 +1573,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
             >
               <option value="All">All Statuses</option>
               <option value="Completed">Completed</option>
+              <option value="Draft">Draft</option>
+              <option value="Held">Held</option>
               <option value="Partially Refunded">Partially Refunded</option>
               <option value="Refunded">Refunded</option>
             </select>
@@ -1617,7 +1639,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                 </tr>
               ) : (
                 paginatedSales.map((sale) => {
-                  const itemsCount = sale.items.reduce((sum, i) => sum + i.quantity, 0);
+                  const grossUnits = (sale.items || []).reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+                  const returnedUnits = (sale.items || []).reduce((sum, i) => sum + (Number(i.returnedQuantity) || 0), 0);
                   const isRefunded = sale.status === 'Refunded';
 
                   return (
@@ -1672,7 +1695,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                           {sale.items.map((i) => `${i.productName} (${i.quantity})`).join(', ')}
                         </div>
                         <span className="text-[10px] text-slate-400 font-semibold">
-                          {itemsCount} {itemsCount === 1 ? 'unit' : 'units'} across {sale.items.length} line items
+                          {grossUnits} {grossUnits === 1 ? 'unit' : 'units'} across {sale.items.length} line items
+                          {returnedUnits > 0 && <span className="text-amber-500"> • {returnedUnits} returned</span>}
                         </span>
                       </td>
 
@@ -1703,9 +1727,9 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                             {sale.paymentMethod}
                           </span>
                         </div>
-                        {!isPrivacyMode && Number(sale.paidAmount || 0) < Number(sale.totalAmount || 0) && !isRefunded && (
+                        {!isPrivacyMode && paidForSale(sale) < netSaleAmount(sale) && !isRefunded && (
                           <div className="text-[10px] text-amber-600 dark:text-amber-400 font-bold mt-0.5">
-                            Unpaid: {settings.currencySymbol}{(Number(sale.totalAmount || 0) - Number(sale.paidAmount || 0)).toFixed(2)}
+                            Unpaid: {settings.currencySymbol}{(netSaleAmount(sale) - paidForSale(sale)).toFixed(2)}
                           </div>
                         )}
                       </td>
@@ -1718,6 +1742,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                               ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
                               : sale.status === 'Partially Refunded'
                               ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-800'
+                              : sale.status === 'Draft' || sale.status === 'Held'
+                              ? 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
                               : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
                           }`}
                         >
@@ -1730,6 +1756,11 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                             <>
                               <RotateCcw className="w-3 h-3" />
                               <span>Partially Refunded</span>
+                            </>
+                          ) : sale.status === 'Draft' || sale.status === 'Held' ? (
+                            <>
+                              <Clock className="w-3 h-3" />
+                              <span>{sale.status === 'Draft' ? 'Draft' : 'Held'}</span>
                             </>
                           ) : (
                             <>
@@ -1784,7 +1815,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                               <Edit3 className="w-4 h-4" />
                             </button>
                           ) : (
-                            (currentUser?.role === 'Administrator' || currentUser?.role === 'Admin') && (
+                            (currentUser?.role === 'Administrator') && (
                               <button
                                 disabled
                                 className="p-1.5 text-slate-300 dark:text-slate-700 cursor-not-allowed opacity-40 rounded-xl"
@@ -1795,7 +1826,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                             )
                           )}
 
-                          {(currentUser?.role === 'Administrator' || currentUser?.role === 'Admin') && (
+                          {(currentUser?.role === 'Administrator') && (
                             <button
                               onClick={() => setDeleteSaleTarget(sale)}
                               className="p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/60 rounded-xl transition-colors"
@@ -1870,7 +1901,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
             </div>
 
             <p className="text-xs text-slate-600 dark:text-slate-300 font-medium leading-relaxed">
-              Are you sure you want to permanently delete sale record <strong className="text-slate-900 dark:text-white">{deleteSaleTarget.invoiceNo}</strong> ({settings.currencySymbol}{(Number(deleteSaleTarget.totalAmount) || 0).toFixed(2)})?
+              Are you sure you want to permanently delete sale record <strong className="text-slate-900 dark:text-white">{deleteSaleTarget.invoiceNo}</strong> ({settings.currencySymbol}{netSaleAmount(deleteSaleTarget).toFixed(2)})?
             </p>
 
             <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-800/60 rounded-2xl space-y-1.5 text-[11px] text-amber-900 dark:text-amber-200">
@@ -1879,7 +1910,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                 <span>Automatic Cascading Actions:</span>
               </p>
               <ul className="list-disc list-inside space-y-0.5 text-amber-700 dark:text-amber-300/90 pl-1">
-                <li>Restores sold item quantities ({deleteSaleTarget.items.reduce((acc, it) => acc + it.quantity, 0)} units) back to inventory stock</li>
+                <li>Restores sold item quantities ({netUnitsForSale(deleteSaleTarget)} units) back to inventory stock</li>
                 <li>Deducts customer outstanding balance, order count & loyalty points</li>
                 <li>Removes linked delivery orders & logistics expenses</li>
                 <li>Unlinks and resets converted WhatsApp pre-orders</li>

@@ -144,7 +144,6 @@ export const DeliveriesView: React.FC<{ onNavigate?: (page: string) => void }> =
   }, [filteredOrders, currentPage, pageSize]);
 
   // Calculate KPI summaries
-  const totalOrders = deliveryOrders.length;
   const pendingPickupCount = React.useMemo(
     () => deliveryOrders.filter((o) => !o.isPickupConfirmed && o.status !== 'Cancelled').length,
     [deliveryOrders],
@@ -157,8 +156,16 @@ export const DeliveriesView: React.FC<{ onNavigate?: (page: string) => void }> =
     () => deliveryOrders.filter((o) => o.status === 'Delivered').length,
     [deliveryOrders],
   );
+  // "Total collected via POS" must only count fees actually realized: a fee is
+  // only banked when the pickup is confirmed (which is also when the Logistics
+  // expense is logged). Cancelled orders were never collected, and Pending
+  // Pickup orders haven't logged the expense yet — so summing all rows
+  // overstated revenue and drifted from Finance/Treasury.
   const totalDeliveryFees = React.useMemo(
-    () => deliveryOrders.reduce((sum, o) => sum + (o.deliveryFee || 0), 0),
+    () =>
+      deliveryOrders
+        .filter((o) => o.isPickupConfirmed && o.status !== 'Cancelled')
+        .reduce((sum, o) => sum + (Number(o.deliveryFee) || 0), 0),
     [deliveryOrders],
   );
 
@@ -177,6 +184,17 @@ export const DeliveriesView: React.FC<{ onNavigate?: (page: string) => void }> =
   const getStatusBadge = (status: DeliveryStatus, isPickupConfirmed: boolean) => {
     switch (status) {
       case 'Pending Pickup':
+        // A Pending Pickup that is already confirmed (e.g. a store edit or an
+        // imported record) is visually distinct from one still awaiting the
+        // rider — the amber "awaiting" state is the actionable one.
+        if (isPickupConfirmed) {
+          return (
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-sky-100 dark:bg-sky-950/80 text-sky-800 dark:text-sky-300 border border-sky-300/50">
+              <CheckCircle2 className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
+              Pending Pickup · Confirmed
+            </span>
+          );
+        }
         return (
           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-300 border border-amber-300/50">
             <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
@@ -520,9 +538,12 @@ export const DeliveriesView: React.FC<{ onNavigate?: (page: string) => void }> =
                       onChange={(e) => updateDeliveryOrderStatus(order.id, e.target.value as DeliveryStatus, currentUser?.displayName)}
                       className="text-xs font-bold py-1 px-2.5 bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-blue-500 cursor-pointer"
                     >
-                      <option value="Pending Pickup">Pending Pickup</option>
-                      <option value="Picked Up">Picked Up</option>
-                      <option value="Out for Delivery">Out for Delivery</option>
+                      {/* Delivered and Cancelled are terminal: once reached, an order
+                          should not be rolled back to an earlier state (which would
+                          desync isPickupConfirmed from its logged Logistics expense). */}
+                      <option value="Pending Pickup" disabled={order.status === 'Delivered' || order.status === 'Cancelled'}>Pending Pickup</option>
+                      <option value="Picked Up" disabled={order.status === 'Delivered' || order.status === 'Cancelled'}>Picked Up</option>
+                      <option value="Out for Delivery" disabled={order.status === 'Delivered' || order.status === 'Cancelled'}>Out for Delivery</option>
                       <option value="Delivered">Delivered</option>
                       <option value="Cancelled">Cancelled</option>
                     </select>

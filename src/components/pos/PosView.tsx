@@ -102,6 +102,7 @@ export const PosView: React.FC = () => {
   const [editingCompletedSale, setEditingCompletedSale] = useState<Sale | null>(null);
   const [showHeldModal, setShowHeldModal] = useState(false);
   const [expandedHeldOrderId, setExpandedHeldOrderId] = useState<string | null>(null);
+  const [showHoldNameModal, setShowHoldNameModal] = useState(false);
   const [holdOrderName, setHoldOrderName] = useState('');
   const [qtyModalProduct, setQtyModalProduct] = useState<{ product: Product; currentQty: number } | null>(null);
   const [qtyInputVal, setQtyInputVal] = useState<string>('1');
@@ -263,8 +264,11 @@ export const PosView: React.FC = () => {
   const productSalesFrequency = useMemo(() => {
     const frequency = new Map<string, number>();
     sales.forEach((sale) => {
-      if (sale.status === 'Cancelled') return;
-      sale.items.forEach((item) => frequency.set(item.productId, (frequency.get(item.productId) || 0) + item.quantity));
+      // Refunded / partially-refunded / draft / held sales must not inflate a
+      // product's realised sales velocity. (There is no 'Cancelled' status in
+      // the SaleStatus union; that guard was dead code.)
+      if (sale.status === 'Refunded' || sale.status === 'Partially Refunded' || sale.status === 'Draft' || sale.status === 'Held') return;
+      (sale.items || []).forEach((item) => frequency.set(item.productId, (frequency.get(item.productId) || 0) + (Number(item.quantity) || 0)));
     });
     return frequency;
   }, [sales]);
@@ -632,12 +636,17 @@ export const PosView: React.FC = () => {
   const tax = noTax ? 0 : Math.round(((subtotal - discountAmount) * (settings.taxRatePct / 100)) * 100) / 100;
   const deliveryFee = hasDeliveryFee ? (parseFloat(deliveryFeeInput) || 0) : 0;
   const baseGrandTotal = Math.max(0, Math.round((subtotal - discountAmount + tax + deliveryFee) * 100) / 100);
+  // Store credit applied toward the total. This value is passed unchanged to
+  // processSale, which re-derives `totalAmount = baseTotal - validOverageApplied`.
+  // Both clamp to the customer's live overage balance, so the till's displayed
+  // `grandTotal` and the recorded sale total stay in lockstep.
   const overageApplied = applyOverage && customerOverage > 0
     ? Math.min(customerOverage, baseGrandTotal)
     : 0;
   const grandTotal = Math.max(0, Math.round((baseGrandTotal - overageApplied) * 100) / 100);
 
   const totalSplitPaid: number = (Object.values(splitAmounts) as number[]).reduce((a: number, b: number) => a + b, 0);
+  const isSplitShort = paymentMethod === 'Split' && totalSplitPaid + 0.005 < grandTotal;
   const remainingToSplit: number = Math.max(0, Math.round((grandTotal - totalSplitPaid) * 100) / 100);
   const splitChange: number = Math.max(0, Math.round((totalSplitPaid - grandTotal) * 100) / 100);
 
@@ -692,6 +701,16 @@ export const PosView: React.FC = () => {
     }
 
     const isWholesaleOrder = cart.some((i) => i.isWholesale);
+
+    // Credit Sale: the customer is to be charged to their account, not paid at
+    // the till. Recording `paid = grandTotal` here (the previous behaviour)
+    // silently booked the sale as fully paid and never touched the customer's
+    // outstanding ledger — so the in-app "credit/debt" feature never posted debt.
+    // Force zero paid so `processSale` posts the full total as an outstanding
+    // balance. Credit mode already requires a selected customer.
+    if (isCreditSaleMode && activeCustomer) {
+      paid = 0;
+    }
 
     let customCreatedAt: string | undefined = undefined;
     let isHistoricalSale: boolean | undefined = undefined;
@@ -758,8 +777,17 @@ export const PosView: React.FC = () => {
 
   const handleHoldCurrentCart = () => {
     if (cart.length === 0) return;
-    const name = prompt('Enter a label to identify this held order:', `Hold #${heldOrders.length + 1}`) || `Hold #${heldOrders.length + 1}`;
+    // window.prompt is blocked/unreliable in some installed PWA contexts and
+    // breaks the app's modal interaction pattern; use an in-app dialog instead.
+    setHoldOrderName(`Hold #${heldOrders.length + 1}`);
+    setShowHoldNameModal(true);
+  };
+
+  const confirmHoldOrder = () => {
+    const name = holdOrderName.trim() || `Hold #${heldOrders.length + 1}`;
     holdOrder(name, cart, selectedCustomer?.id);
+    setShowHoldNameModal(false);
+    setHoldOrderName('');
     setCart([]);
     setSelectedCustomer(null);
     setResumedOrderMeta(null);
@@ -2191,9 +2219,11 @@ export const PosView: React.FC = () => {
             >
               <CheckCircle className="w-5 h-5" />
               <span>
-                Complete Sale ({settings.currencySymbol}{
-                  paymentMethod === 'Split' ? totalSplitPaid.toFixed(2) : grandTotal.toFixed(2)
-                })
+                {isSplitShort
+                  ? `Complete Sale (${settings.currencySymbol}${grandTotal.toFixed(2)})`
+                  : `Complete Sale (${settings.currencySymbol}${
+                      paymentMethod === 'Split' ? totalSplitPaid.toFixed(2) : grandTotal.toFixed(2)
+                    })`}
               </span>
             </button>
           </div>
@@ -2721,6 +2751,64 @@ export const PosView: React.FC = () => {
               >
                 <CheckCircle className="w-4 h-4" />
                 <span>Confirm Quantity</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hold Order Label Modal (replaces window.prompt) */}
+      {showHoldNameModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-150">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl max-w-md w-full p-6 space-y-4 my-auto max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-amber-100 dark:bg-amber-950/70 text-amber-600 dark:text-amber-400 rounded-2xl">
+                  <Pause className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-slate-900 dark:text-white text-base">Hold Current Order</h3>
+                  <p className="text-[11px] text-slate-500 font-medium">Label this order so you can find it in the held queue.</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowHoldNameModal(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="hold-order-label" className="text-xs font-bold text-slate-600 dark:text-slate-300">Label</label>
+              <input
+                id="hold-order-label"
+                type="text"
+                autoFocus
+                value={holdOrderName}
+                onChange={(e) => setHoldOrderName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') confirmHoldOrder(); }}
+                placeholder={`Hold #${heldOrders.length + 1}`}
+                className="w-full px-3 py-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium text-slate-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:outline-none"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => setShowHoldNameModal(false)}
+                className="px-4 py-2 text-xs font-bold text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded-xl"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmHoldOrder}
+                className="px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white font-extrabold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5"
+              >
+                <Pause className="w-4 h-4" />
+                <span>Hold Order</span>
               </button>
             </div>
           </div>
