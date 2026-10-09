@@ -55,6 +55,7 @@ interface CustomerRow {
 interface SaleRow {
   id: string;
   customer_id: string | null;
+  customerName?: string | null;
   customer_name: string | null;
   total_kobo: number;
   status: string;
@@ -141,6 +142,28 @@ async function main() {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // GUARD (added after the 2026-10-09 production probe).
+  //
+  // The probe found that stored `loyalty_points` ALWAYS equals
+  // floor(stored_lifetime_value * rate) — i.e. points are internally
+  // consistent with LTV. The real corruption is in the AGGREGATES: 14 of 15
+  // mismatched customers have sales linked by customer_id that were never
+  // folded into lifetime_value_kobo / purchase_history_count.
+  //
+  // Rewriting points alone in that state would make points DISAGREE with LTV
+  // (a new inconsistency) and would award large sums of unearned loyalty on the
+  // strength of a number we have not yet repaired. So: if a drifting customer's
+  // stored LTV does not reconcile with the sales ledger, refuse to apply.
+  // -------------------------------------------------------------------------
+  const aggregateMismatch: string[] = [];
+  for (const c of customers) {
+    const linked = (salesByCustomer.get(c.id) || []).filter((s) => s.status !== 'Refunded');
+    const ledgerKobo = linked.reduce((sum, s) => sum + Number(s.total_kobo || 0), 0);
+    const storedKobo = Number((c as any).lifetime_value_kobo ?? 0);
+    if (Math.abs(storedKobo - ledgerKobo) > 1) aggregateMismatch.push(c.name);
+  }
+
   const drift = computeDrift(customers, salesByCustomer, POINTS_RATE);
 
   console.log(`\nScanned ${customers.length} customers across ${sales.length} sales.`);
@@ -152,6 +175,20 @@ async function main() {
   console.log(`  over-credited (stored > expected): ${over.length}`);
   console.log(`  under-credited (stored < expected): ${under.length}`);
   console.log(`  net point change if applied: ${totalDelta > 0 ? '+' : ''}${totalDelta}`);
+
+  // Aggregate integrity: the precondition for a SAFE points correction.
+  console.log(`\nCustomers whose stored lifetime value does not match the sales ledger: ${aggregateMismatch.length}`);
+  if (aggregateMismatch.length) {
+    console.log('  ' + aggregateMismatch.slice(0, 20).join(', '));
+    if (aggregateMismatch.length > 20) console.log(`  ... and ${aggregateMismatch.length - 20} more`);
+    console.log(
+      '\n  RUNNING THIS WITH --apply IS BLOCKED while aggregates disagree with the\n' +
+      '  ledger: rewriting points alone would make points disagree with lifetime\n' +
+      '  value and would award unearned loyalty from an unrepaired number.\n' +
+      '  Repair the customer aggregates first (see scripts/report-customer-integrity.ts),\n' +
+      '  then re-run this dry run. The storefront/Hub read these aggregates live.',
+    );
+  }
 
   const preview = (LIMIT ? drift.slice(0, LIMIT) : drift).slice(0, 30);
   if (preview.length) {
@@ -170,6 +207,15 @@ async function main() {
 
   if (!APPLY) {
     console.log('\nDRY-RUN complete. Nothing written. Re-run with --apply to correct these rows.');
+    return;
+  }
+
+  if (aggregateMismatch.length) {
+    console.error(
+      `\nREFUSING TO APPLY: ${aggregateMismatch.length} customer aggregate(s) disagree with the sales ledger. ` +
+      'Correct points only after the aggregates are repaired, or the correction creates a new inconsistency.',
+    );
+    process.exitCode = 2;
     return;
   }
 
