@@ -571,7 +571,7 @@ export const Header: React.FC<HeaderProps> = ({
                               {n.title}
                             </p>
                             <span className="text-[10px] text-slate-400 whitespace-nowrap">
-                              {new Date(n.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              {new Date(n.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}
                             </span>
                           </div>
                           <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">

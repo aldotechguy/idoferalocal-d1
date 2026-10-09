@@ -1156,6 +1156,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                       const isRefunded = s.status === 'Refunded';
                       const timeString = new Date(s.createdAt).toLocaleTimeString([], {
                         hour: '2-digit',
+                        hour12: true,
                         minute: '2-digit',
                       });
 

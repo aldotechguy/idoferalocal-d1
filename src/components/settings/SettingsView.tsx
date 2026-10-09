@@ -1334,7 +1334,7 @@ export const SettingsView: React.FC = () => {
                           {new Date(log.createdAt).toLocaleDateString()}
                         </div>
                         <div className="text-[10px] text-slate-400 font-mono">
-                          {new Date(log.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                          {new Date(log.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true, second: '2-digit' })}
                         </div>
                       </td>
 

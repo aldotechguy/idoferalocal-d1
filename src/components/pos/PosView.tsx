@@ -1360,7 +1360,7 @@ export const PosView: React.FC = () => {
                     <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-0.5">
                       Originally held at:{' '}
                       <strong className="font-extrabold text-amber-900 dark:text-amber-200">
-                        {new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        {new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}
                       </strong>{' '}
                       <span className="text-[10px] text-amber-600 dark:text-amber-500">
                         ({new Date(resumedOrderMeta.date).toLocaleDateString([], { month: 'short', day: 'numeric' })})
@@ -1394,7 +1394,7 @@ export const PosView: React.FC = () => {
                     }`}
                   >
                     <Check className={`w-3 h-3 ${resumedOrderMeta.useHeldTime ? 'opacity-100' : 'opacity-0'}`} />
-                    <span>Held Time ({new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})</span>
+                    <span>Held Time ({new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })})</span>
                   </button>
 
                   <button
@@ -2177,7 +2177,7 @@ export const PosView: React.FC = () => {
                 </span>
                 <span className="font-extrabold">
                   {resumedOrderMeta.useHeldTime
-                    ? `Held Time (${new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
+                    ? `Held Time (${new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })})`
                     : 'Current Checkout Time'}
                 </span>
               </div>
@@ -2264,7 +2264,7 @@ export const PosView: React.FC = () => {
                               <Clock className="w-3 h-3 text-amber-500" />
                               <span>
                                 {new Date(h.date).toLocaleDateString([], { month: 'short', day: 'numeric' })},{' '}
-                                {new Date(h.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                {new Date(h.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}
                               </span>
                             </span>
                             {cust && (
