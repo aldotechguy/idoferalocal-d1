@@ -130,11 +130,11 @@ export const InvestorProposalModal: React.FC<InvestorProposalModalProps> = ({
                 {settings.storeName || 'Idofera Packaging'}
               </h1>
               <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md">
-                {settings.storeAddress || 'Commercial Wholesale & Retail Distribution Hub'}
+                {settings.address || 'Commercial Wholesale & Retail Distribution Hub'}
               </p>
-              {settings.storePhone && (
+              {settings.phone && (
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Tel: {settings.storePhone} {settings.storeEmail && `• Email: ${settings.storeEmail}`}
+                  Tel: {settings.phone} {settings.email && `• Email: ${settings.email}`}
                 </p>
               )}
             </div>

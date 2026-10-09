@@ -2204,13 +2204,6 @@ export const PurchasesView: React.FC = () => {
         isOpen={!!orderNotePo}
         onClose={() => setOrderNotePo(null)}
         po={orderNotePo}
-        supplier={suppliers.find((s) => s.id === orderNotePo?.supplierId)}
-        products={products}
-        businessName={settings.businessName || 'Business Organization'}
-        businessAddress={settings.businessAddress}
-        businessPhone={settings.businessPhone}
-        businessEmail={settings.businessEmail}
-        currencySymbol={settings.currencySymbol}
         onPlaceOrder={(po) => {
           setOrderNotePo(null);
           setConfirmPlacePo(po);
@@ -2225,12 +2218,8 @@ export const PurchasesView: React.FC = () => {
       <ConfirmPlaceOrderModal
         isOpen={!!confirmPlacePo}
         onClose={() => setConfirmPlacePo(null)}
-        onConfirm={handleConfirmPlaceOrder}
         po={confirmPlacePo}
-        supplier={suppliers.find((s) => s.id === confirmPlacePo?.supplierId)}
-        products={products}
-        currencySymbol={settings.currencySymbol}
-        treasuryBalances={treasuryBalances}
+        onOrderPlaced={() => setConfirmPlacePo(null)}
       />
 
       {/* MODAL: Discard Draft Confirmation */}

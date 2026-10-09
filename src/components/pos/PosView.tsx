@@ -93,10 +93,14 @@ export const PosView: React.FC = () => {
     Cash: number;
     Card: number;
     'Mobile Transfer': number;
+    'Bank Transfer': number;
+    'Store Credit': number;
   }>({
     Cash: 0,
     Card: 0,
     'Mobile Transfer': 0,
+    'Bank Transfer': 0,
+    'Store Credit': 0,
   });
   const [activeReceiptSale, setActiveReceiptSale] = useState<any | null>(null);
   const [editingCompletedSale, setEditingCompletedSale] = useState<Sale | null>(null);
@@ -659,6 +663,8 @@ export const PosView: React.FC = () => {
           Cash: half,
           Card: Math.max(0, Math.round((grandTotal - half) * 100) / 100),
           'Mobile Transfer': 0,
+          'Bank Transfer': 0,
+          'Store Credit': 0,
         });
       }
       setShowSplitModal(true);
@@ -771,6 +777,8 @@ export const PosView: React.FC = () => {
       Cash: 0,
       Card: 0,
       'Mobile Transfer': 0,
+      'Bank Transfer': 0,
+      'Store Credit': 0,
     });
     setShowSplitModal(false);
   };
@@ -1577,7 +1585,7 @@ export const PosView: React.FC = () => {
                   </div>
 
                   {/* Credit Sales Mode Custom Unit Price Controls (Admin / Manager) */}
-                  {isCreditSaleMode && (currentUser?.role === 'Administrator' || currentUser?.role === 'Manager') && (
+                  {isCreditSaleMode && (currentUser?.role === 'Administrator' || currentUser?.role === 'Store Manager') && (
                     <div className="p-2.5 bg-blue-50/90 dark:bg-blue-950/50 border border-blue-200/90 dark:border-blue-800/80 rounded-2xl space-y-1.5 animate-in fade-in duration-200">
                       <div className="flex items-center justify-between text-[10px] font-bold text-blue-950 dark:text-blue-200">
                         <span className="flex items-center gap-1 font-extrabold">
@@ -1909,10 +1917,10 @@ export const PosView: React.FC = () => {
                         <input
                           type="checkbox"
                           checked={isCreditSaleMode}
-                          disabled={currentUser?.role !== 'Administrator' && currentUser?.role !== 'Manager'}
+                          disabled={currentUser?.role !== 'Administrator' && currentUser?.role !== 'Store Manager'}
                           onChange={(e) => {
                             if (e.target.checked) {
-                              if (currentUser?.role !== 'Administrator' && currentUser?.role !== 'Manager') {
+                              if (currentUser?.role !== 'Administrator' && currentUser?.role !== 'Store Manager') {
                                 notify('Credit Sales custom pricing is restricted to Administrators and Store Managers.', 'Permission required', 'warning');
                                 return;
                               }
@@ -1930,7 +1938,7 @@ export const PosView: React.FC = () => {
                         <CreditCard className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                         <span>Credit Sales</span>
                       </label>
-                      {currentUser?.role !== 'Administrator' && currentUser?.role !== 'Manager' ? (
+                      {currentUser?.role !== 'Administrator' && currentUser?.role !== 'Store Manager' ? (
                         <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400">
                           Admin/Manager Only
                         </span>

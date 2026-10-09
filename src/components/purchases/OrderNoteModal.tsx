@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { PurchaseOrder } from '../../types';
 import { useApp } from '../../context/AppContext';
+import { useToast } from '../../context/ToastContext';
 
 interface OrderNoteModalProps {
   isOpen: boolean;
@@ -34,7 +35,8 @@ export const OrderNoteModal: React.FC<OrderNoteModalProps> = ({
   onEditDraft,
   onPlaceOrder,
 }) => {
-  const { settings, suppliers, showToast } = useApp();
+  const { settings, suppliers } = useApp();
+  const { showToast } = useToast();
   const printRef = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = React.useState(false);
 
@@ -123,7 +125,7 @@ export const OrderNoteModal: React.FC<OrderNoteModalProps> = ({
       `Date: ${new Date(po.createdAt).toLocaleDateString()}`,
       `Expected Delivery: ${po.expectedDelivery}`,
       ``,
-      `*Buyer:* ${settings.businessName || 'Procurement'}`,
+      `*Buyer:* ${settings.storeName || 'Procurement'}`,
       `*Supplier:* ${po.supplierName}`,
       ``,
       `*Requested Items:*`,
@@ -259,29 +261,29 @@ export const OrderNoteModal: React.FC<OrderNoteModalProps> = ({
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
                   <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center font-black text-sm">
-                    {settings.businessName ? settings.businessName.charAt(0) : 'P'}
+                    {settings.storeName ? settings.storeName.charAt(0) : 'P'}
                   </div>
                   <h1 className="text-xl font-black tracking-tight text-slate-900">
-                    {settings.businessName || 'Business Enterprise'}
+                    {settings.storeName || 'Business Enterprise'}
                   </h1>
                 </div>
-                {settings.businessAddress && (
+                {settings.address && (
                   <p className="text-xs text-slate-600 flex items-center gap-1.5">
                     <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                    <span>{settings.businessAddress}</span>
+                    <span>{settings.address}</span>
                   </p>
                 )}
                 <div className="flex flex-wrap items-center gap-4 text-xs text-slate-600 pt-0.5">
-                  {settings.businessPhone && (
+                  {settings.phone && (
                     <span className="flex items-center gap-1">
                       <Phone className="w-3 h-3 text-slate-400" />
-                      {settings.businessPhone}
+                      {settings.phone}
                     </span>
                   )}
-                  {settings.businessEmail && (
+                  {settings.email && (
                     <span className="flex items-center gap-1">
                       <Mail className="w-3 h-3 text-slate-400" />
-                      {settings.businessEmail}
+                      {settings.email}
                     </span>
                   )}
                 </div>

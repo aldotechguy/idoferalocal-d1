@@ -1,12 +1,14 @@
 import React from 'react';
-import { LucideIcon, EyeOff } from 'lucide-react';
+import { EyeOff } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
 interface StatCardProps {
   title: string;
   value: string | number;
   subtitle?: string;
-  icon: LucideIcon;
+  // Any icon component that takes a className — lucide icons and the custom
+  // NairaSign both qualify, so the prop must not be narrowed to LucideIcon.
+  icon: React.ComponentType<{ className?: string }>;
   change?: string;
   changeType?: 'positive' | 'negative' | 'neutral';
   colorScheme?: 'blue' | 'emerald' | 'amber' | 'indigo' | 'rose' | 'violet';

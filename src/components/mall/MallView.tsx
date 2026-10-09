@@ -52,7 +52,7 @@ export const MallView: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={refreshProducts}
+            onClick={() => refreshProducts()}
             className="flex items-center gap-1.5 h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-bold hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
           >
             <RefreshCw className="w-3.5 h-3.5" />

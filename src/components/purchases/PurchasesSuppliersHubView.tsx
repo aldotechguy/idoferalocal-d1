@@ -16,7 +16,7 @@ export const PurchasesSuppliersHubView: React.FC<PurchasesSuppliersHubViewProps>
   const [activeTab, setActiveTab] = useState<PurchasesSuppliersTab>(initialTab);
   const { suppliers, purchases } = useApp();
 
-  const pendingPOs = purchases.filter((p) => p.status === 'Pending' || p.status === 'Partial').length;
+  const pendingPOs = purchases.filter((p) => p.deliveryStatus === 'Pending' || p.deliveryStatus === 'Partial').length;
 
   useEffect(() => {
     if (initialTab) {
