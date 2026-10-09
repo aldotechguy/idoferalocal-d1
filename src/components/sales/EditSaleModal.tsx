@@ -3,6 +3,7 @@ import { Sale, SaleItem, PaymentMethod, SaleStatus, DeliveryStatus } from '../..
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { useInteractions } from '../../context/InteractionContext';
+import { loyaltyPointsForAmount } from '../../shared/customerLedger';
 import {
   Edit3,
   ShieldCheck,
@@ -126,7 +127,7 @@ export const EditSaleModal: React.FC<EditSaleModalProps> = ({ sale, onClose, onS
   }, [editCalculatedTotal, editPaidAmount]);
 
   const editLoyaltyPointsGain = useMemo(() => {
-    return Math.floor(editCalculatedTotal * (settings.pointsPerDollar || 0.01));
+    return loyaltyPointsForAmount(editCalculatedTotal, settings.pointsPerDollar);
   }, [editCalculatedTotal, settings.pointsPerDollar]);
 
   const handleDeliveryFeeChange = (val: number | string) => {

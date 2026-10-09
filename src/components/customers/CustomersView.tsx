@@ -20,12 +20,15 @@ import {
 import { NairaSign } from '../common/NairaSign';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 import { Customer } from '../../types';
 import { ConfirmModal } from '../common/ConfirmModal';
+import { computeCustomerMetrics, settleCustomerBalance, round2 } from '../../shared/customerLedger';
 
 export const CustomersView: React.FC = () => {
   const { customers, sales, addCustomer, updateCustomer, updateCustomerBalance, deleteCustomer, settings } = useApp();
   const { currentUser, isPrivacyMode } = useAuth();
+  const { showToast } = useToast();
   const isAdmin = currentUser?.role === 'Administrator';
   const isSalesStaff = currentUser?.role === 'Sales Staff';
 
@@ -40,45 +43,55 @@ export const CustomersView: React.FC = () => {
 
   const [formData, setFormData] = useState({ name: '', phone: '', email: '', address: '' });
 
-  // Augment customer records with real-time sales log calculations for complete accuracy
+  // Augment customer records with the shared ledger so the Hub displays exactly
+  // what is stored — never a competing recomputation (audit C3).
   const augmentedCustomers = useMemo(() => {
     return customers.map((cust) => {
       if (!cust) return cust;
-      const custSales = sales.filter(
-        (s) =>
-          s &&
-          s.status !== 'Refunded' &&
-          ((s.customerId && s.customerId === cust.id) ||
-            (s.customerName && cust.name && s.customerName.trim().toLowerCase() === cust.name.trim().toLowerCase()))
+      const custSales = sales
+        .filter((s) => {
+          if (!s) return false;
+          if (s.customerId) return s.customerId === cust.id;
+          // Only fall back to a name match for legacy sales with no id, and
+          // never let a guest/walk-in sale accrue to the directory.
+          return (
+            !!cust.name &&
+            !!s.customerName &&
+            s.customerName.trim().toLowerCase() === cust.name.trim().toLowerCase()
+          );
+        })
+        .map((s) => ({
+          id: s.id,
+          invoiceNo: s.invoiceNo,
+          totalAmount: Number(s.totalAmount) || 0,
+          paidAmount: s.paidAmount,
+          createdAt: s.createdAt,
+          status: s.status,
+          customerId: s.customerId,
+          customerName: s.customerName,
+        }));
+
+      const metrics = computeCustomerMetrics(
+        {
+          id: cust.id,
+          name: cust.name,
+          outstandingBalance: Number(cust.outstandingBalance) || 0,
+          overageBalance: Number(cust.overageBalance) || 0,
+          loyaltyPoints: Number(cust.loyaltyPoints) || 0,
+          lifetimeValue: Number(cust.lifetimeValue) || 0,
+          purchaseHistoryCount: Number(cust.purchaseHistoryCount) || 0,
+        },
+        custSales,
+        settings.pointsPerDollar
       );
-
-      const calculatedOrders = custSales.length;
-      const purchaseHistoryCount = Math.max(Number(cust.purchaseHistoryCount) || 0, calculatedOrders);
-
-      const calculatedLTV = custSales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
-      const lifetimeValue = Math.max(Number(cust.lifetimeValue) || 0, calculatedLTV);
-
-      const calculatedPoints = Math.floor(lifetimeValue * (settings.pointsPerDollar || 0.01));
-      const loyaltyPoints = Math.max(Number(cust.loyaltyPoints) || 0, calculatedPoints);
-
-      const calculatedUnpaid = custSales.reduce(
-        (acc, s) => acc + Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.paidAmount !== undefined ? s.paidAmount : s.totalAmount) || 0)),
-        0
-      );
-
-      const rawBalance = Number(cust.outstandingBalance);
-      const outstandingBalance = isNaN(rawBalance)
-        ? calculatedUnpaid
-        : rawBalance;
-      const overageBalance = Math.max(0, Number(cust.overageBalance) || 0);
 
       return {
         ...cust,
-        purchaseHistoryCount,
-        lifetimeValue,
-        loyaltyPoints,
-        outstandingBalance,
-        overageBalance,
+        purchaseHistoryCount: metrics.purchaseHistoryCount,
+        lifetimeValue: metrics.lifetimeValue,
+        loyaltyPoints: metrics.loyaltyPoints,
+        outstandingBalance: metrics.outstandingBalance,
+        overageBalance: metrics.overageBalance,
       };
     }).filter(Boolean);
   }, [customers, sales, settings.pointsPerDollar]);
@@ -103,8 +116,29 @@ export const CustomersView: React.FC = () => {
 
   const handleAddSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.name) return;
-    addCustomer(formData);
+    const name = formData.name.trim();
+    if (!name) return;
+
+    // Duplicate detection (audit M1): a second identical customer splits debt
+    // and loyalty across two records. Match on normalised phone, then name.
+    const phoneKey = formData.phone.replace(/\D/g, '');
+    const duplicate = customers.find(
+      (c) =>
+        (phoneKey && c.phone && c.phone.replace(/\D/g, '') === phoneKey) ||
+        (c.name && c.name.trim().toLowerCase() === name.toLowerCase())
+    );
+    if (duplicate) {
+      showToast({
+        title: 'Customer Already Exists',
+        message: `"${duplicate.name}" is already in the directory${
+          duplicate.phone ? ` (${duplicate.phone})` : ''
+        }. Open their profile to add a sale instead of creating a duplicate.`,
+        type: 'error',
+      });
+      return;
+    }
+
+    addCustomer({ ...formData, name });
     setShowAddModal(false);
     setFormData({ name: '', phone: '', email: '', address: '' });
   };
@@ -140,11 +174,50 @@ export const CustomersView: React.FC = () => {
     setPaymentNote('');
   };
 
+  // Live preview of a settlement: what goes to debt, and whether the typed
+  // amount would exceed it. An overpayment is refused, never converted into
+  // hidden store credit (audit C2).
+  const settlePreview = useMemo(() => {
+    if (!settleCustomer) return null;
+    const bal = Math.max(0, round2(Number(settleCustomer.outstandingBalance) || 0));
+    const typed = round2(parseFloat(settleAmount));
+    const amount = Number.isFinite(typed) && typed > 0 ? typed : 0;
+    const plan = settleCustomerBalance(
+      {
+        id: settleCustomer.id,
+        name: settleCustomer.name,
+        outstandingBalance: bal,
+        overageBalance: Number(settleCustomer.overageBalance) || 0,
+        loyaltyPoints: Number(settleCustomer.loyaltyPoints) || 0,
+        lifetimeValue: Number(settleCustomer.lifetimeValue) || 0,
+        purchaseHistoryCount: Number(settleCustomer.purchaseHistoryCount) || 0,
+      },
+      amount
+    );
+    return {
+      balance: bal,
+      amount,
+      appliedToDebt: plan.appliedToDebt,
+      remaining: plan.customer.outstandingBalance,
+      blocked: amount > bal && bal > 0,
+    };
+  }, [settleCustomer, settleAmount]);
+
   const handleSettleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!settleCustomer) return;
-    const payVal = parseFloat(settleAmount);
-    if (isNaN(payVal) || payVal <= 0) return;
+    const payVal = round2(parseFloat(settleAmount));
+    if (!Number.isFinite(payVal) || payVal <= 0) return;
+    // Refuse anything above the debt — the operator must see that they would be
+    // overpaying rather than have it silently become store credit.
+    if (settlePreview?.blocked) {
+      showToast({
+        title: 'Amount Exceeds Balance',
+        message: `The payment is more than the ${settings.currencySymbol}${settlePreview.balance.toFixed(2)} owed. Enter an amount up to the outstanding balance.`,
+        type: 'error',
+      });
+      return;
+    }
 
     updateCustomerBalance(settleCustomer.id, -payVal, {
       paymentMethod: paymentMethod as any,
@@ -527,6 +600,7 @@ export const CustomersView: React.FC = () => {
                     type="number"
                     step="0.01"
                     min="0.01"
+                    max={Number(settleCustomer.outstandingBalance) || 0}
                     required
                     value={settleAmount}
                     onChange={(e) => setSettleAmount(e.target.value)}
@@ -534,6 +608,11 @@ export const CustomersView: React.FC = () => {
                     placeholder="0.00"
                   />
                 </div>
+                {settlePreview?.blocked && (
+                  <p className="mt-1.5 text-[11px] font-bold text-rose-600 dark:text-rose-400">
+                    Amount exceeds the {settings.currencySymbol}{settlePreview.balance.toFixed(2)} owed. Enter an amount up to the outstanding balance.
+                  </p>
+                )}
 
                 {/* Preset amount chips */}
                 <div className="flex items-center gap-1.5 mt-2">
@@ -555,16 +634,35 @@ export const CustomersView: React.FC = () => {
               </div>
 
               {/* Balance preview card */}
-              {settleAmount && !isNaN(parseFloat(settleAmount)) && (
-                <div className="p-2.5 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200/80 dark:border-slate-700/80 flex items-center justify-between text-xs">
-                  <span className="text-slate-500 font-medium">New Remaining Balance:</span>
-                  <span className={`font-black text-sm ${
-                    (Number(settleCustomer.outstandingBalance) || 0) - parseFloat(settleAmount) <= 0
-                      ? 'text-emerald-600 dark:text-emerald-400'
-                      : 'text-amber-600 dark:text-amber-400'
-                  }`}>
-                    {settings.currencySymbol}{Math.max(0, (Number(settleCustomer.outstandingBalance) || 0) - parseFloat(settleAmount)).toFixed(2)}
-                  </span>
+              {settlePreview && settlePreview.amount > 0 && (
+                <div className="p-2.5 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200/80 dark:border-slate-700/80 space-y-1 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500 font-medium">Applied to Debt:</span>
+                    <span className="font-black text-emerald-600 dark:text-emerald-400">
+                      {settings.currencySymbol}{settlePreview.appliedToDebt.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500 font-medium">New Remaining Balance:</span>
+                    <span className={`font-black text-sm ${
+                      settlePreview.remaining <= 0
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-amber-600 dark:text-amber-400'
+                    }`}>
+                      {settings.currencySymbol}{settlePreview.remaining.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500 font-medium">Store Credit Created:</span>
+                    <span className="font-bold text-slate-500 dark:text-slate-400">
+                      {settings.currencySymbol}0.00
+                    </span>
+                  </div>
+                  {settlePreview.blocked && (
+                    <p className="text-[10px] font-bold text-rose-600 dark:text-rose-400 pt-0.5">
+                      Payment exceeds the balance. Only {settings.currencySymbol}{settlePreview.balance.toFixed(2)} will be applied.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -615,11 +713,11 @@ export const CustomersView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={!settleAmount || isNaN(parseFloat(settleAmount)) || parseFloat(settleAmount) <= 0}
+                  disabled={!settleAmount || isNaN(parseFloat(settleAmount)) || parseFloat(settleAmount) <= 0 || !!settlePreview?.blocked}
                   className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-extrabold rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
                 >
                   <ShieldCheck className="w-4 h-4" />
-                  <span>Record Payment ({settings.currencySymbol}{parseFloat(settleAmount || '0').toFixed(2)})</span>
+                  <span>Record Payment ({settings.currencySymbol}{settlePreview ? settlePreview.appliedToDebt.toFixed(2) : parseFloat(settleAmount || '0').toFixed(2)})</span>
                 </button>
               </div>
             </form>
@@ -631,7 +729,11 @@ export const CustomersView: React.FC = () => {
       <ConfirmModal
         isOpen={!!customerToDelete}
         title="Delete Customer"
-        message={`Are you sure you want to delete customer "${customerToDelete?.name}"? Their purchase history records will remain in sales logs.`}
+        message={
+          customerToDelete && ((Number(customerToDelete.outstandingBalance) || 0) > 0 || (Number(customerToDelete.overageBalance) || 0) > 0)
+            ? `"${customerToDelete.name}" still holds a live balance (${settings.currencySymbol}${(Number(customerToDelete.outstandingBalance) || 0).toFixed(2)} owed, ${settings.currencySymbol}${(Number(customerToDelete.overageBalance) || 0).toFixed(2)} credit). Settle the account before deleting — this cannot be undone.`
+            : `Are you sure you want to delete customer "${customerToDelete?.name}"? Their purchase history records will remain in sales logs.`
+        }
         confirmText="Delete Customer"
         variant="danger"
         onClose={() => setCustomerToDelete(null)}

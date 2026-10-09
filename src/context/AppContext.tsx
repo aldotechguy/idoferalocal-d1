@@ -58,6 +58,13 @@ import { useToast } from './ToastContext';
 import { getAllItems, putManyItems, replaceStoreItems, putItem, clearStore, deleteItem, writeD1SnapshotToIndexedDB, type StoreName } from '../db/indexedDB';
 import { initializeD1Storage, queueD1Snapshot, pullLatestFromD1, type D1Snapshot } from '../services/d1StorageService';
 import { removeLegacyBusinessStorage, safeSetLocalStorage } from '../utils/localStorage';
+import {
+  customerDeleteGuard,
+  settleCustomerBalance,
+  loyaltyPointsForAmount,
+  refundCustomerMetrics,
+  type LedgerSale,
+} from '../shared/customerLedger';
 
 const isAutoSyncLog = (log: any): boolean => {
   if (!log) return false;
@@ -488,7 +495,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const mirrorArmedRef = useRef(false);
   const mirrorReady = () => isStorageReady && mirrorArmedRef.current && !isApplyingD1Ref.current;
   /** store -> latest value still owed a debounced IndexedDB write. */
-  const pendingMirrors = useRef(new Map<StoreName, unknown>());
+  const pendingMirrors = useRef(new Map<StoreName, { id: string }[]>());
 
   const [products, setProducts] = useState<Product[]>(() =>
     sanitizeUniqueIds(readLegacyCollection<Product>('idofera_products', isClearedBoot ? [] : INITIAL_PRODUCTS), 'prod'));
@@ -1002,7 +1009,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const repeatSaleInPos = React.useCallback((saleToRepeat: Sale) => {
     setPendingRepeatSale(saleToRepeat);
-    showToast('Transaction items and customer loaded into POS', 'success');
+    showToast({ title: 'Loaded into POS', message: 'Transaction items and customer loaded into POS.', type: 'success' });
   }, [showToast]);
 
   const clearPendingRepeatSale = React.useCallback(() => {
@@ -1725,7 +1732,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (targetCustomer) {
       const outstanding = Math.max(0, Math.round((totalAmount - paidAmount) * 100) / 100);
-      const pointsEarned = Math.floor(totalAmount * (settings.pointsPerDollar || 0.01));
+      const pointsEarned = loyaltyPointsForAmount(totalAmount, settings.pointsPerDollar);
 
       setCustomers((prev) =>
         prev.map((c) => {
@@ -2214,49 +2221,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     if (targetCust) {
-      const pointsDeducted = Math.floor(
-        netRefundAmount * (settings.pointsPerDollar || 0.01)
-      );
-      let newBal = Number(targetCust.outstandingBalance) || 0;
-      let newOverage = Number(targetCust.overageBalance) || 0;
+      const originalPaid =
+        sale.paidAmount !== undefined ? sale.paidAmount : (sale.totalAmount || 0);
+      const unpaidOnSale = Math.max(0, (sale.totalAmount || 0) - originalPaid);
+      // The share of this refund that was still owed: refund value scaled by the
+      // invoice's unpaid ratio. This is what a returned-but-unpaid item must
+      // remove from the customer's balance (audit H1) - the old code only did it
+      // for a FULL refund and left phantom debt on partial returns.
+      const unpaidRatio = sale.totalAmount > 0 ? Math.min(1, unpaidOnSale / sale.totalAmount) : 0;
+      const refundedUnpaidPortion =
+        isFullyRefunded ? unpaidOnSale : Math.round(netRefundAmount * unpaidRatio * 100) / 100;
 
-      if (settlementMethod === 'Debt Reduction') {
-        const debtRelief = Math.min(newBal, netRefundAmount);
-        newBal = Math.max(0, newBal - debtRelief);
-      } else if (settlementMethod === 'Store Credit') {
-        newOverage = Math.round((newOverage + netRefundAmount) * 100) / 100;
-      }
-
-      // If customer had unpaid balance on this sale and settlement wasn't debt reduction,
-      // check if this refund offsets the remaining unpaid invoice portion
-      if (settlementMethod !== 'Debt Reduction') {
-        const originalPaid =
-          sale.paidAmount !== undefined ? sale.paidAmount : (sale.totalAmount || 0);
-        const unpaidOnSale = Math.max(0, (sale.totalAmount || 0) - originalPaid);
-        if (unpaidOnSale > 0 && isFullyRefunded) {
-          newBal = Math.max(0, newBal - unpaidOnSale);
-        }
-      }
-
-      const newCount = isFullyRefunded
-        ? Math.max(0, (Number(targetCust.purchaseHistoryCount) || 0) - 1)
-        : Number(targetCust.purchaseHistoryCount) || 0;
-      const newPoints = Math.max(
-        0,
-        (Number(targetCust.loyaltyPoints) || 0) - pointsDeducted
-      );
-      const newLtv = Math.max(
-        0,
-        Math.round(((Number(targetCust.lifetimeValue) || 0) - netRefundAmount) * 100) / 100
-      );
+      const result = refundCustomerMetrics({
+        customer: {
+          id: targetCust.id,
+          name: targetCust.name,
+          outstandingBalance: Number(targetCust.outstandingBalance) || 0,
+          overageBalance: Number(targetCust.overageBalance) || 0,
+          loyaltyPoints: Number(targetCust.loyaltyPoints) || 0,
+          lifetimeValue: Number(targetCust.lifetimeValue) || 0,
+          purchaseHistoryCount: Number(targetCust.purchaseHistoryCount) || 0,
+        },
+        refundAmount: netRefundAmount,
+        isFullyRefunded,
+        unpaidOnSale,
+        refundedUnpaidPortion,
+        overageAppliedOnSale: Math.max(0, Number(sale.overageApplied) || 0),
+        pointsRate: settings.pointsPerDollar,
+        settlementMethod: settlementMethod as 'Refund to Customer' | 'Debt Reduction' | 'Store Credit',
+      });
 
       const updatedCust: Customer = {
         ...targetCust,
-        outstandingBalance: newBal,
-        overageBalance: newOverage,
-        purchaseHistoryCount: newCount,
-        loyaltyPoints: newPoints,
-        lifetimeValue: newLtv,
+        outstandingBalance: result.outstandingBalance,
+        overageBalance: result.overageBalance,
+        purchaseHistoryCount: result.purchaseHistoryCount,
+        loyaltyPoints: result.loyaltyPoints,
+        lifetimeValue: result.lifetimeValue,
       };
       setCustomers((prev) =>
         prev.map((c) => (c.id === updatedCust.id ? updatedCust : c))
@@ -2335,7 +2336,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (isFullyRefunded) {
             const updatedPo: WhatsAppPreOrder = {
               ...po,
-              status: 'Approved',
+              status: 'Pending Review',
               convertedSaleId: undefined,
               convertedInvoiceNo: undefined,
               notes: po.notes
@@ -2498,7 +2499,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       targetCust = customers.find((c) => c.name && c.name.trim().toLowerCase() === sale.customerName.trim().toLowerCase());
     }
     if (targetCust) {
-      const pointsEarned = Math.floor((sale.totalAmount || 0) * (settings.pointsPerDollar || 0.01));
+      const pointsEarned = loyaltyPointsForAmount(sale.totalAmount || 0, settings.pointsPerDollar);
       const overpaidOnSale = sale.overageCreated !== undefined
         ? Number(sale.overageCreated) || 0
         : Math.max(0, existingPaid - (sale.totalAmount || 0));
@@ -2539,7 +2540,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
           const reverted: WhatsAppPreOrder = {
             ...po,
-            status: 'Approved',
+            status: 'Pending Review',
             convertedSaleId: undefined,
             convertedInvoiceNo: undefined,
             updatedAt: now,
@@ -2993,8 +2994,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // 5. Cascade down to Customer (ownership transfer, lifetimeValue, outstandingBalance debt & loyalty points)
     const oldTotal = existing.totalAmount || 0;
     const totalDiff = calculatedTotal - oldTotal;
-    const oldPoints = Math.floor(oldTotal * (settings.pointsPerDollar || 0.01));
-    const newPoints = Math.floor(calculatedTotal * (settings.pointsPerDollar || 0.01));
+    const oldPoints = loyaltyPointsForAmount(oldTotal, settings.pointsPerDollar);
+    const newPoints = loyaltyPointsForAmount(calculatedTotal, settings.pointsPerDollar);
     const pointsDiff = newPoints - oldPoints;
 
     // Resolve old customer record (from previous sale state)
@@ -3666,109 +3667,190 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const cust = customers.find((c) => c.id === id);
     if (!cust) return;
 
-    const currentBal = Number(cust.outstandingBalance) || 0;
-    const currentOverage = Number(cust.overageBalance) || 0;
-    const rawNextBal = currentBal + amountChange;
-    const newBal = Math.max(0, rawNextBal);
-    const excessPayment = rawNextBal < 0 ? Math.round(Math.abs(rawNextBal) * 100) / 100 : 0;
-    const newOverage = Math.round((currentOverage + excessPayment) * 100) / 100;
-    const updatedCust = { ...cust, outstandingBalance: newBal, overageBalance: newOverage };
+    const user = paymentDetails?.performedBy || 'Admin';
+    const paymentMethod = paymentDetails?.paymentMethod || 'Cash';
+    const paymentNote = paymentDetails?.paymentNote ? ` [Note: ${paymentDetails.paymentNote}]` : '';
 
-    setCustomers((prev) =>
-      prev.map((c) => (c.id === id ? updatedCust : c))
+    // A debt payment is a NEGATIVE change. Positive changes are manual balance
+    // adjustments (e.g. opening balance) and keep their existing behaviour;
+    // a payment is settled through the shared ledger so an overpayment is
+    // clamped to the debt instead of silently minting store credit.
+    const isDebtPayment = amountChange < 0;
+
+    if (!isDebtPayment) {
+      const currentBal = Math.max(0, Number(cust.outstandingBalance) || 0);
+      const rawNextBal = currentBal + Number(amountChange);
+      const newBal = Math.max(0, Math.round(rawNextBal * 100) / 100);
+      const excessPayment = rawNextBal < 0 ? Math.round(Math.abs(rawNextBal) * 100) / 100 : 0;
+      const newOverage = Math.round(((Number(cust.overageBalance) || 0) + excessPayment) * 100) / 100;
+      const updatedCust = { ...cust, outstandingBalance: newBal, overageBalance: newOverage };
+      setCustomers((prev) => prev.map((c) => (c.id === id ? updatedCust : c)));
+      saveDocument('customers', updatedCust);
+      putItem('customers', updatedCust).catch((e) => console.warn('IndexedDB customer put error:', e));
+      showToast({
+        title: 'Customer Balance Updated',
+        message: `Updated balance for ${cust.name}. Current balance: ${settings.currencySymbol}${newBal.toFixed(2)}.`,
+        type: 'success',
+      });
+      return;
+    }
+
+    // --- Debt settlement path -------------------------------------------------
+    const requested = Math.abs(Number(amountChange));
+    const customerSales: LedgerSale[] = sales
+      .filter(
+        (s) =>
+          s.customerId === id ||
+          (s.customerName && cust.name && s.customerName.trim().toLowerCase() === cust.name.trim().toLowerCase())
+      )
+      .map((s) => ({ id: s.id, invoiceNo: s.invoiceNo, totalAmount: s.totalAmount, paidAmount: s.paidAmount, createdAt: s.createdAt, status: s.status }));
+
+    const plan = settleCustomerBalance(
+      {
+        id: cust.id,
+        name: cust.name,
+        outstandingBalance: Number(cust.outstandingBalance) || 0,
+        overageBalance: Number(cust.overageBalance) || 0,
+        loyaltyPoints: Number(cust.loyaltyPoints) || 0,
+        lifetimeValue: Number(cust.lifetimeValue) || 0,
+        purchaseHistoryCount: Number(cust.purchaseHistoryCount) || 0,
+      },
+      requested,
+      customerSales
     );
+
+    // Nothing owed (or nothing tendered): do not write a phantom ledger entry.
+    if (plan.appliedToDebt <= 0) {
+      showToast({
+        title: 'Nothing to Settle',
+        message: `${cust.name} has no outstanding balance to settle.`,
+        type: 'info',
+      });
+      return;
+    }
+
+    const settledAmount = plan.appliedToDebt;
+    const updatedCust: Customer = {
+      ...cust,
+      outstandingBalance: plan.customer.outstandingBalance,
+      // Store credit is never created by a debt settlement (audit C2).
+      overageBalance: Math.max(0, Number(cust.overageBalance) || 0),
+    };
+    setCustomers((prev) => prev.map((c) => (c.id === id ? updatedCust : c)));
     saveDocument('customers', updatedCust);
     putItem('customers', updatedCust).catch((e) => console.warn('IndexedDB customer put error:', e));
 
-    // If debt payment was made (amountChange < 0), reconcile and credit unpaid sales
-    if (amountChange < 0) {
-      let settlementAmount = Math.abs(amountChange);
-      const paymentMethod = paymentDetails?.paymentMethod || 'Cash';
-      const paymentNote = paymentDetails?.paymentNote ? ` [Note: ${paymentDetails.paymentNote}]` : '';
-
-      setSales((prev) => {
-        return prev.map((s) => {
-          const isCustSale =
-            s.customerId === id ||
-            (s.customerName && cust.name && s.customerName.trim().toLowerCase() === cust.name.trim().toLowerCase());
-          if (!isCustSale || settlementAmount <= 0) return s;
-
-          const unpaidOnSale = Math.max(
-            0,
-            (s.totalAmount || 0) - (s.paidAmount !== undefined ? s.paidAmount : s.totalAmount || 0)
-          );
-          if (unpaidOnSale <= 0) return s;
-
-          const credit = Math.min(settlementAmount, unpaidOnSale);
-          settlementAmount -= credit;
-          const currentPaid = s.paidAmount !== undefined ? s.paidAmount : s.totalAmount || 0;
-          const newPaid = currentPaid + credit;
-          const settlementNote = `Debt payment of ${settings.currencySymbol}${credit.toFixed(2)} received via ${paymentMethod}${paymentNote}.`;
-
+    // Reconcile only the invoices the ledger approved, via their exact credit.
+    const creditBySaleId = new Map(plan.reconciledSales.map((r) => [r.id, r]));
+    if (creditBySaleId.size > 0) {
+      setSales((prev) =>
+        prev.map((s) => {
+          const reconciled = creditBySaleId.get(s.id);
+          if (!reconciled || reconciled.credited <= 0) return s;
+          const settlementNote = `Debt payment of ${settings.currencySymbol}${reconciled.credited.toFixed(2)} received via ${paymentMethod}${paymentNote}.`;
           const updatedSale: Sale = {
             ...s,
-            paidAmount: newPaid,
+            paidAmount: reconciled.newPaid,
             notes: s.notes ? `${s.notes} | ${settlementNote}` : settlementNote,
           };
           saveDocument('sales', updatedSale);
           putItem('sales', updatedSale).catch((e) => console.warn('IndexedDB sale put error:', e));
           return updatedSale;
-        });
-      });
-
-      const user = paymentDetails?.performedBy || 'Admin';
-
-      // Auto-log Money Movement for Customer Debt Payment
-      const isCash = paymentMethod === 'Cash';
-      const debtMM: MoneyMovement = {
-        id: generateUniqueId('mm'),
-        date: new Date().toISOString(),
-        type: 'Customer Debt Payment',
-        subtype: paymentMethod,
-        destinationAccount: isCash ? 'Physical Cash' : 'Biz Account',
-        amount: Math.abs(amountChange),
-        referenceNo: cust.name,
-        referenceId: id,
-        performedBy: user,
-        notes: `Customer debt settled by ${cust.name}: ${settings.currencySymbol}${Math.abs(amountChange).toFixed(2)} via ${paymentMethod}${paymentNote}`,
-        createdAt: new Date().toISOString(),
-      };
-      setMoneyMovements((prev) => [debtMM, ...prev]);
-      saveDocument('moneyMovements', debtMM);
-      putItem('moneyMovements', debtMM).catch(() => {});
-
-      logAudit(
-        'SETTLE_DEBT',
-        'Customer',
-        id,
-        user,
-        `Settled balance for ${cust.name}: paid ${settings.currencySymbol}${Math.abs(amountChange).toFixed(2)} via ${paymentMethod}. New balance: ${settings.currencySymbol}${newBal.toFixed(2)}.`
+        })
       );
     }
 
+    // Auto-log Money Movement for Customer Debt Payment
+    const isCash = paymentMethod === 'Cash';
+    const debtMM: MoneyMovement = {
+      id: generateUniqueId('mm'),
+      date: new Date().toISOString(),
+      type: 'Customer Debt Payment',
+      subtype: paymentMethod,
+      destinationAccount: isCash ? 'Physical Cash' : 'Biz Account',
+      amount: settledAmount,
+      referenceNo: cust.name,
+      referenceId: id,
+      performedBy: user,
+      notes: `Customer debt settled by ${cust.name}: ${settings.currencySymbol}${settledAmount.toFixed(2)} via ${paymentMethod}${paymentNote}`,
+      createdAt: new Date().toISOString(),
+    };
+    setMoneyMovements((prev) => [debtMM, ...prev]);
+    saveDocument('moneyMovements', debtMM);
+    putItem('moneyMovements', debtMM).catch(() => { });
+
+    // The audit trail must carry the payment reference too (audit H3).
+    const noteForAudit = paymentDetails?.paymentNote ? ` Reference: ${paymentDetails.paymentNote}.` : '';
+    logAudit(
+      'SETTLE_DEBT',
+      'Customer',
+      id,
+      user,
+      `Settled balance for ${cust.name}: paid ${settings.currencySymbol}${settledAmount.toFixed(2)} via ${paymentMethod}.${noteForAudit} New balance: ${settings.currencySymbol}${plan.customer.outstandingBalance.toFixed(2)}.`
+    );
+
     showToast({
       title: 'Customer Balance Updated',
-      message: `Updated balance for ${cust.name}. Current balance: ${settings.currencySymbol}${newBal.toFixed(2)}.`,
-      type: 'success',
+      message:
+        plan.reason === 'EXCEEDS_OUTSTANDING_BALANCE'
+          ? `Payment of ${settings.currencySymbol}${requested.toFixed(2)} exceeded the debt. Settled ${settings.currencySymbol}${settledAmount.toFixed(2)}; no store credit was created.`
+          : `Updated balance for ${cust.name}. Current balance: ${settings.currencySymbol}${plan.customer.outstandingBalance.toFixed(2)}.`,
+      type: plan.reason === 'EXCEEDS_OUTSTANDING_BALANCE' ? 'info' : 'success',
     });
   };
 
   const deleteCustomer = (id: string) => {
     const target = customers.find((c) => c.id === id);
+    if (!target) {
+      removeDocument('customers', id);
+      deleteItem('customers', id).catch((e) => console.warn('IndexedDB customer delete error:', e));
+      return;
+    }
+
+    // Never erase money. A customer holding a live debt or store credit must be
+    // settled first — deleting the record would silently write off what the
+    // business is owed (or owes) with no trace. (Audit C1.)
+    const guard = customerDeleteGuard({
+      id: target.id,
+      name: target.name,
+      outstandingBalance: Number(target.outstandingBalance) || 0,
+      overageBalance: Number(target.overageBalance) || 0,
+      loyaltyPoints: Number(target.loyaltyPoints) || 0,
+      lifetimeValue: Number(target.lifetimeValue) || 0,
+      purchaseHistoryCount: Number(target.purchaseHistoryCount) || 0,
+    });
+    if (!guard.canDelete) {
+      const amount = guard.reason === 'OUTSTANDING_DEBT' ? guard.writtenOffDebt : guard.writtenOffCredit;
+      const label = guard.reason === 'OUTSTANDING_DEBT' ? 'outstanding debt' : 'store credit';
+      logAudit(
+        'BLOCKED_CUSTOMER_DELETE',
+        'Customer',
+        id,
+        'Admin',
+        `Refused to delete customer "${target.name}": account still holds ${settings.currencySymbol}${amount.toFixed(2)} of ${label}. Settle the account first.`
+      );
+      showToast({
+        title: 'Cannot Delete Customer',
+        message: `${target.name} still has ${settings.currencySymbol}${amount.toFixed(2)} of ${label}. Settle the account before deleting.`,
+        type: 'error',
+      });
+      return;
+    }
+
     setCustomers((prev) => prev.filter((c) => c.id !== id));
     removeDocument('customers', id);
     deleteItem('customers', id).catch((e) => console.warn('IndexedDB customer delete error:', e));
 
     // Clean up customer balance notifications
-    if (target) {
-      setNotifications((prev) => {
-        const removed = prev.filter((n) => n.message.includes(target.name));
-        removed.forEach((n) => removeDocument('notifications', n.id));
-        return prev.filter((n) => !n.message.includes(target.name));
-      });
-    }
+    setNotifications((prev) => {
+      const removed = prev.filter((n) => n.message.includes(target.name));
+      removed.forEach((n) => removeDocument('notifications', n.id));
+      return prev.filter((n) => !n.message.includes(target.name));
+    });
 
-    // Safely unlink customerId on sales (keep customerName so sales history is preserved)
+    // Safely unlink customerId on every linked record (keep the denormalised
+    // customerName so history is preserved). Sales alone used to be relinked,
+    // leaving delivery orders and pre-orders pointing at a deleted id. (H2.)
     setSales((prev) =>
       prev.map((s) => {
         if (s.customerId === id) {
@@ -3781,8 +3863,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
 
-    logAudit('DELETE_CUSTOMER', 'Customer', id, 'Admin', target ? `Deleted customer profile "${target.name}".` : `Deleted customer ${id}.`);
-    showToast({ title: 'Customer Deleted', message: target ? `Customer "${target.name}" removed from directory.` : 'Customer deleted.', type: 'error' });
+    setDeliveryOrders((prev) =>
+      prev.map((d) => {
+        if (d.customerId === id) {
+          const updatedDelivery: DeliveryOrder = { ...d, customerId: undefined, updatedAt: new Date().toISOString() };
+          saveDocument('deliveryOrders', updatedDelivery);
+          putItem('deliveryOrders', updatedDelivery).catch((e) => console.warn('IndexedDB del put error:', e));
+          return updatedDelivery;
+        }
+        return d;
+      })
+    );
+
+    setWhatsAppPreOrders((prev) =>
+      prev.map((po) => {
+        if (po.customerId === id) {
+          const updatedPo: WhatsAppPreOrder = { ...po, customerId: undefined, updatedAt: new Date().toISOString() };
+          saveDocument('whatsAppPreOrders', updatedPo);
+          putItem('whatsAppPreOrders', updatedPo).catch((e) => console.warn('IndexedDB po put error:', e));
+          return updatedPo;
+        }
+        return po;
+      })
+    );
+
+    logAudit('DELETE_CUSTOMER', 'Customer', id, 'Admin', `Deleted customer profile "${target.name}" (settled account: ${settings.currencySymbol}0.00 balance).`);
+    showToast({ title: 'Customer Deleted', message: `Customer "${target.name}" removed from directory.`, type: 'error' });
   };
 
   // Supplier Management
