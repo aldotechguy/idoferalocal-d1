@@ -18,6 +18,7 @@ import { useAuth } from '../../context/AuthContext';
 import { Product } from '../../types';
 import { AddProductModal } from '../modals/AddProductModal';
 import { ConfirmModal } from '../common/ConfirmModal';
+import { Pagination } from '../common/Pagination';
 
 interface ArchiveViewProps {
   onNavigate: (page: string) => void;
@@ -30,6 +31,16 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({ onNavigate }) => {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
+
+  // Pagination State (same contract as ProductsView; the archive used to render
+  // every row at once)
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+
+  // Reset pagination when filters change
+  React.useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, selectedCategory]);
 
   // Modal States
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
@@ -55,7 +66,27 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({ onNavigate }) => {
     return matchesSearch && matchesCategory;
   });
 
-  const totalArchivedStockValue = archivedProducts.reduce((sum, p) => sum + p.costPrice * p.currentStock, 0);
+  // Archived stock valuation must mirror the Dashboard valuation: coerce each
+  // side to a number and clamp negatives (committed Mall escrow can drive
+  // `currentStock` below zero before the Sale lands). An unguarded multiply
+  // poisons the KPI to NaN or a negative total.
+  const totalArchivedStockValue = archivedProducts.reduce(
+    (sum, p) =>
+      sum + Math.max(0, (Number(p.costPrice) || 0) * (Number(p.currentStock) || 0)),
+    0
+  );
+  const totalArchivedStockUnits = archivedProducts.reduce(
+    (sum, p) => sum + Math.max(0, Number(p.currentStock) || 0),
+    0
+  );
+
+  // Paginated slice (same pattern as ProductsView) so a large archive does
+  // not render every row at once.
+  const totalPages = Math.ceil(filteredProducts.length / pageSize) || 1;
+  const paginatedProducts = React.useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filteredProducts.slice(start, start + pageSize);
+  }, [filteredProducts, currentPage, pageSize]);
 
   return (
     <div className="space-y-6 pb-12 font-sans">
@@ -109,7 +140,7 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({ onNavigate }) => {
               <h3 className="text-2xl font-black text-slate-900 dark:text-white">
                 {isPrivacyMode
                   ? '••••••'
-                  : `${settings.currencySymbol}${totalArchivedStockValue.toLocaleString('en-US', { minimumFractionDigits: 2 })}`}
+                  : `${settings.currencySymbol}${totalArchivedStockValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
               </h3>
             </div>
           </div>
@@ -121,7 +152,7 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({ onNavigate }) => {
             <div>
               <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Archived Stock Units</p>
               <h3 className="text-2xl font-black text-slate-900 dark:text-white">
-                {archivedProducts.reduce((sum, p) => sum + p.currentStock, 0)} units
+                {totalArchivedStockUnits} units
               </h3>
             </div>
           </div>
@@ -135,6 +166,11 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({ onNavigate }) => {
             <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Restore Status</p>
             <p className="text-xs font-semibold text-slate-600 dark:text-slate-300 mt-1">
               Unarchived products return directly to active POS & Inventory.
+              {/* Archiving drops the storefront listing, which is NOT restored:
+                  re-enable it under Products &amp; Stock → Mall Listings if needed. */}
+              <span className="block text-slate-400 font-medium mt-0.5">
+                Note: Mall listing is not restored — re-list from Mall Listings if needed.
+              </span>
             </p>
           </div>
         </div>
@@ -224,7 +260,7 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({ onNavigate }) => {
                   </td>
                 </tr>
               ) : (
-                filteredProducts.map((product) => (
+                paginatedProducts.map((product) => (
                   <tr
                     key={product.id}
                     className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
@@ -341,6 +377,17 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({ onNavigate }) => {
             </tbody>
           </table>
         </div>
+
+        {/* Pagination Controls */}
+        <Pagination
+          currentPage={currentPage}
+          totalPages={totalPages}
+          pageSize={pageSize}
+          totalItems={filteredProducts.length}
+          onPageChange={setCurrentPage}
+          onPageSizeChange={setPageSize}
+          itemLabel="archived products"
+        />
       </div>
 
       {/* Edit Product Modal */}

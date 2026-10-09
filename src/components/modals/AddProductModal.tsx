@@ -251,6 +251,18 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
     e.preventDefault();
     if (!formData.name.trim()) return;
 
+    // Basic financial-sanity guard: negative prices or stock are almost always
+    // data-entry errors and corrupt later margin/valuation math. Keep it
+    // lightweight (warn, don't block wholesale edits) but stop obvious mistakes.
+    const cost = Number(formData.costPrice) || 0;
+    const retail = Number(formData.retailPrice) || 0;
+    const wholesale = Number(formData.wholesalePrice) || 0;
+    const stock = Number(formData.currentStock);
+    if (cost < 0 || retail < 0 || wholesale < 0 || (!Number.isNaN(stock) && stock < 0)) {
+      notify('Prices and stock cannot be negative. Please correct the values before saving.', 'Invalid values', 'warning');
+      return;
+    }
+
     const selectedSupplier = suppliers.find((s) => s.id === formData.supplierId);
     const supplierName = selectedSupplier ? selectedSupplier.name : formData.supplierName;
 
@@ -877,7 +889,7 @@ export const AddProductModal: React.FC<AddProductModalProps> = ({
           {/* Modal Footer Actions */}
           <div className="flex items-center justify-between pt-4 border-t border-slate-100 dark:border-slate-800">
             <span className="text-[11px] text-slate-400">
-              * Required fields. All changes save directly to Firestore repository.
+              * Required fields. Changes save to your product catalog and sync across devices.
             </span>
             <div className="flex items-center gap-3">
               <button

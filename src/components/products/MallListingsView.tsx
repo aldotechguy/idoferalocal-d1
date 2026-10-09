@@ -13,9 +13,25 @@ const toKobo = (naira: string): number | null => {
   return Number.isFinite(value) && value > 0 ? Math.round(value * 100) : null;
 };
 const fromKobo = (kobo: number | null) => (kobo == null ? '' : String(kobo / 100));
-/** ISO -> the local `datetime-local` value the browser expects. */
-const toLocalInput = (iso: string | null) => (iso ? new Date(iso).toISOString().slice(0, 16) : '');
-const fromLocalInput = (value: string) => (value ? new Date(value).toISOString() : null);
+/**
+ * ISO -> the LOCAL `datetime-local` value the browser expects. `toISOString()`
+ * renders UTC, so a Naija (UTC+1) manager editing a promo window would see and
+ * re-save an off-by-one-hour start/end. Build the input value from the local
+ * calendar components instead (mirrors `localIsoDate` used across the staff app).
+ */
+const toLocalInput = (iso: string | null): string => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+/** Local `datetime-local` -> ISO (interprets the string as local time). */
+const fromLocalInput = (value: string): string | null => {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+};
 
 type Draft = {
   mallPrice: string; mallDescription: string;
@@ -33,15 +49,18 @@ const draftFrom = (listing: StaffMallListing): Draft => ({
   promoEnd: toLocalInput(listing.promoEnd),
 });
 
-const payloadFrom = (draft: Draft) => ({
-  mallPriceKobo: toKobo(draft.mallPrice),
-  mallDescription: draft.mallDescription,
-  featured: draft.featured,
-  displayOrder: draft.displayOrder.trim() === '' ? null : Number(draft.displayOrder),
-  promoPriceKobo: toKobo(draft.promoPrice),
-  promoStart: fromLocalInput(draft.promoStart),
-  promoEnd: fromLocalInput(draft.promoEnd),
-});
+const payloadFrom = (draft: Draft) => {
+  const displayOrderRaw = Number(draft.displayOrder);
+  return {
+    mallPriceKobo: toKobo(draft.mallPrice),
+    mallDescription: draft.mallDescription,
+    featured: draft.featured,
+    displayOrder: draft.displayOrder.trim() === '' || !Number.isSafeInteger(displayOrderRaw) ? null : displayOrderRaw,
+    promoPriceKobo: toKobo(draft.promoPrice),
+    promoStart: fromLocalInput(draft.promoStart),
+    promoEnd: fromLocalInput(draft.promoEnd),
+  };
+};
 
 const VIEWS = [
   { value: 'all', label: 'All products' },
@@ -58,6 +77,7 @@ export const MallListingsView: React.FC = () => {
   const [counts, setCounts] = React.useState({ active: 0, hidden: 0 });
   const [view, setView] = React.useState('all');
   const [query, setQuery] = React.useState('');
+  const [debouncedQuery, setDebouncedQuery] = React.useState('');
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState('');
   const [selected, setSelected] = React.useState<StaffMallListing | null>(null);
@@ -71,7 +91,7 @@ export const MallListingsView: React.FC = () => {
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
-      const data = await staffMallListingClient.list({ view, q: query.trim(), limit: 200 });
+      const data = await staffMallListingClient.list({ view, q: debouncedQuery.trim(), limit: 200 });
       setListings(data.listings);
       setCounts(data.counts);
       setPosPromosEnabled(data.posPromosEnabled === true);
@@ -79,7 +99,13 @@ export const MallListingsView: React.FC = () => {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally { setLoading(false); }
-  }, [query, view]);
+  }, [debouncedQuery, view]);
+
+  // Debounce the search input so a list fetch doesn't fire on every keystroke.
+  React.useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [query]);
 
   React.useEffect(() => { load(); }, [load]);
 
@@ -103,6 +129,16 @@ export const MallListingsView: React.FC = () => {
 
   const save = async () => {
     if (!selected || !draft) return;
+    // Client-side guard for the merchandising-only fields the server also checks:
+    // a non-integer display order was silently collapsed to null (typed 'abc' ->
+    // NaN -> JSON null). Surface it as a field error instead of silently clearing.
+    if (draft.displayOrder.trim() !== '') {
+      const candidate = Number(draft.displayOrder);
+      if (!Number.isSafeInteger(candidate)) {
+        setFieldErrors({ displayOrder: 'Display order must be a whole number.' });
+        return;
+      }
+    }
     setBusy(true);
     setFieldErrors({});
     try {

@@ -165,7 +165,7 @@ interface AppContextType {
   heldOrders: { id: string; name: string; items: SaleItem[]; customerId?: string; date: string }[];
 
   // Product actions
-  addProduct: (p: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>) => Product;
+  addProduct: (p: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>) => Product | null;
   updateProduct: (id: string, p: Partial<Product>, reason?: string) => void;
   deleteProduct: (id: string) => void;
   archiveProduct: (id: string) => void;
@@ -1073,7 +1073,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Product CRUD
   const addProduct = (p: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>) => {
-    const id = 'prod-' + Date.now();
+    // Reject a brand-new SKU that already exists — the storefront, the till and
+    // the dedupe key all treat SKU as the identity; letting a duplicate in at
+    // source is what forced the post-hoc "deduplicate" banner to exist.
+    const skuKey = p.sku ? String(p.sku).trim().toUpperCase() : '';
+    if (skuKey && products.some((x) => x.sku && String(x.sku).trim().toUpperCase() === skuKey)) {
+      showToast({ title: 'Duplicate SKU', message: `SKU "${p.sku}" already exists. Choose a unique SKU.`, type: 'error' });
+      return null;
+    }
+    // `'prod-' + Date.now()` collides when two products are created in the same
+    // millisecond (batch import / fast double-submit), silently overwriting one
+    // record in D1/IndexedDB. Use the same unique generator as sales/customers.
+    const id = generateUniqueId('prod');
     const now = new Date().toISOString();
     const newProd: Product = {
       ...p,
@@ -1129,7 +1140,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const archiveProduct = (id: string) => {
     const target = products.find((p) => p.id === id);
-    updateProduct(id, { status: 'Archived' }, 'Archived product from active catalog.');
+    // Archiving must also unlist the product from the storefront: `status` alone
+    // doesn't hide it unless the Mall read path filters archived, so clear the
+    // listing flag explicitly to guarantee it stops being browsable/purchasable.
+    updateProduct(id, { status: 'Archived', isMallListed: false }, 'Archived product from active catalog.');
     showToast({ title: 'Product Archived', message: target ? `"${target.name}" moved to archive repository.` : 'Product archived.', type: 'warning' });
   };
 
@@ -1143,6 +1157,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const deduplicateProductsBySku = (): number => {
     const skuMap = new Map<string, Product>();
     const duplicatesToRemove: string[] = [];
+    // Survivors that need their stock/price reconciled back before we commit.
+    const mergedSurvivors = new Map<string, Product>();
+
+    const mergeInto = (keep: Product, remove: Product) => {
+      // Never let a duplicate's stock be silently dropped: fold it into the
+      // survivor (clamped ≥ 0 so a negative committed-escrow line can't double
+      // into the wrong direction). Prefer the record with the newer updatedAt
+      // for the price fields, since batch re-imports often carry updated costs.
+      const newerRemove =
+        (remove.updatedAt && (!keep.updatedAt || remove.updatedAt > keep.updatedAt));
+      return {
+        ...keep,
+        currentStock: Math.max(0, Number(keep.currentStock) || 0) + Math.max(0, Number(remove.currentStock) || 0),
+        costPrice: newerRemove && remove.costPrice != null ? remove.costPrice : keep.costPrice,
+        retailPrice: newerRemove && remove.retailPrice != null ? remove.retailPrice : keep.retailPrice,
+        wholesalePrice: newerRemove && remove.wholesalePrice != null ? remove.wholesalePrice : keep.wholesalePrice,
+        minimumStockLevel: Math.max(0, Number(keep.minimumStockLevel) || 0, newerRemove ? Number(remove.minimumStockLevel) || 0 : 0),
+      };
+    };
 
     products.forEach((prod) => {
       const skuKey = prod.sku ? prod.sku.trim().toUpperCase() : '';
@@ -1156,8 +1189,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (existing.id.startsWith('prod-imp-') && !prod.id.startsWith('prod-imp-')) {
           keep = prod;
           remove = existing;
-          skuMap.set(skuKey, keep);
         }
+        // Fold the dropped row's stock/prices into the survivor (best-effort).
+        const merged = mergeInto(keep, remove);
+        skuMap.set(skuKey, merged);
+        mergedSurvivors.set(merged.id, merged);
         duplicatesToRemove.push(remove.id);
       } else {
         skuMap.set(skuKey, prod);
@@ -1174,7 +1210,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       removeDocument('products', id);
     });
 
-    setProducts((prev) => prev.filter((p) => !duplicatesToRemove.includes(p.id)));
+    setProducts((prev) =>
+      prev
+        .filter((p) => !duplicatesToRemove.includes(p.id))
+        .map((p) => mergedSurvivors.get(p.id) || p)
+    );
+
+    // Persist reconciled survivors so their merged stock/price reaches D1. The
+    // pending-writes ref is flushed (saveDocument) once per commit by the
+    // effect above — same path updateProduct uses.
+    mergedSurvivors.forEach((survivor, id) => {
+      pendingProductWritesRef.current.set(id, { ...survivor, updatedAt: new Date().toISOString() });
+    });
 
     logAudit('DEDUPLICATE_PRODUCTS', 'Product', undefined, 'User', `Cleaned up ${removedCount} duplicate product record(s) using SKU key.`);
     showToast({
@@ -1477,7 +1524,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updates.promotionalPrice = newPrice;
     }
 
-    updateProduct(productId, updates, `Price change: ${priceType} updated to $${newPrice}`);
+    updateProduct(productId, updates, `Price change: ${priceType} updated to ${settings.currencySymbol}${newPrice}`);
 
     const ph: PricingHistory = {
       id: generateUniqueId('ph'),
@@ -1493,7 +1540,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setPricingHistory((prev) => [ph, ...prev]);
     saveDocument('pricingHistory', ph);
-    logAudit('PRICE_CHANGE', 'Product', productId, performedBy, `Changed ${priceType} price for ${prod.name} from $${oldPrice} to $${newPrice}. Reason: ${reason}`);
+    logAudit('PRICE_CHANGE', 'Product', productId, performedBy, `Changed ${priceType} price for ${prod.name} from ${settings.currencySymbol}${oldPrice} to ${settings.currencySymbol}${newPrice}. Reason: ${reason}`);
     showToast({ title: 'Price Updated', message: `Updated ${priceType} price for "${prod.name}" to ${settings.currencySymbol}${newPrice}.`, type: 'info' });
   };
 
@@ -1509,8 +1556,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const prod = products.find((p) => p.id === productId);
     if (!prod) return;
 
-    const previousStock = prod.currentStock;
+    const previousStock = Math.max(0, prod.currentStock);
     const newStock = Math.max(0, previousStock + qtyChange);
+    // Record the DELTA actually applied (clamped), not the attempted change:
+    // a "Damaged 10" on a 3-unit product must log -3, so the movement history
+    // still sums to the real stock change and stays truthful in the audit trail.
+    const appliedQty = newStock - previousStock;
 
     updateProduct(productId, { currentStock: newStock }, `Stock movement: ${type} (${qtyChange >= 0 ? '+' : ''}${qtyChange})`);
 
@@ -1519,7 +1570,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       productId,
       productName: prod.name,
       type,
-      quantity: Math.abs(qtyChange),
+      quantity: Math.abs(appliedQty),
       previousStock,
       newStock,
       referenceNo: `REF-${Math.floor(Math.random() * 89999 + 10000)}`,
@@ -1531,8 +1582,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setStockMovements((prev) => [mv, ...prev]);
     saveDocument('stockMovements', mv);
 
-    // Check low stock trigger notification
-    if (newStock <= prod.minimumStockLevel) {
+    // Low-stock trigger: only alert on a genuine TRANSITION into low/out — not on
+    // every subsequent reduction of an already-low item (which flooded the feed
+    // with a new "Low Stock Alert" per sale/loss).
+    const wasAboveThreshold = previousStock > prod.minimumStockLevel;
+    if (wasAboveThreshold && newStock <= prod.minimumStockLevel) {
       const notif: NotificationItem = {
         id: generateUniqueId('notif-stock'),
         title: newStock === 0 ? 'Out of Stock Alert' : 'Low Stock Alert',
