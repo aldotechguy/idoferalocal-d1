@@ -656,8 +656,10 @@ async function checkout(exec: MallExecutor, sessionId: string, body: any, attemp
   if (existingOrder.length) {
     const existingItems = await exec.queryAll('SELECT product_id, product_name, qty, unit_price_kobo FROM mall_order_items WHERE mall_order_id = ? ORDER BY rowid', [orderId]);
     const existing = existingOrder[0];
-    const payment = (await exec.queryAll('SELECT status, provider, reference FROM payments WHERE order_id = ? LIMIT 1', [orderId]))[0];
-    const paid = payment?.status === 'paid' ? n(existing.total_kobo) : 0;
+    const payment = (await exec.queryAll('SELECT status, provider, reference, amount_kobo FROM payments WHERE order_id = ? LIMIT 1', [orderId]))[0];
+    // A part payment records a 'partial' status; the buyer still sees exactly how
+    // much cash was collected and what remains due.
+    const paid = ['paid', 'partial'].includes(s(payment?.status)) ? n(payment.amount_kobo) : 0;
     let existingDelivery: Record<string, any> = {};
     try { existingDelivery = existing.delivery_address_json ? JSON.parse(existing.delivery_address_json) : {}; } catch { /* malformed legacy data */ }
     return json({

@@ -43,11 +43,18 @@ function publicOrder(row: any, items: any[] = []) {
   let delivery: Record<string, unknown> = {};
   try { delivery = row.delivery_address_json ? JSON.parse(row.delivery_address_json) : {}; } catch { /* malformed legacy data */ }
   const payment = publicPayment(row);
+  // Amount actually collected vs. what is still owed. Before settlement the
+  // payment row is still 'pending' with amount 0, so the order reports the full
+  // total as due; after a part payment the remainder is the customer's debt.
+  const settled = ['paid', 'partial'].includes(payment.status);
+  const paidKobo = settled ? payment.amountKobo : 0;
+  const totalKobo = n(row.total_kobo);
   return {
     id: s(row.id), orderNo: s(row.order_no), customerId: s(row.customer_id) || undefined,
     customerName: s(row.customer_name), customerPhone: s(row.customer_phone), customerEmail: s(row.customer_email) || undefined, status: s(row.status, 'pending'),
     subtotalKobo: n(row.subtotal_kobo), deliveryFeeKobo: n(row.delivery_fee_kobo),
-    discountKobo: n(row.discount_kobo), totalKobo: n(row.total_kobo), linkedSaleId: s(row.linked_sale_id) || undefined,
+    discountKobo: n(row.discount_kobo), totalKobo, linkedSaleId: s(row.linked_sale_id) || undefined,
+    paidKobo, amountDueKobo: ['cancelled', 'refunded'].includes(s(row.status)) ? 0 : totalKobo - paidKobo,
     delivery, payment, createdAt: s(row.created_at), itemCount: n(row.item_count),
     items: items.map((item) => ({
       id: s(item.id), productId: s(item.product_id), name: s(item.product_name), sku: s(item.sku),
@@ -286,8 +293,15 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
   if (!['Cash', 'Card', 'Mobile Transfer', 'Bank Transfer'].includes(method)) fail(400, 'Unsupported payment method.');
   if (method === 'Bank Transfer' && !['Administrator', 'Store Manager', 'Accountant'].includes(actor.role)) fail(403, 'You do not have permission to verify bank transfers.');
   if (method === 'Bank Transfer' && (typeof body?.reference !== 'string' || !body.reference.trim() || body.reference.length>120)) fail(400,'A bank receipt/reference is required.');
-  const amountKobo = Math.round(n(body?.amountKobo, row.total_kobo));
-  if (!Number.isSafeInteger(body?.amountKobo) || amountKobo !== n(row.total_kobo)) fail(400, 'The payment amount must equal the order total in whole kobo.');
+  const totalKobo = n(row.total_kobo);
+  // Part payment (docs/mall-part-payment.md): the amount collected may be less
+  // than the total, in which case the shortfall is booked as customer debt.
+  // The bounds are strict: a safe integer, > 0 (0 is not a settlement), and
+  // never more than the order total (the Mall never takes more than its price).
+  const amountKobo = Math.round(n(body?.amountKobo, totalKobo));
+  if (!Number.isSafeInteger(body?.amountKobo) || amountKobo <= 0) fail(400, 'Enter the amount received in whole kobo.');
+  if (amountKobo > totalKobo) fail(400, 'The payment amount cannot exceed the order total.');
+  const dueKobo = totalKobo - amountKobo;
   const at = nowIso();
   // Deterministic identities make concurrent/retried settlement physically unable to create duplicate Sales.
   const saleId = `sale-${id}`;
@@ -295,6 +309,10 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
   const normalizedPhone = normalizeMallPhone(row.customer_phone);
   const customers = normalizedPhone ? await exec.queryAll(`SELECT * FROM customers WHERE ${normalizedPhoneSql('phone')} = ? ORDER BY created_at,id LIMIT 1`, [normalizedPhone]) : [];
   const customer = customers[0];
+  // Debt can only be booked against a recognised customer, so a part payment for
+  // an unrecognised phone is refused outright. A full payment (dueKobo === 0)
+  // still mints a customer row as before, since it creates no debt.
+  if (dueKobo > 0 && !customer) fail(400, 'A part payment requires a customer already on file for this phone number. Register the customer or collect the full amount.');
   const customerId = customer?.id || `cust-${id}`;
   // Buyer contact captured at checkout — normalized once so the new-customer
   // insert and the returning-buyer enrichment below share identical values.
@@ -304,9 +322,12 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
   const reference = s(body?.reference, row.payment_reference || `MALL-${row.order_no}`).slice(0, 120);
   const stmts: MallStmt[] = [];
   if (!customer) {
+    // Only reachable for a full payment (dueKobo === 0): a part payment with no
+    // matched customer was already refused above. LTV/loyalty are keyed to the
+    // amount actually collected.
     stmts.push({
-      sql: `INSERT INTO customers (id, name, phone, email, address, purchase_history_count, outstanding_balance_kobo, loyalty_points, lifetime_value_kobo, created_at) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?)`,
-      params: [customerId, row.customer_name, row.customer_phone, orderEmail, orderAddress, Math.floor(n(row.total_kobo) / 10_000), row.total_kobo, at],
+      sql: `INSERT INTO customers (id, name, phone, email, address, purchase_history_count, outstanding_balance_kobo, loyalty_points, lifetime_value_kobo, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+      params: [customerId, row.customer_name, row.customer_phone, orderEmail, orderAddress, dueKobo, Math.floor(amountKobo / 10_000), amountKobo, at],
     });
   }
   stmts.push({
@@ -317,25 +338,31 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
     // would fail the whole atomic batch.
     sql: `INSERT INTO sales (id, receipt_no, customer_id, customer_name, type, subtotal_kobo, discount_kobo, tax_kobo, delivery_fee_kobo, total_kobo, paid_kobo, payment_method, payment_breakdown_json, status, notes, created_by, order_taken_by, is_historical, expense_id, created_at, updated_at)
       VALUES (?, ?, ?, ?, 'Retail', ?, ?, 0, ?, ?, ?, ?, ?, 'Completed', ?, ?, 'Mall Storefront', 0, NULL, ?, ?)`,
-    params: [saleId, invoiceNo, customerId, row.customer_name, row.subtotal_kobo, row.discount_kobo, row.delivery_fee_kobo, row.total_kobo, row.total_kobo, method, paymentBreakdown ? JSON.stringify(paymentBreakdown) : null, `Converted from Mall order ${row.order_no}.`, actor.displayName, at, at],
+    // paid_kobo records the cash actually collected — the ledger derives the
+    // customer's debt from (total_kobo - paid_kobo).
+    params: [saleId, invoiceNo, customerId, row.customer_name, row.subtotal_kobo, row.discount_kobo, row.delivery_fee_kobo, row.total_kobo, amountKobo, method, paymentBreakdown ? JSON.stringify(paymentBreakdown) : null, `Converted from Mall order ${row.order_no}.`, actor.displayName, at, at],
   });
   items.forEach((item, index) => stmts.push({
     sql: `INSERT INTO sale_items (id, sale_id, product_id, product_name, sku, qty, unit_price_kobo, cost_price_kobo, total_kobo, is_wholesale, is_clearance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)`,
     params: [`${saleId}-item-${index}`, saleId, item.product_id, item.product_name, item.sku, item.qty, item.unit_price_kobo, item.cost_price_kobo, item.total_kobo],
   }));
-  stmts.push({ sql: `UPDATE payments SET sale_id = ?, provider = ?, reference = ?, amount_kobo = ?, status = 'paid', raw_json = ? WHERE order_id = ?`, params: [saleId, method, reference, row.total_kobo, JSON.stringify({ orderNo: row.order_no, verifiedBy: actor.displayName, verifiedAt: at, paymentBreakdown }), id] });
+  stmts.push({ sql: `UPDATE payments SET sale_id = ?, provider = ?, reference = ?, amount_kobo = ?, status = ?, raw_json = ? WHERE order_id = ?`, params: [saleId, method, reference, amountKobo, dueKobo > 0 ? 'partial' : 'paid', JSON.stringify({ orderNo: row.order_no, verifiedBy: actor.displayName, verifiedAt: at, paymentBreakdown, amountDueKobo: dueKobo }), id] });
   stmts.push({ sql: `UPDATE mall_orders SET linked_sale_id = ?, customer_id = ?, status = 'processing', payment_ref = ? WHERE id = ? AND linked_sale_id IS NULL`, params: [saleId, customerId, reference, id] });
-  stmts.push({ sql: `INSERT INTO money_movements (id, date, type, subtype, source_account, dest_account, amount_kobo, notes, ref_no, ref_id, performed_by, created_at) VALUES (?, ?, 'Sale Inflow', ?, NULL, ?, ?, ?, ?, ?, ?, ?)`, params: [`mm-${saleId}`, at, method, paymentDestination(method), row.total_kobo, `Mall order payment for ${row.order_no}`, invoiceNo, saleId, actor.displayName, at] });
+  // Only cash actually received hits the treasury as an inflow; the shortfall is
+  // a receivable on the customer, not revenue.
+  stmts.push({ sql: `INSERT INTO money_movements (id, date, type, subtype, source_account, dest_account, amount_kobo, notes, ref_no, ref_id, performed_by, created_at) VALUES (?, ?, 'Sale Inflow', ?, NULL, ?, ?, ?, ?, ?, ?, ?)`, params: [`mm-${saleId}`, at, method, paymentDestination(method), amountKobo, `${dueKobo > 0 ? `Mall order part payment (${dueKobo / 100} due) for ` : 'Mall order payment for '}${row.order_no}`, invoiceNo, saleId, actor.displayName, at] });
   if (customer) {
     // Returning buyer: bump the counters and fill profile fields that are blank
     // in the customer record — never overwrite details staff already maintain.
+    // The unpaid portion (dueKobo) is added to the customer's outstanding
+    // balance as debt; LTV/loyalty are keyed to the amount actually collected.
     const fills: [string, string][] = [];
     if (!s(customer.name).trim() && s(row.customer_name).trim()) fills.push(['name = ?', row.customer_name]);
     if (!s(customer.address).trim() && orderAddress) fills.push(['address = ?', orderAddress]);
     if (!s(customer.email).trim() && orderEmail) fills.push(['email = ?', orderEmail]);
     stmts.push({
-      sql: `UPDATE customers SET purchase_history_count = purchase_history_count + 1, lifetime_value_kobo = lifetime_value_kobo + ?, loyalty_points = loyalty_points + ?${fills.map(([set]) => `, ${set}`).join('')} WHERE id = ?`,
-      params: [row.total_kobo, Math.floor(n(row.total_kobo) / 10_000), ...fills.map(([, value]) => value), customer.id],
+      sql: `UPDATE customers SET purchase_history_count = purchase_history_count + 1, outstanding_balance_kobo = outstanding_balance_kobo + ?, lifetime_value_kobo = lifetime_value_kobo + ?, loyalty_points = loyalty_points + ?${fills.map(([set]) => `, ${set}`).join('')} WHERE id = ?`,
+      params: [dueKobo, amountKobo, Math.floor(amountKobo / 10_000), ...fills.map(([, value]) => value), customer.id],
     });
   }
   stmts.push({ sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'CONVERT_MALL_ORDER_SALE', 'MallOrder', ?, ?, ?)`, params: [`audit-${uuid()}`, actor.id, id, `${actor.displayName} converted ${row.order_no} to ${invoiceNo} via ${method}.`, at] });
@@ -439,7 +466,7 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
   if (!['Administrator', 'Accountant'].includes(actor.role)) fail(403, 'Administrator or Accountant access is required to refund an order.');
   const row = await getOrderRow(exec, id);
   if (s(row.status) === 'refunded') return detail(exec, id);
-  if (!s(row.linked_sale_id) || s(row.payment_status) !== 'paid') fail(409, 'Only paid Mall orders can be refunded.');
+  if (!s(row.linked_sale_id) || !['paid', 'partial'].includes(s(row.payment_status))) fail(409, 'Only paid or part-paid Mall orders can be refunded.');
   const items = await getOrderItems(exec, id);
   if (typeof body?.returnStock !== 'boolean') fail(400, 'Explicitly choose whether goods were returned to stock.');
   const returnStock = body.returnStock;
@@ -472,12 +499,17 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
     condition: returnStock ? 'Restock' : 'Damaged',
     subtotal: n(item.total_kobo) / 100,
   }));
+  // Amount actually collected, and the debt it left on the customer. A refund
+  // returns the cash received and unwinds the receivable — never more than was
+  // paid (there is no cash to give back for money the buyer never handed over).
+  const paidKobo = n(row.payment_amount_kobo);
+  const debtKobo = Math.max(0, n(row.total_kobo) - paidKobo);
   const refundRecord = {
     id: `ref-mall-${id}`, refundNo: `REF-${s(row.order_no)}-1`, refundDate: at,
     performedBy: actor.displayName, reason, items: refundedItems,
     itemsSubtotal: refundedItems.reduce((sum, it) => sum + it.subtotal, 0),
     discountDeducted: 0, taxDeducted: 0, deliveryFeeRefunded: 0,
-    netRefundAmount: n(row.total_kobo) / 100,
+    netRefundAmount: paidKobo / 100,
     // Settled back through the business account rather than a cash drawer.
     settlementMethod: 'Biz Account',
     notes: `Refunded from Mall order ${s(row.order_no)}.`,
@@ -488,16 +520,19 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
     // edit does. Without it a refunded sale keeps its pre-refund stamp and the
     // two changes are indistinguishable to the sync merge.
     sql: `UPDATE sales SET status = 'Refunded', total_refunded_kobo = ?, refunds_json = ?, notes = COALESCE(notes, '') || ?, updated_at = ? WHERE id = ?`,
-    params: [n(row.total_kobo), JSON.stringify([refundRecord]), ` | Refunded from Mall: ${reason}`, at, row.linked_sale_id],
+    params: [paidKobo, JSON.stringify([refundRecord]), ` | Refunded from Mall: ${reason}`, at, row.linked_sale_id],
   });
   // Mark every line fully returned so a later POS refund sees zero remaining qty.
   for (const item of items) {
     stmts.push({ sql: `UPDATE sale_items SET returned_qty = qty WHERE sale_id = ? AND product_id = ?`, params: [row.linked_sale_id, item.product_id] });
   }
-  stmts.push({ sql: `INSERT INTO money_movements (id, date, type, subtype, source_account, dest_account, amount_kobo, notes, ref_no, ref_id, performed_by, created_at) VALUES (?, ?, 'Sale Refund', ?, ?, NULL, ?, ?, ?, ?, ?, ?)`, params: [`mm-refund-${row.linked_sale_id}`, at, `Mall ${s(row.payment_provider) === 'Cash' ? 'Cash' : 'Biz Account'} Refund (Full)`, paymentDestination(s(row.payment_provider)), row.total_kobo, reason, row.order_no, row.linked_sale_id, actor.displayName, at] });
-  // Also claw back any store credit this sale created, mirroring refundSale():
-  // otherwise a refunded order leaves spendable credit behind on the customer.
-  if (row.customer_id) stmts.push({ sql: `UPDATE customers SET purchase_history_count = MAX(0, purchase_history_count - 1), lifetime_value_kobo = MAX(0, lifetime_value_kobo - ?), loyalty_points = MAX(0, loyalty_points - ?), overage_balance_kobo = MAX(0, overage_balance_kobo - COALESCE((SELECT overage_created_kobo FROM sales WHERE id = ?), 0)) WHERE id = ?`, params: [row.total_kobo, Math.floor(n(row.total_kobo) / 10_000), row.linked_sale_id, row.customer_id] });
+  stmts.push({ sql: `INSERT INTO money_movements (id, date, type, subtype, source_account, dest_account, amount_kobo, notes, ref_no, ref_id, performed_by, created_at) VALUES (?, ?, 'Sale Refund', ?, ?, NULL, ?, ?, ?, ?, ?, ?)`, params: [`mm-refund-${row.linked_sale_id}`, at, `Mall ${s(row.payment_provider) === 'Cash' ? 'Cash' : 'Biz Account'} Refund (Full)`, paymentDestination(s(row.payment_provider)), paidKobo, reason, row.order_no, row.linked_sale_id, actor.displayName, at] });
+  // Unwind the customer's metrics. LTV/loyalty were accrued on the cash actually
+  // collected, so they unwind by paidKobo. The debt a part payment recorded
+  // (total - paid) is cleared too, or a returned part-paid order would leave the
+  // customer owing money for goods they gave back. Also claw back any store
+  // credit this sale created, mirroring refundSale().
+  if (row.customer_id) stmts.push({ sql: `UPDATE customers SET purchase_history_count = MAX(0, purchase_history_count - 1), outstanding_balance_kobo = MAX(0, outstanding_balance_kobo - ?), lifetime_value_kobo = MAX(0, lifetime_value_kobo - ?), loyalty_points = MAX(0, loyalty_points - ?), overage_balance_kobo = MAX(0, overage_balance_kobo - COALESCE((SELECT overage_created_kobo FROM sales WHERE id = ?), 0)) WHERE id = ?`, params: [debtKobo, paidKobo, Math.floor(paidKobo / 10_000), row.linked_sale_id, row.customer_id] });
   if (returnStock) for (const item of items) {
     stmts.push({ sql: 'UPDATE products SET stock_qty = stock_qty + ?, updated_at = ? WHERE id = ?', params: [item.qty, at, item.product_id] });
     stmts.push({

@@ -6,6 +6,8 @@ export type StaffMallOrderItem = {
 export type StaffMallOrder = {
   id: string; orderNo: string; customerId?: string; customerName: string; customerPhone: string; customerEmail?: string;
   status: string; subtotalKobo: number; deliveryFeeKobo: number; discountKobo: number; totalKobo: number;
+  /** Cash actually collected, and what remains owed (booked as customer debt on a part payment). */
+  paidKobo?: number; amountDueKobo?: number;
   linkedSaleId?: string; createdAt: string; itemCount: number; items: StaffMallOrderItem[];
   timeline?: {action:string;actorId:string;details:string;status:string;createdAt:string}[];
   dispatch?: {courier:string;status:string;updatedAt:string};
