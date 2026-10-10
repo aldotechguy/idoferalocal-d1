@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Settings,
   Shield,
@@ -57,7 +57,7 @@ import { useToast } from '../../context/ToastContext';
 import { UserModal } from '../modals/UserModal';
 import { ConfirmModal } from '../common/ConfirmModal';
 import { ResetPasswordModal } from '../modals/ResetPasswordModal';
-import { UserProfile, UserRole } from '../../types';
+import { StoreSettings, UserProfile, UserRole } from '../../types';
 import {
   getStoreRecordCounts,
   getStorageEstimate,
@@ -76,9 +76,6 @@ import {
   clearD1PendingSync,
   getD1PendingDeletions,
   groupPendingD1KeysByStore,
-  getD1Config,
-  saveD1Config,
-  type D1ConfigInfo,
 } from '../../services/d1StorageService';
 
 export const SettingsView: React.FC = () => {
@@ -88,21 +85,10 @@ export const SettingsView: React.FC = () => {
   const { isInstallable, isInstalled, isOnline, swRegistered, triggerInstall } = usePWAInstall();
   const {
     isSyncing: isCloudSyncing,
-    syncProgress: cloudSyncProgress,
-    stats: cloudSyncStats,
-    conflicts,
-    setIsConflictModalOpen,
-    isSyncButtonActive: isCloudSyncButtonActive,
-    isLiveSyncActive,
-    isQuotaExceeded,
-    syncMode,
-    toggleSyncMode,
     d1Health,
     pingD1Health,
     triggerSync: triggerCloudSync,
     triggerSyncAll,
-    triggerD1Pull,
-    pullCentralRecords,
     triggerDriveSync,
     restoreDriveBackup,
     prepareDriveRestore,
@@ -125,9 +111,25 @@ export const SettingsView: React.FC = () => {
     isAdmin ? 'users' : 'security'
   );
   const [formData, setFormData] = useState({ ...settings });
+  /** Marks the form dirty so a background settings update cannot wipe unsaved edits. */
+  const updateFormField = (patch: Partial<StoreSettings>) => {
+    isSettingsDirtyRef.current = true;
+    setFormData((prev) => ({ ...prev, ...patch }));
+  };
   const [savedToast, setSavedToast] = useState(false);
+  // The form resynced from `settings` on every change of that object's
+  // identity — including background D1 syncs and cross-tab updates — silently
+  // discarding unsaved edits. Resync only while the form is untouched.
+  const isSettingsDirtyRef = useRef(false);
+  const settingsSignatureRef = useRef('');
 
   useEffect(() => {
+    const signature = JSON.stringify(settings);
+    // A response to this form's own save (same values) must not clear the dirty
+    // flag before the user's next edit; it simply matches.
+    if (signature === settingsSignatureRef.current) return;
+    settingsSignatureRef.current = signature;
+    if (isSettingsDirtyRef.current) return;
     setFormData({ ...settings });
   }, [settings]);
 
@@ -153,141 +155,35 @@ export const SettingsView: React.FC = () => {
 
   const [showDesktopInstallModal, setShowDesktopInstallModal] = useState(false);
 
-  // Cloudflare D1 token & connection configuration state
-  const [d1Config, setD1Config] = useState<D1ConfigInfo | null>(null);
-  const [d1TokenInput, setD1TokenInput] = useState('');
-  const [d1AccountIdInput, setD1AccountIdInput] = useState('');
-  const [d1DbIdInput, setD1DbIdInput] = useState('');
-  const [showD1Token, setShowD1Token] = useState(false);
-  const [isSavingD1Token, setIsSavingD1Token] = useState(false);
-  const [isTestingD1Token, setIsTestingD1Token] = useState(false);
-  const [d1ConfigFeedback, setD1ConfigFeedback] = useState<{ type: 'success' | 'error' | 'warning'; message: string } | null>(null);
-
-  const loadD1Config = async () => {
-    try {
-      const cfg = await getD1Config();
-      setD1Config(cfg);
-      if (!d1AccountIdInput && cfg.accountId) setD1AccountIdInput(cfg.accountId);
-      if (!d1DbIdInput && cfg.databaseId) setD1DbIdInput(cfg.databaseId);
-    } catch (e) {
-      console.warn('Failed to load D1 config:', e);
-    }
-  };
-
-  useEffect(() => {
-    loadD1Config();
-  }, []);
-
-  const handleTestD1Token = async () => {
-    setIsTestingD1Token(true);
-    setD1ConfigFeedback(null);
-    try {
-      const res = await saveD1Config({
-        apiToken: d1TokenInput.trim() || undefined,
-        accountId: d1AccountIdInput.trim() || undefined,
-        databaseId: d1DbIdInput.trim() || undefined,
-        testOnly: true,
-      });
-      if (res.ok) {
-        setD1ConfigFeedback({
-          type: 'success',
-          message: 'Cloudflare API token verified successfully! Cloudflare edge accepts credentials.',
-        });
-      } else {
-        setD1ConfigFeedback({
-          type: 'error',
-          message: res.error || 'Token test failed: Cloudflare rejected authentication (HTTP 401/403).',
-        });
-      }
-    } catch (err: any) {
-      setD1ConfigFeedback({
-        type: 'error',
-        message: err.message || 'Verification failed.',
-      });
-    } finally {
-      setIsTestingD1Token(false);
-    }
-  };
-
-  const handleSaveD1Token = async () => {
-    setIsSavingD1Token(true);
-    setD1ConfigFeedback(null);
-    try {
-      const res = await saveD1Config({
-        apiToken: d1TokenInput.trim() || undefined,
-        accountId: d1AccountIdInput.trim() || undefined,
-        databaseId: d1DbIdInput.trim() || undefined,
-        testOnly: false,
-      });
-      if (res.ok) {
-        setD1ConfigFeedback({
-          type: res.warning ? 'warning' : 'success',
-          message: res.message || 'Cloudflare D1 credentials updated successfully!',
-        });
-        setD1TokenInput('');
-        await loadD1Config();
-        await pingD1Health().catch(() => null);
-        showToast({
-          title: res.verified ? 'D1 Edge Connected' : 'Token Saved',
-          message: res.message || 'Cloudflare settings updated.',
-          type: res.verified ? 'success' : 'warning',
-        });
-      } else {
-        setD1ConfigFeedback({
-          type: 'error',
-          message: res.error || 'Failed to save Cloudflare configuration.',
-        });
-      }
-    } catch (err: any) {
-      setD1ConfigFeedback({
-        type: 'error',
-        message: err.message || 'Error updating Cloudflare configuration.',
-      });
-    } finally {
-      setIsSavingD1Token(false);
-    }
-  };
-
-  const handleClearD1Token = async () => {
-    setIsSavingD1Token(true);
-    try {
-      const res = await saveD1Config({ apiToken: '' });
-      setD1TokenInput('');
-      await loadD1Config();
-      await pingD1Health().catch(() => null);
-      setD1ConfigFeedback({
-        type: 'success',
-        message: 'Cloudflare API token cleared. Local SQLite will serve all records.',
-      });
-      showToast({
-        title: 'Token Cleared',
-        message: 'Reverting to purely local SQLite store.',
-        type: 'info',
-      });
-    } catch (err: any) {
-      setD1ConfigFeedback({
-        type: 'error',
-        message: err.message || 'Failed to clear token.',
-      });
-    } finally {
-      setIsSavingD1Token(false);
-    }
-  };
-
+  // Refresh local record counts and probe the D1 health endpoint.
+  // Monotonic request id: a slow earlier refresh must not overwrite a newer one
+  // (and must not set state after the user navigated away).
+  const dbCountsRequestRef = useRef(0);
   const refreshDBCounts = async (isManualClick: boolean = false) => {
+    const requestId = ++dbCountsRequestRef.current;
     setIsRefreshingCounts(true);
     try {
       const counts = await getStoreRecordCounts();
+      if (requestId !== dbCountsRequestRef.current) return;
       setDbCounts(counts);
       const est = await getStorageEstimate();
+      if (requestId !== dbCountsRequestRef.current) return;
       setStorageEstimate(est);
 
       if (isManualClick) {
         const total = Object.values(counts).reduce((acc: number, curr: number) => acc + curr, 0);
-        const health = await pingD1Health().catch(() => null);
+        const health = await pingD1Health({detail: true}).catch(() => null);
+        // Report the live relational tables the app actually reads. The
+        // document mirror count (totalDocuments) no longer tracks PATCHes and
+        // would drift until the next snapshot PUT, so it is not shown.
+        const relational = health?.relational ?? d1Health?.relational;
+        const d1Records = relational && relational.error === undefined
+          ? (['products', 'sales', 'customers', 'suppliers', 'saleItems'] as const)
+              .reduce((sum, key) => sum + Number(relational[key] || 0), 0)
+          : undefined;
         showToast({
           title: 'Database Record Counts Refreshed',
-          message: `IndexedDB: ${total} local records. Cloudflare D1: ${health?.totalDocuments ?? d1Health?.totalDocuments ?? 'Connected'} remote records.`,
+          message: `IndexedDB: ${total} local records. Cloudflare D1: ${d1Records ?? 'Connected'} live relational records.`,
           type: 'success',
         });
       }
@@ -300,7 +196,7 @@ export const SettingsView: React.FC = () => {
         });
       }
     } finally {
-      setIsRefreshingCounts(false);
+      if (requestId === dbCountsRequestRef.current) setIsRefreshingCounts(false);
     }
   };
 
@@ -457,6 +353,8 @@ export const SettingsView: React.FC = () => {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    isSettingsDirtyRef.current = false;
+    settingsSignatureRef.current = JSON.stringify(formData);
     updateSettings(formData);
     setSavedToast(true);
     setTimeout(() => setSavedToast(false), 3000);
@@ -1112,7 +1010,7 @@ export const SettingsView: React.FC = () => {
                   <input
                     type="text"
                     value={formData.storeName}
-                    onChange={(e) => setFormData({ ...formData, storeName: e.target.value })}
+                    onChange={(e) => updateFormField({ storeName: e.target.value })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl"
                   />
                 </div>
@@ -1122,7 +1020,7 @@ export const SettingsView: React.FC = () => {
                   <input
                     type="text"
                     value={formData.phone}
-                    onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
+                    onChange={(e) => updateFormField({ phone: e.target.value })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl"
                   />
                 </div>
@@ -1132,7 +1030,7 @@ export const SettingsView: React.FC = () => {
                   <input
                     type="email"
                     value={formData.email}
-                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                    onChange={(e) => updateFormField({ email: e.target.value })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl"
                   />
                 </div>
@@ -1142,7 +1040,7 @@ export const SettingsView: React.FC = () => {
                   <input
                     type="text"
                     value={formData.address}
-                    onChange={(e) => setFormData({ ...formData, address: e.target.value })}
+                    onChange={(e) => updateFormField({ address: e.target.value })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl"
                   />
                 </div>
@@ -1153,7 +1051,7 @@ export const SettingsView: React.FC = () => {
                     type="number"
                     step="0.1"
                     value={formData.taxRatePct}
-                    onChange={(e) => setFormData({ ...formData, taxRatePct: parseFloat(e.target.value) || 0 })}
+                    onChange={(e) => updateFormField({ taxRatePct: parseFloat(e.target.value) || 0 })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl font-bold"
                   />
                 </div>
@@ -1163,7 +1061,7 @@ export const SettingsView: React.FC = () => {
                   <input
                     type="text"
                     value={formData.currencySymbol}
-                    onChange={(e) => setFormData({ ...formData, currencySymbol: e.target.value })}
+                    onChange={(e) => updateFormField({ currencySymbol: e.target.value })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl font-bold"
                   />
                 </div>
@@ -1173,7 +1071,7 @@ export const SettingsView: React.FC = () => {
                   <input
                     type="number"
                     value={formData.defaultMinWholesaleQty}
-                    onChange={(e) => setFormData({ ...formData, defaultMinWholesaleQty: parseInt(e.target.value) || 1 })}
+                    onChange={(e) => updateFormField({ defaultMinWholesaleQty: parseInt(e.target.value) || 1 })}
                     className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl font-bold"
                   />
                 </div>
@@ -1184,7 +1082,7 @@ export const SettingsView: React.FC = () => {
                 <input
                   type="text"
                   value={formData.receiptHeader}
-                  onChange={(e) => setFormData({ ...formData, receiptHeader: e.target.value })}
+                  onChange={(e) => updateFormField({ receiptHeader: e.target.value })}
                   className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl"
                 />
               </div>
@@ -1194,7 +1092,7 @@ export const SettingsView: React.FC = () => {
                 <input
                   type="text"
                   value={formData.receiptFooter}
-                  onChange={(e) => setFormData({ ...formData, receiptFooter: e.target.value })}
+                  onChange={(e) => updateFormField({ receiptFooter: e.target.value })}
                   className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl"
                 />
               </div>
@@ -1209,10 +1107,7 @@ export const SettingsView: React.FC = () => {
                 <select
                   value={formData.whatsAppSalesAttributionRule || 'converter'}
                   onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      whatsAppSalesAttributionRule: e.target.value as 'converter' | 'creator' | 'custom',
-                    })
+                    updateFormField({ whatsAppSalesAttributionRule: e.target.value as 'converter' | 'creator' | 'custom', })
                   }
                   className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-semibold dark:text-white"
                 >
@@ -1439,7 +1334,7 @@ export const SettingsView: React.FC = () => {
                           {new Date(log.createdAt).toLocaleDateString()}
                         </div>
                         <div className="text-[10px] text-slate-400 font-mono">
-                          {new Date(log.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                          {new Date(log.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true, second: '2-digit' })}
                         </div>
                       </td>
 
@@ -1485,7 +1380,7 @@ export const SettingsView: React.FC = () => {
               Showing <strong className="text-slate-900 dark:text-white font-bold">{filteredAuditLogs.length}</strong> of{' '}
               <strong className="text-slate-900 dark:text-white font-bold">{userAuditLogs.length}</strong> total user audit records
             </span>
-            <span>Local IndexedDB Encrypted Audit Storage</span>
+            <span>Local IndexedDB Audit Storage</span>
           </div>
         </div>
       )}
@@ -1520,10 +1415,10 @@ export const SettingsView: React.FC = () => {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 w-full lg:w-auto shrink-0">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 w-full lg:w-auto shrink-0">
               <button
                 type="button"
-                onClick={triggerCloudSync}
+                onClick={() => triggerCloudSync()}
                 disabled={isCloudSyncing}
                 className="h-10 px-4 py-2 bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 whitespace-nowrap shadow-xs"
                 title="Bidirectional sync: push pending local changes and pull latest data from Cloudflare D1"
@@ -1534,24 +1429,13 @@ export const SettingsView: React.FC = () => {
 
               <button
                 type="button"
-                onClick={triggerD1Pull}
-                disabled={isCloudSyncing}
-                className="h-10 px-4 py-2 bg-sky-500/10 hover:bg-sky-500/20 text-sky-700 dark:text-sky-300 border border-sky-500/30 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 whitespace-nowrap shadow-xs"
-                title="Directly pull and refresh all records from Cloudflare D1 (3e95a550-a091-490b-819d-f0acb7ea8dd8)"
-              >
-                <Download className="w-3.5 h-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
-                <span>Pull from D1</span>
-              </button>
-
-              <button
-                type="button"
                 onClick={triggerSyncAll}
                 disabled={isCloudSyncing}
                 className="h-10 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-emerald-600/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 whitespace-nowrap"
-                title="Push all records from Local Storage (IndexedDB) directly to Cloudflare D1 (3e95a550-a091-490b-819d-f0acb7ea8dd8)"
+                title="Push ALL local records to Cloudflare D1, overwriting cloud copies with the local versions (use only to repair a diverged cloud)"
               >
                 <Database className="w-3.5 h-3.5 shrink-0" />
-                <span>{isCloudSyncing ? 'Syncing All...' : 'Sync All'}</span>
+                <span>{isCloudSyncing ? 'Syncing All...' : 'Force Overwrite Cloud'}</span>
               </button>
 
               <button
@@ -1567,210 +1451,6 @@ export const SettingsView: React.FC = () => {
             </div>
           </div>
 
-          {/* Cloudflare D1 Edge Database & API Token Configuration Card */}
-          <div className="p-5 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-2xl space-y-4 shadow-sm">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-3">
-              <div className="flex items-center gap-2.5">
-                <div className="p-2 rounded-xl bg-amber-500/10 dark:bg-amber-500/20 text-amber-600 dark:text-amber-400">
-                  <Key className="w-5 h-5" />
-                </div>
-                <div>
-                  <h4 className="font-bold text-sm text-slate-900 dark:text-white flex items-center gap-2">
-                    <span>Cloudflare D1 Edge & API Token</span>
-                    {d1Health?.remoteSync?.status === 'synced' ? (
-                      <span className="px-2 py-0.5 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold rounded-full border border-emerald-500/20 flex items-center gap-1">
-                        <CheckCircle2 className="w-3 h-3 text-emerald-500" /> Edge Synced
-                      </span>
-                    ) : d1Health?.remoteSync?.status === 'auth_error' ? (
-                      <span className="px-2 py-0.5 bg-amber-500/15 text-amber-700 dark:text-amber-400 text-[10px] font-bold rounded-full border border-amber-500/30 flex items-center gap-1">
-                        <AlertCircle className="w-3 h-3 text-amber-500" /> Auth Error (HTTP 401)
-                      </span>
-                    ) : (
-                      <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 text-[10px] font-bold rounded-full border border-slate-200 dark:border-slate-700">
-                        Local Store Only
-                      </span>
-                    )}
-                  </h4>
-                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                    Local SQLite storage is saving all records in real-time. Enter your Cloudflare API token to sync to Cloudflare edge network.
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2 shrink-0">
-                <span className="font-mono text-[11px] px-2.5 py-1 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 rounded-lg">
-                  DB: {d1Config?.databaseId || '3e95a550-a091-490b-819d-f0acb7ea8dd8'}
-                </span>
-              </div>
-            </div>
-
-            {/* Input Box Form */}
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleSaveD1Token();
-              }}
-              autoComplete="off"
-              className="space-y-4"
-            >
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-                {/* Cloudflare API Token Input Box */}
-                <div className="md:col-span-12 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <label htmlFor="cloudflare_d1_api_token" className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
-                      <Key className="w-3.5 h-3.5 text-amber-500" />
-                      <span>Cloudflare API Token</span>
-                      {d1Config?.hasToken && (
-                        <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-mono font-normal">
-                          (Saved: {d1Config.maskedToken})
-                        </span>
-                      )}
-                    </label>
-                    <a
-                      href="https://dash.cloudflare.com/profile/api-tokens"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-[11px] text-amber-600 dark:text-amber-400 hover:underline inline-flex items-center gap-1 font-medium"
-                    >
-                      Get Token in Cloudflare Dashboard
-                    </a>
-                  </div>
-
-                  <div className="relative">
-                    <input
-                      id="cloudflare_d1_api_token"
-                      name="cloudflare_d1_api_token"
-                      type={showD1Token ? 'text' : 'password'}
-                      autoComplete="new-password"
-                      data-1p-ignore="true"
-                      data-lpignore="true"
-                      value={d1TokenInput}
-                      onChange={(e) => setD1TokenInput(e.target.value)}
-                      placeholder={d1Config?.hasToken ? `Current: ${d1Config.maskedToken} (enter new token to replace)` : 'Paste Cloudflare API token here...'}
-                      className="w-full pl-3.5 pr-20 py-2.5 bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500/50 font-mono transition-all"
-                    />
-                    <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => setShowD1Token(!showD1Token)}
-                        className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
-                        title={showD1Token ? 'Hide token' : 'Show token'}
-                      >
-                        {showD1Token ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                      {d1TokenInput && (
-                        <button
-                          type="button"
-                          onClick={() => setD1TokenInput('')}
-                          className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-                          title="Clear input"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Requires permission: <span className="font-semibold text-slate-700 dark:text-slate-300">Account &gt; D1 &gt; Edit</span> (or Cloudflare Workers &amp; D1 edit permissions).
-                  </p>
-                </div>
-
-                {/* Cloudflare Account ID & Database ID (Expandable / Advanced) */}
-                <div className="md:col-span-6 space-y-1">
-                  <label htmlFor="cloudflare_account_id" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                    Cloudflare Account ID
-                  </label>
-                  <input
-                    id="cloudflare_account_id"
-                    name="cloudflare_account_id"
-                    type="text"
-                    autoComplete="off"
-                    value={d1AccountIdInput}
-                    onChange={(e) => setD1AccountIdInput(e.target.value)}
-                    placeholder="e.g. 35b307711376954341708cbea8080dcc"
-                    className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono"
-                  />
-                </div>
-
-                <div className="md:col-span-6 space-y-1">
-                  <label htmlFor="cloudflare_database_id" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                    D1 Database ID
-                  </label>
-                  <input
-                    id="cloudflare_database_id"
-                    name="cloudflare_database_id"
-                    type="text"
-                    autoComplete="off"
-                    value={d1DbIdInput}
-                    onChange={(e) => setD1DbIdInput(e.target.value)}
-                    placeholder="e.g. 3e95a550-a091-490b-819d-f0acb7ea8dd8"
-                    className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono"
-                  />
-                </div>
-              </div>
-
-              {/* Feedback Alert */}
-              {d1ConfigFeedback && (
-                <div
-                  className={`p-3 rounded-xl text-xs flex items-start gap-2.5 ${
-                    d1ConfigFeedback.type === 'success'
-                      ? 'bg-emerald-500/10 text-emerald-800 dark:text-emerald-300 border border-emerald-500/30'
-                      : d1ConfigFeedback.type === 'warning'
-                      ? 'bg-amber-500/10 text-amber-800 dark:text-amber-300 border border-amber-500/30'
-                      : 'bg-rose-500/10 text-rose-800 dark:text-rose-300 border border-rose-500/30'
-                  }`}
-                >
-                  {d1ConfigFeedback.type === 'success' ? (
-                    <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                  ) : (
-                    <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                  )}
-                  <span className="leading-relaxed">{d1ConfigFeedback.message}</span>
-                </div>
-              )}
-
-              {/* Action Buttons */}
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100 dark:border-slate-800">
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleTestD1Token}
-                    disabled={isTestingD1Token || (!d1TokenInput.trim() && !d1Config?.hasToken)}
-                    className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-40"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${isTestingD1Token ? 'animate-spin text-amber-500' : ''}`} />
-                    <span>{isTestingD1Token ? 'Testing Token...' : 'Test Token Connection'}</span>
-                  </button>
-
-                  {d1Config?.hasToken && (
-                    <button
-                      type="button"
-                      onClick={handleClearD1Token}
-                      disabled={isSavingD1Token}
-                      className="px-3 py-2 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 text-xs font-semibold rounded-xl transition-all cursor-pointer disabled:opacity-40"
-                    >
-                      Clear Token
-                    </button>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="submit"
-                    disabled={isSavingD1Token || (!d1TokenInput.trim() && !d1AccountIdInput && !d1DbIdInput)}
-                    className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-sm shadow-amber-600/20"
-                  >
-                    {isSavingD1Token ? (
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Save className="w-3.5 h-3.5" />
-                    )}
-                    <span>{isSavingD1Token ? 'Saving & Verifying...' : 'Save & Apply Token'}</span>
-                  </button>
-                </div>
-              </div>
-            </form>
-          </div>
 
           {/* Google Drive Local-First Dedicated Folder Backup & Restore Card */}
           <div className="p-5 bg-gradient-to-br from-emerald-950 via-slate-900 to-slate-950 text-white border border-emerald-500/40 rounded-2xl space-y-4 shadow-lg">

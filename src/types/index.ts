@@ -42,6 +42,17 @@ export interface Product {
   unit: string; // e.g. 'pcs', 'kg', 'box', 'pack', 'set'
   expiryDate?: string;
   status: ProductStatus;
+  /** Phase 5 — mall listing. */
+  isMallListed?: boolean;
+  mallPrice?: number;
+  /** Mall-specific storefront copy; falls back to `description` when blank. */
+  mallDescription?: string;
+  /** Merchandising: promoted position, manual ordering, and optional promo window. */
+  mallFeatured?: boolean;
+  mallDisplayOrder?: number;
+  mallPromoPrice?: number;
+  mallPromoStart?: string;
+  mallPromoEnd?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -171,6 +182,13 @@ export interface Sale {
   orderTakenBy?: string;
   convertedBy?: string;
   createdAt: string;
+  /**
+   * Last local edit time. The sync merge ranks competing copies with
+   * `updatedAt || _lastSyncedAt || createdAt`, so without this a sale edit falls
+   * back to `createdAt` and is indistinguishable from an unedited record.
+   * Mirrors the field on PurchaseOrder / DeliveryOrder / WhatsAppPreOrder.
+   */
+  updatedAt?: string;
   isHistorical?: boolean;
   expenseId?: string;
 }
@@ -442,6 +460,7 @@ export type MoneyMovementType =
   | 'Balance Adjustment'
   | 'Sale Inflow'
   | 'Sale Refund'
+  | 'Refund Outflow'
   | 'Expense Outflow'
   | 'Supplier Payment'
   | 'Customer Debt Payment'
@@ -471,6 +490,8 @@ export interface RecordOwnerRepaymentParams {
   amount: number;
   notes?: string;
   referenceNo?: string;
+  /** Optional link to the originating Owner Loan drawing (its movement id). */
+  loanReferenceId?: string;
   performedBy?: string;
   date?: string;
 }
@@ -499,6 +520,8 @@ export interface MoneyMovement {
   notes?: string;
   referenceNo?: string;
   referenceId?: string; // e.g. saleId, expenseId, poId, customerId
+  /** For Owner Repayments: the movement id of the Owner Loan drawing settled. */
+  loanReferenceId?: string;
   performedBy: string;
   createdAt: string;
 }
@@ -510,3 +533,5 @@ export interface TreasuryBalances {
   totalOwnerDrawings: number;
   totalOwnerLoans: number;
 }
+
+export * from './mall';

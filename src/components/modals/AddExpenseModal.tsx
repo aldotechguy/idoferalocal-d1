@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { X, Receipt, Calendar, User, Tag } from 'lucide-react';
 import { NairaSign } from '../common/NairaSign';
 import { useApp } from '../../context/AppContext';
+import { ExpenseCategory } from '../../types';
 
 interface AddExpenseModalProps {
   isOpen: boolean;
@@ -13,11 +14,11 @@ export const AddExpenseModal: React.FC<AddExpenseModalProps> = ({ isOpen, onClos
 
   const [formData, setFormData] = useState({
     title: '',
-    category: 'Rent',
+    category: 'Rent' as ExpenseCategory,
     amount: 10000,
     description: '',
     paidBy: 'Accountant',
-    paymentMethod: 'Bank Transfer' as 'Cash' | 'Card' | 'Bank Transfer' | 'Cheque' | 'Mobile Transfer',
+    paymentMethod: 'Bank Transfer' as 'Cash' | 'Card' | 'Bank Transfer' | 'Mobile Transfer' | 'Store Credit',
     date: new Date().toISOString().split('T')[0],
   });
 
@@ -81,7 +82,7 @@ export const AddExpenseModal: React.FC<AddExpenseModalProps> = ({ isOpen, onClos
               </label>
               <select
                 value={formData.category}
-                onChange={(e) => setFormData({ ...formData, category: e.target.value })}
+                onChange={(e) => setFormData({ ...formData, category: e.target.value as ExpenseCategory })}
                 className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white font-medium border border-transparent focus:border-rose-500"
               >
                 <option value="Rent">Rent & Facility</option>
@@ -125,7 +126,6 @@ export const AddExpenseModal: React.FC<AddExpenseModalProps> = ({ isOpen, onClos
                 <option value="Cash">Cash</option>
                 <option value="Card">Card / POS</option>
                 <option value="Mobile Transfer">Mobile Transfer</option>
-                <option value="Cheque">Cheque</option>
               </select>
             </div>
 

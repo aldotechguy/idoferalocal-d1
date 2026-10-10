@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Scale, Building, Banknote, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { LiquidAccountType } from '../../types';
+import { useInteractions } from '../../context/InteractionContext';
 
 interface RecalibrateModalProps {
   isOpen: boolean;
@@ -19,6 +20,7 @@ export const RecalibrateModal: React.FC<RecalibrateModalProps> = ({
   targetAccount = 'Physical Cash',
 }) => {
   const { treasuryBalances, recalibrateLiquidBalance, setInitialLiquidBalances, settings } = useApp();
+  const { notify, confirm } = useInteractions();
 
   const [activeTab, setActiveTab] = useState<'both' | 'single'>(defaultMode);
   
@@ -52,27 +54,25 @@ export const RecalibrateModal: React.FC<RecalibrateModalProps> = ({
   const numNewBalance = parseFloat(newBalance) || 0;
   const variance = numNewBalance - currentBal;
 
-  const handleSetBothSubmit = (e: React.FormEvent) => {
+  const handleSetBothSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const numBiz = parseFloat(bizInitial) || 0;
     const numCash = parseFloat(cashInitial) || 0;
 
-    const confirmMsg = `Are you sure you want to calibrate liquid balances to:\n• Biz Account: ${settings.currencySymbol}${numBiz.toLocaleString()}\n• Physical Cash: ${settings.currencySymbol}${numCash.toLocaleString()}?`;
-    if (!confirm(confirmMsg)) return;
+    if (!await confirm({ title: 'Calibrate liquid balances', message: `Set Biz Account to ${settings.currencySymbol}${numBiz.toLocaleString()} and Physical Cash to ${settings.currencySymbol}${numCash.toLocaleString()}?`, confirmText: 'Calibrate balances', variant: 'warning' })) return;
 
     setInitialLiquidBalances(numBiz, numCash, currentUserName || 'Store Manager');
     onClose();
   };
 
-  const handleSingleRecalibrateSubmit = (e: React.FormEvent) => {
+  const handleSingleRecalibrateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (newBalance.trim() === '') {
-      alert('Please enter a target balance value.');
+      notify('Please enter a target balance value.', 'Balance required');
       return;
     }
 
-    const confirmMsg = `Recalibrate ${selectedAccount} from ${settings.currencySymbol}${currentBal.toLocaleString()} to ${settings.currencySymbol}${numNewBalance.toLocaleString()} (Difference: ${variance >= 0 ? '+' : ''}${settings.currencySymbol}${variance.toLocaleString()})?`;
-    if (!confirm(confirmMsg)) return;
+    if (!await confirm({ title: `Recalibrate ${selectedAccount}`, message: `Change the balance from ${settings.currencySymbol}${currentBal.toLocaleString()} to ${settings.currencySymbol}${numNewBalance.toLocaleString()} (${variance >= 0 ? '+' : ''}${settings.currencySymbol}${variance.toLocaleString()})?`, confirmText: 'Recalibrate', variant: 'warning' })) return;
 
     recalibrateLiquidBalance(
       selectedAccount,

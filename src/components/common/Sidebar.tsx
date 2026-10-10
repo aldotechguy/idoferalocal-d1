@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   LayoutDashboard,
   ShoppingCart,
@@ -10,6 +10,7 @@ import {
   BarChart3,
   Settings,
   X,
+
   ChevronLeft,
   ChevronRight,
   Sun,
@@ -22,6 +23,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { useApp } from '../../context/AppContext';
+import { staffMallClient } from '../../services/staffMallClient';
 
 interface SidebarProps {
   activePage: string;
@@ -48,7 +50,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
     disablePrivacyMode,
   } = useAuth();
   const { mode, toggleTheme } = useTheme();
-  const { whatsAppPreOrders, deliveryOrders, settings } = useApp();
+  const { deliveryOrders, treasuryBalances, settings } = useApp();
+  const [pendingMallCount, setPendingMallCount] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = () => staffMallClient.counts().then((data) => { if (active) setPendingMallCount(data.actionable); }).catch(() => {});
+    refresh();
+    const timer = window.setInterval(refresh, 60_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
 
   // Privacy Mode Password Deactivation Modal States
   const [showPrivacyUnlockModal, setShowPrivacyUnlockModal] = useState(false);
@@ -118,13 +129,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
 
   // Pending counts for badges
-  const pendingWhatsAppCount = whatsAppPreOrders.filter(
-    (o) => o.status !== 'Completed' && o.status !== 'Cancelled'
-  ).length;
   const pendingPickupCount = deliveryOrders
     ? deliveryOrders.filter((o) => !o.isPickupConfirmed && o.status !== 'Cancelled').length
     : 0;
-  const totalPendingOrders = pendingWhatsAppCount + pendingPickupCount;
+  const totalPendingOrders = pendingMallCount + pendingPickupCount;
 
   // Active Hub matching logic
   const isHubActive = (hubId: string) => {
@@ -134,7 +142,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       case 'pos':
         return activePage === 'pos';
       case 'sales':
-        return ['sales', 'sales-orders', 'whatsapp-orders', 'deliveries'].includes(activePage);
+        return ['sales', 'sales-orders', 'mall-orders', 'whatsapp-orders', 'deliveries'].includes(activePage);
       case 'products':
         return ['products', 'products-stock', 'inventory', 'pricing', 'archive'].includes(activePage);
       case 'customers':
@@ -171,7 +179,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     {
       id: 'sales',
       label: 'Sales & Orders',
-      subtitle: 'Sales, WhatsApp & Delivery',
+      subtitle: 'Sales, Mall & Delivery',
       icon: ShoppingBag,
       roles: ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
       badge: totalPendingOrders > 0 ? `${totalPendingOrders} Active` : undefined,
@@ -221,6 +229,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Settings,
       roles: ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
     },
+
   ];
 
   return (
@@ -235,6 +244,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Sidebar Container */}
       <aside
+        aria-label="Primary navigation"
         className={`app-sidebar fixed lg:sticky top-0 left-0 z-50 lg:z-30 h-screen bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 flex flex-col justify-between transition-all duration-300 ease-in-out shrink-0 ${
           isMobileOpen ? 'translate-x-0 w-72 sm:w-80 shadow-2xl' : '-translate-x-full lg:translate-x-0'
         } ${isEffectiveCollapsed ? 'lg:w-20' : 'lg:w-64'}`}
@@ -300,6 +310,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       onMobileClose();
                     }}
                     title={isEffectiveCollapsed ? item.label : undefined}
+                    aria-current={isActive ? 'page' : undefined}
                     className={`app-nav-item w-full flex items-center ${
                       isEffectiveCollapsed ? 'justify-center p-2.5' : 'justify-between px-3 py-2.5'
                     } rounded-xl text-xs font-semibold transition-all group ${

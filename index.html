@@ -3,34 +3,43 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>Idofera Packaging POS & Business System</title>
-    <meta name="description" content="Offline-first Point of Sale, Capital & Investment Planner, Inventory & Packaging Business System" />
-    <meta property="og:title" content="Idofera POS & Investment Planner" />
-    <meta property="og:description" content="Packaging, inventory, sales, capital investment planning, and business intelligence." />
+    <title>IdoferaMall — Packaging & Everyday Goods</title>
+    <meta name="description" content="Packaging and everyday goods in Uyo. Order online and pay on pickup at our shop." />
+    <meta property="og:title" content="IdoferaMall — Packaging & Everyday Goods" />
+    <meta property="og:description" content="Packaging and everyday goods in Uyo. Order online and pay on pickup at our shop." />
     <meta property="og:type" content="website" />
     <meta property="og:image" content="__SITE_ORIGIN__/og.png" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="IdoferaLabs POS" />
-    <meta name="twitter:description" content="Packaging, inventory, sales and business intelligence." />
+    <meta name="twitter:title" content="IdoferaMall" />
+    <meta name="twitter:description" content="Packaging and everyday goods in Uyo. Order online and pay on pickup at our shop." />
     <meta name="twitter:image" content="__SITE_ORIGIN__/og.png" />
-    <meta name="theme-color" content="#2563eb" />
+    <meta name="theme-color" content="#0d9488" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="Idofera POS" />
+    <meta name="apple-mobile-web-app-title" content="IdoferaMall" />
     <link rel="manifest" href="/manifest.json" />
-    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
-    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="icon" type="image/png" href="https://idofera.de5.net/images/mall/logo/logo.png" />
+    <link rel="apple-touch-icon" href="https://idofera.de5.net/images/mall/logo/logo.png" />
   </head>
   <body>
     <div id="root"></div>
+    <!--
+      Production may still be controlled by a service worker installed by an
+      earlier release (our own bootstrap only unregisters in dev). Purge any
+      cache that is not the one the current worker owns, nudge registrations to
+      update, then hand off to the app bootstrap. The cache name must track
+      CACHE_NAME in public/sw.js, and the handoff must stay on bootstrap.ts so
+      the dev worker cleanup and its contract test keep running.
+    -->
     <script type="module">
       (async () => {
+        const CURRENT_CACHE = 'idofera-pos-v6';
         if ('caches' in window) {
           try {
             const keys = await caches.keys();
             for (const key of keys) {
-              if (key !== 'idofera-pos-v3') {
+              if (key.startsWith('idofera-pos-') && key !== CURRENT_CACHE) {
                 await caches.delete(key);
               }
             }
@@ -44,7 +53,7 @@
             }
           } catch {}
         }
-        await import('/src/main.tsx');
+        await import('/src/bootstrap.ts');
       })();
     </script>
   </body>

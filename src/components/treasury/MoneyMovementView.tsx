@@ -70,8 +70,9 @@ export const MoneyMovementView: React.FC = () => {
       }
 
       // Type filter
-      if (typeFilter !== 'All' && m.type !== typeFilter) {
-        return false;
+      if (typeFilter !== 'All') {
+        const matchesType = m.type === typeFilter || (typeFilter === 'Sale Refund' && m.type === 'Refund Outflow');
+        if (!matchesType) return false;
       }
 
       // Date range filter
@@ -122,6 +123,7 @@ export const MoneyMovementView: React.FC = () => {
         m.type === 'Expense Outflow' ||
         m.type === 'Supplier Payment' ||
         m.type === 'Sale Refund' ||
+        m.type === 'Refund Outflow' ||
         m.type === 'Owner Drawing'
       ) {
         totalOutflow += amt;
@@ -166,7 +168,7 @@ export const MoneyMovementView: React.FC = () => {
   // CSV Export
   const handleExportCsv = () => {
     if (filteredMovements.length === 0) {
-      alert('No records available to export.');
+      showToast({ title: 'Nothing to export', message: 'No records match the current filters.', type: 'info' });
       return;
     }
 
@@ -205,6 +207,7 @@ export const MoneyMovementView: React.FC = () => {
       case 'Supplier Payment':
         return 'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800';
       case 'Sale Refund':
+      case 'Refund Outflow':
         return 'bg-red-100 dark:bg-red-950 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800';
       case 'Internal Transfer':
         return 'bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800';
@@ -650,6 +653,7 @@ export const MoneyMovementView: React.FC = () => {
                     movement.type === 'Expense Outflow' ||
                     movement.type === 'Supplier Payment' ||
                     movement.type === 'Sale Refund' ||
+                    movement.type === 'Refund Outflow' ||
                     movement.type === 'Owner Drawing';
 
                   return (

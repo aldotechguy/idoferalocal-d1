@@ -1,0 +1,694 @@
+import type { MallExecutor, MallStmt } from './mallApi.js';
+import { n, s } from './relationalMapper.js';
+import { revisionBumpStatement, runOrderBatch } from './mallSafety.js';
+import { normalizedPhoneSql, normalizeMallPhone } from '../shared/mallPhone.js';
+import { mallMetrics, runMallMaintenance, type MallMaintenanceOptions } from './mallOperations.js';
+import { registerMallCacheInvalidator } from './mallApi.js';
+import { MAX_MALL_SEARCH_CHARS } from '../shared/mallSearch.js';
+
+export type StaffActor = { id: string; displayName: string; role: string };
+
+type DomainError = Error & { status?: number };
+const fail = (status: number, message: string): never => {
+  const error = new Error(message) as DomainError;
+  error.status = status;
+  throw error;
+};
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+  status,
+  headers: { 'content-type': 'application/json; charset=utf-8' },
+});
+const uuid = () => crypto.randomUUID();
+const nowIso = () => new Date().toISOString();
+const ACTIVE_STATUSES = new Set(['pending', 'confirmed', 'processing', 'packed', 'ready_for_pickup', 'out_for_delivery']);
+
+function canOperate(actor: StaffActor) {
+  return ['Administrator', 'Store Manager', 'Sales Staff'].includes(actor.role);
+}
+
+function publicPayment(row: any) {
+  let metadata: Record<string, unknown> = {};
+  try { metadata = row?.payment_raw_json ? JSON.parse(row.payment_raw_json) : {}; } catch { /* malformed legacy metadata */ }
+  return {
+    id: s(row?.payment_id),
+    provider: s(row?.payment_provider, 'pay_on_pickup'),
+    reference: s(row?.payment_reference),
+    amountKobo: n(row?.payment_amount_kobo),
+    status: s(row?.payment_status, 'pending'),
+    metadata,
+  };
+}
+
+function publicOrder(row: any, items: any[] = []) {
+  let delivery: Record<string, unknown> = {};
+  try { delivery = row.delivery_address_json ? JSON.parse(row.delivery_address_json) : {}; } catch { /* malformed legacy data */ }
+  const payment = publicPayment(row);
+  return {
+    id: s(row.id), orderNo: s(row.order_no), customerId: s(row.customer_id) || undefined,
+    customerName: s(row.customer_name), customerPhone: s(row.customer_phone), customerEmail: s(row.customer_email) || undefined, status: s(row.status, 'pending'),
+    subtotalKobo: n(row.subtotal_kobo), deliveryFeeKobo: n(row.delivery_fee_kobo),
+    discountKobo: n(row.discount_kobo), totalKobo: n(row.total_kobo), linkedSaleId: s(row.linked_sale_id) || undefined,
+    delivery, payment, createdAt: s(row.created_at), itemCount: n(row.item_count),
+    items: items.map((item) => ({
+      id: s(item.id), productId: s(item.product_id), name: s(item.product_name), sku: s(item.sku),
+      unit: s(item.unit, 'pcs'), qty: n(item.qty), unitPriceKobo: n(item.unit_price_kobo),
+      costPriceKobo: n(item.cost_price_kobo), totalKobo: n(item.total_kobo),
+    })),
+  };
+}
+
+/**
+ * One row per order by construction. The payment side joins on the order's FIRST
+ * payment primary key rather than `payments.order_id`, so the result can never
+ * multiply (checkout is the only creator and writes exactly one payment per
+ * order) and the `GROUP BY o.id` that used to collapse it — together with
+ * `COUNT(DISTINCT oi.id)` over `mall_order_items` — is gone. Verified before:
+ * "SCAN mall_orders" + two TEMP B-TREE passes over every order, every order line
+ * and every payment; after: an index walk that `LIMIT ? OFFSET ?` can stop.
+ */
+const ORDER_COLUMNS = `o.*, p.id AS payment_id, p.provider AS payment_provider,
+  p.reference AS payment_reference, p.amount_kobo AS payment_amount_kobo,
+  p.status AS payment_status, p.raw_json AS payment_raw_json`;
+const ORDER_FROM = `FROM mall_orders o
+  LEFT JOIN payments p ON p.id = (SELECT pay.id FROM payments pay WHERE pay.order_id = o.id LIMIT 1)`;
+const ORDER_SELECT = `SELECT ${ORDER_COLUMNS} ${ORDER_FROM}`;
+/** Page + filtered total in one statement (the pattern getCatalog already uses). */
+const ORDER_PAGE_SELECT = `SELECT ${ORDER_COLUMNS}, COUNT(*) OVER() AS page_total ${ORDER_FROM}`;
+
+async function getOrderRow(exec: MallExecutor, id: string) {
+  const rows = await exec.queryAll(`${ORDER_SELECT} WHERE o.id = ? LIMIT 1`, [id]);
+  if (!rows.length) fail(404, 'Mall order not found.');
+  return rows[0];
+}
+
+/**
+ * Item counts for ONE page of orders, index-only over
+ * idx_mall_order_items_order_product. Counting them inside the list query (or
+ * with COUNT(DISTINCT) over the join) read every line of every order instead.
+ */
+async function itemCounts(exec: MallExecutor, ids: string[]): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (!ids.length) return counts;
+  const rows = await exec.queryAll(
+    `SELECT mall_order_id, COUNT(*) AS n FROM mall_order_items
+     WHERE mall_order_id IN (SELECT value FROM json_each(?)) GROUP BY mall_order_id`,
+    [JSON.stringify(ids)],
+  );
+  for (const row of rows) counts.set(s(row.mall_order_id), n(row.n));
+  return counts;
+}
+
+async function getOrderItems(exec: MallExecutor, id: string) {
+  return exec.queryAll(`SELECT oi.*, COALESCE(p.sku, '') AS sku, COALESCE(p.unit, 'pcs') AS unit,
+    COALESCE(p.cost_price_kobo, 0) AS cost_price_kobo
+    FROM mall_order_items oi LEFT JOIN products p ON p.id = oi.product_id
+    WHERE oi.mall_order_id = ? ORDER BY oi.rowid`, [id]);
+}
+
+async function listOrders(exec: MallExecutor, url: URL) {
+  const status = s(url.searchParams.get('status')).trim();
+  const q = s(url.searchParams.get('q')).trim().slice(0, MAX_MALL_SEARCH_CHARS);
+  const limit = Math.min(Math.max(n(url.searchParams.get('limit'), 50), 1), 100);
+  const offset = Math.max(n(url.searchParams.get('offset'), 0), 0);
+  const filters: string[] = [];
+  const params: any[] = [];
+  if (status && status !== 'all') { filters.push('o.status = ?'); params.push(status); }
+  if (q) {
+    // Escape LIKE wildcards the same way mallListingApi does, so a customer
+    // whose name contains % or _ cannot widen the staff search beyond the typed
+    // text.
+    const like = `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+    filters.push(`(o.order_no LIKE ? ESCAPE '\\' OR o.customer_name LIKE ? ESCAPE '\\' OR o.customer_phone LIKE ? ESCAPE '\\' OR EXISTS(SELECT 1 FROM payments search_payment WHERE search_payment.order_id=o.id AND search_payment.reference LIKE ? ESCAPE '\\'))`);
+    params.push(like, like, like, like);
+  }
+  const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  // Windowed page query: the page AND its filtered total come from one pass over
+  // mall_orders (previously the grouped join read every order + every line +
+  // every payment, then COUNT read every order again).
+  const rows = await exec.queryAll(
+    `${ORDER_PAGE_SELECT} ${where} ORDER BY o.created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset],
+  );
+  const total = n((rows[0] as any)?.page_total
+    ?? ((await exec.queryAll(`SELECT COUNT(*) AS n ${ORDER_FROM} ${where}`, params))[0] as any)?.n);
+  const counts = await itemCounts(exec, rows.map((row) => s((row as any).id)));
+  return json({
+    orders: rows.map((row) => publicOrder({ ...row, item_count: counts.get(s((row as any).id)) ?? 0 })),
+    total, limit, offset,
+  });
+}
+
+/**
+ * `GET /counts` is polled by the staff sidebar every minute from every open tab.
+ * It is a pure order-status aggregate, so a short TTL removes the repeated scan
+ * without ever showing a stale number after a staff action: every mutation below
+ * goes through invalidateStaffMallCaches() (and any product/order write through
+ * invalidateMallFacetCache, which the same caches register with).
+ */
+const COUNT_CACHE_TTL_MS = 15_000;
+let cachedCounts: { expiresAt: number; payload: unknown } | null = null;
+const OPERATIONS_CACHE_TTL_MS = 20_000;
+let cachedOperations: { expiresAt: number; payload: unknown } | null = null;
+
+function invalidateStaffMallCaches(): void {
+  cachedCounts = null;
+  cachedOperations = null;
+}
+registerMallCacheInvalidator(invalidateStaffMallCaches);
+
+async function counts(exec: MallExecutor) {
+  if (cachedCounts && cachedCounts.expiresAt > Date.now()) return json(cachedCounts.payload);
+  const rows = await exec.queryAll(`SELECT status, COUNT(*) AS count FROM mall_orders GROUP BY status`);
+  const byStatus = Object.fromEntries(rows.map((row) => [s(row.status), n(row.count)]));
+  const actionable = rows.reduce((sum, row) => sum + (ACTIVE_STATUSES.has(s(row.status)) ? n(row.count) : 0), 0);
+  cachedCounts = { expiresAt: Date.now() + COUNT_CACHE_TTL_MS, payload: { byStatus, actionable } };
+  return json(cachedCounts.payload);
+}
+
+async function detail(exec: MallExecutor, id: string) {
+  const row = await getOrderRow(exec, id);
+  const [items, timeline, returnRecord, dispatch] = await Promise.all([
+    getOrderItems(exec, id),
+    exec.queryAll('SELECT action,actor_id AS actorId,details,status,created_at AS createdAt FROM mall_order_events WHERE order_id=? ORDER BY created_at,rowid',[id]),
+    exec.queryAll('SELECT * FROM mall_returns WHERE order_id=?',[id]),
+    exec.queryAll('SELECT courier_notes AS courier,notes,status,updated_at AS updatedAt FROM delivery_orders WHERE sale_id=?',[row.linked_sale_id]),
+  ]);
+  return json({ order: { ...publicOrder(row, items),
+    timeline,
+    returnRecord: returnRecord[0] || null,
+    dispatch: dispatch[0] || null,
+  }});
+}
+
+async function confirmOrder(exec: MallExecutor, id: string, actor: StaffActor) {
+  if (!canOperate(actor)) fail(403, 'You do not have permission to confirm Mall orders.');
+  const row = await getOrderRow(exec, id);
+  const delivery = deliveryData(row);
+  if (delivery.zone && delivery.zone !== 'pickup' && delivery.addressVerified !== true) fail(409,'Review the delivery address and zone before confirmation.');
+  if (delivery.quoteRequired === true && delivery.quoteConfirmed !== true) fail(409, 'Set the delivery quote before confirming this order.');
+  const status = s(row.status);
+  if (status === 'confirmed') return detail(exec, id);
+  if (status !== 'pending') fail(409, `An order in ${status} state cannot be confirmed.`);
+  const at = nowIso();
+  await runOrderBatch(exec, row, [
+    { sql: `UPDATE mall_orders SET status = 'confirmed' WHERE id = ? AND status = 'pending'`, params: [id] },
+    { sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'CONFIRM_MALL_ORDER', 'MallOrder', ?, ?, ?)`, params: [`audit-${uuid()}`, actor.id, id, `${actor.displayName} confirmed ${s(row.order_no)}.`, at] },
+    revisionBumpStatement(),
+  ]);
+  return detail(exec, id);
+}
+
+async function cancelOrder(exec: MallExecutor, id: string, actor: StaffActor, body: any) {
+  if (!['Administrator', 'Store Manager'].includes(actor.role)) fail(403, 'Manager access is required to cancel Mall orders.');
+  const row = await getOrderRow(exec, id);
+  const status = s(row.status);
+  if (status === 'cancelled') return detail(exec, id);
+  if (s(row.linked_sale_id) || ['completed', 'refunded'].includes(status)) fail(409, 'Paid or completed orders must use the refund workflow.');
+  if (!['pending','confirmed'].includes(status)) fail(409, `An order in ${status} state cannot be cancelled.`);
+  const items = await getOrderItems(exec, id);
+  const reason = s(body?.reason, 'Cancelled by staff').trim().slice(0, 300);
+  const at = nowIso();
+  const stmts: MallStmt[] = [{sql:`UPDATE mall_orders SET status='cancelled' WHERE id=?`,params:[id]}, {
+    sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'CANCEL_MALL_ORDER', 'MallOrder', ?, ?, ?)`,
+    params: [`audit-cancel-${id}`, actor.id, id, `${actor.displayName} cancelled ${s(row.order_no)} and restored committed stock. Reason: ${reason}`, at],
+  }];
+  const cancelMovementIds: string[] = [];
+  for (const item of items) {
+    const cancelMovementId = `mv-${uuid()}`;
+    cancelMovementIds.push(cancelMovementId);
+    stmts.push({ sql: 'UPDATE products SET stock_qty = stock_qty + ?, updated_at = ? WHERE id = ?', params: [n(item.qty), at, item.product_id] });
+    stmts.push({
+      // One products seek instead of two correlated subqueries (same shape as the
+      // checkout release path): prev = post-restock stock - qty, new = the restocked value.
+      sql: `INSERT INTO stock_movements (id, product_id, product_name, type, qty, prev_stock, new_stock, ref_id, notes, performed_by, created_at)
+        SELECT ?, p.id, ?, 'Returned', ?, p.stock_qty - ?, p.stock_qty, ?, ?, ?, ?
+        FROM products p WHERE p.id = ?`,
+      params: [cancelMovementId, item.product_name, n(item.qty), n(item.qty), `cancel:${id}`, `Cancelled Mall order ${s(row.order_no)}: ${reason}`, actor.displayName, at, item.product_id],
+    });
+  }
+  stmts.push({ sql: `UPDATE mall_orders SET status = 'cancelled' WHERE id = ? AND status = ?`, params: [id, status] });
+  stmts.push({ sql: `UPDATE payments SET status = 'cancelled', raw_json = ? WHERE order_id = ? AND status = 'pending'`, params: [JSON.stringify({ orderNo: row.order_no, cancellationReason: reason, cancelledBy: actor.displayName, cancelledAt: at }), id] });
+  // Restocked products and stock_movements are client-visible: bump the revision.
+  stmts.push(revisionBumpStatement());
+  try {
+    await runOrderBatch(exec, row, stmts);
+  } catch (error) {
+    const concurrent = await exec.queryAll('SELECT status FROM mall_orders WHERE id = ? LIMIT 1', [id]);
+    if (s(concurrent[0]?.status) === 'cancelled') return detail(exec, id);
+    throw error;
+  }
+  return detail(exec, id);
+}
+
+function paymentDestination(method: string) {
+  return method === 'Cash' ? 'Physical Cash' : 'Biz Account';
+}
+
+function deliveryData(row: any): Record<string, any> {
+  try { return row.delivery_address_json ? JSON.parse(row.delivery_address_json) : {}; } catch { return {}; }
+}
+
+async function quoteDelivery(exec: MallExecutor, id: string, actor: StaffActor, body: any) {
+  if (!['Administrator', 'Store Manager'].includes(actor.role)) fail(403, 'Manager access is required to quote delivery.');
+  const row = await getOrderRow(exec, id);
+  if (s(row.linked_sale_id) || s(row.status) !== 'pending') fail(409, 'Delivery can only be quoted on an unpaid pending order.');
+  const delivery = deliveryData(row);
+  if (delivery.zone !== 'other' || delivery.quoteRequired !== true) fail(409, 'This order does not require a delivery quote.');
+  const feeKobo = Math.round(n(body?.feeKobo, -1));
+  if (!Number.isSafeInteger(feeKobo) || feeKobo < 0 || feeKobo > 10_000_000) fail(400, 'Enter a valid delivery fee.');
+  const totalKobo = n(row.subtotal_kobo) - n(row.discount_kobo) + feeKobo;
+  const at = nowIso();
+  const updatedDelivery = { ...delivery, quoteConfirmed: true, quotedAt: at, quotedBy: actor.displayName };
+  await runOrderBatch(exec, row, [
+    { sql: 'UPDATE mall_orders SET delivery_fee_kobo = ?, total_kobo = ?, delivery_address_json = ? WHERE id = ? AND status = ?', params: [feeKobo, totalKobo, JSON.stringify(updatedDelivery), id, 'pending'] },
+    { sql: `UPDATE payments SET amount_kobo = ?, raw_json = ? WHERE order_id = ? AND status = 'pending'`, params: [totalKobo, JSON.stringify({ orderNo: row.order_no, deliveryFeeKobo: feeKobo, quotedBy: actor.displayName, quotedAt: at }), id] },
+    { sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'QUOTE_MALL_DELIVERY', 'MallOrder', ?, ?, ?)`, params: [`audit-${uuid()}`, actor.id, id, `${actor.displayName} quoted delivery for ${row.order_no} at ${feeKobo} kobo.`, at] },
+    revisionBumpStatement(),
+  ]);
+  return detail(exec, id);
+}
+
+async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor, body: any, transferOnly: boolean) {
+  const allowed = transferOnly
+    ? ['Administrator', 'Store Manager', 'Accountant'].includes(actor.role)
+    : canOperate(actor);
+  if (!allowed) fail(403, 'You do not have permission to record this payment.');
+  const row = await getOrderRow(exec, id);
+  if (s(row.linked_sale_id)) return detail(exec, id);
+  const status = s(row.status);
+  const delivery = deliveryData(row);
+  if (delivery.quoteRequired === true && delivery.quoteConfirmed !== true) fail(409, 'Set the delivery quote before recording payment.');
+  if (delivery.zone && delivery.zone !== 'pickup' && delivery.addressVerified !== true) fail(409,'Review the delivery address and zone before recording payment.');
+  if (status === 'cancelled') fail(409, 'Cancelled orders cannot be paid.');
+  if (!['pending', 'confirmed'].includes(status)) fail(409, `An order in ${status} state cannot be paid.`);
+  const items = await getOrderItems(exec, id);
+  if (!items.length) fail(409, 'This order has no items.');
+  const method = transferOnly ? 'Bank Transfer' : s(body?.paymentMethod, 'Cash');
+  if (!['Cash', 'Card', 'Mobile Transfer', 'Bank Transfer'].includes(method)) fail(400, 'Unsupported payment method.');
+  if (method === 'Bank Transfer' && !['Administrator', 'Store Manager', 'Accountant'].includes(actor.role)) fail(403, 'You do not have permission to verify bank transfers.');
+  if (method === 'Bank Transfer' && (typeof body?.reference !== 'string' || !body.reference.trim() || body.reference.length>120)) fail(400,'A bank receipt/reference is required.');
+  const amountKobo = Math.round(n(body?.amountKobo, row.total_kobo));
+  if (!Number.isSafeInteger(body?.amountKobo) || amountKobo !== n(row.total_kobo)) fail(400, 'The payment amount must equal the order total in whole kobo.');
+  const at = nowIso();
+  // Deterministic identities make concurrent/retried settlement physically unable to create duplicate Sales.
+  const saleId = `sale-${id}`;
+  const invoiceNo = `INV-${s(row.order_no).replace(/^MALL-/, '')}`;
+  const normalizedPhone = normalizeMallPhone(row.customer_phone);
+  const customers = normalizedPhone ? await exec.queryAll(`SELECT * FROM customers WHERE ${normalizedPhoneSql('phone')} = ? ORDER BY created_at,id LIMIT 1`, [normalizedPhone]) : [];
+  const customer = customers[0];
+  const customerId = customer?.id || `cust-${id}`;
+  // Buyer contact captured at checkout — normalized once so the new-customer
+  // insert and the returning-buyer enrichment below share identical values.
+  const orderEmail = typeof row.customer_email === 'string' ? row.customer_email.trim().toLowerCase().slice(0, 254) : '';
+  const orderAddress = s(delivery.address).trim().slice(0, 400) || null;
+  const paymentBreakdown = body?.paymentBreakdown && typeof body.paymentBreakdown === 'object' ? body.paymentBreakdown : null;
+  const reference = s(body?.reference, row.payment_reference || `MALL-${row.order_no}`).slice(0, 120);
+  const stmts: MallStmt[] = [];
+  if (!customer) {
+    stmts.push({
+      sql: `INSERT INTO customers (id, name, phone, email, address, purchase_history_count, outstanding_balance_kobo, loyalty_points, lifetime_value_kobo, created_at) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?)`,
+      params: [customerId, row.customer_name, row.customer_phone, orderEmail, orderAddress, Math.floor(n(row.total_kobo) / 10_000), row.total_kobo, at],
+    });
+  }
+  stmts.push({
+    // updated_at (v12) is the edit clock the client sync merge ranks competing
+    // copies with. Bounding the sale with a clock means the first POS-side edit
+    // of this invoice can be ordered against it. Requires the v12 ALTER to have
+    // run: this statement names the column explicitly, so a pre-v12 database
+    // would fail the whole atomic batch.
+    sql: `INSERT INTO sales (id, receipt_no, customer_id, customer_name, type, subtotal_kobo, discount_kobo, tax_kobo, delivery_fee_kobo, total_kobo, paid_kobo, payment_method, payment_breakdown_json, status, notes, created_by, order_taken_by, is_historical, expense_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'Retail', ?, ?, 0, ?, ?, ?, ?, ?, 'Completed', ?, ?, 'Mall Storefront', 0, NULL, ?, ?)`,
+    params: [saleId, invoiceNo, customerId, row.customer_name, row.subtotal_kobo, row.discount_kobo, row.delivery_fee_kobo, row.total_kobo, row.total_kobo, method, paymentBreakdown ? JSON.stringify(paymentBreakdown) : null, `Converted from Mall order ${row.order_no}.`, actor.displayName, at, at],
+  });
+  items.forEach((item, index) => stmts.push({
+    sql: `INSERT INTO sale_items (id, sale_id, product_id, product_name, sku, qty, unit_price_kobo, cost_price_kobo, total_kobo, is_wholesale, is_clearance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)`,
+    params: [`${saleId}-item-${index}`, saleId, item.product_id, item.product_name, item.sku, item.qty, item.unit_price_kobo, item.cost_price_kobo, item.total_kobo],
+  }));
+  stmts.push({ sql: `UPDATE payments SET sale_id = ?, provider = ?, reference = ?, amount_kobo = ?, status = 'paid', raw_json = ? WHERE order_id = ?`, params: [saleId, method, reference, row.total_kobo, JSON.stringify({ orderNo: row.order_no, verifiedBy: actor.displayName, verifiedAt: at, paymentBreakdown }), id] });
+  stmts.push({ sql: `UPDATE mall_orders SET linked_sale_id = ?, customer_id = ?, status = 'processing', payment_ref = ? WHERE id = ? AND linked_sale_id IS NULL`, params: [saleId, customerId, reference, id] });
+  stmts.push({ sql: `INSERT INTO money_movements (id, date, type, subtype, source_account, dest_account, amount_kobo, notes, ref_no, ref_id, performed_by, created_at) VALUES (?, ?, 'Sale Inflow', ?, NULL, ?, ?, ?, ?, ?, ?, ?)`, params: [`mm-${saleId}`, at, method, paymentDestination(method), row.total_kobo, `Mall order payment for ${row.order_no}`, invoiceNo, saleId, actor.displayName, at] });
+  if (customer) {
+    // Returning buyer: bump the counters and fill profile fields that are blank
+    // in the customer record — never overwrite details staff already maintain.
+    const fills: [string, string][] = [];
+    if (!s(customer.name).trim() && s(row.customer_name).trim()) fills.push(['name = ?', row.customer_name]);
+    if (!s(customer.address).trim() && orderAddress) fills.push(['address = ?', orderAddress]);
+    if (!s(customer.email).trim() && orderEmail) fills.push(['email = ?', orderEmail]);
+    stmts.push({
+      sql: `UPDATE customers SET purchase_history_count = purchase_history_count + 1, lifetime_value_kobo = lifetime_value_kobo + ?, loyalty_points = loyalty_points + ?${fills.map(([set]) => `, ${set}`).join('')} WHERE id = ?`,
+      params: [row.total_kobo, Math.floor(n(row.total_kobo) / 10_000), ...fills.map(([, value]) => value), customer.id],
+    });
+  }
+  stmts.push({ sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'CONVERT_MALL_ORDER_SALE', 'MallOrder', ?, ?, ?)`, params: [`audit-${uuid()}`, actor.id, id, `${actor.displayName} converted ${row.order_no} to ${invoiceNo} via ${method}.`, at] });
+  // The mirrored Sale, payment, money movement, customer metrics and audit
+  // trail are all client-visible: bump the sync revision in the same atomic
+  // batch or guarded snapshot clients 304 a world without the Mall sale.
+  stmts.push(revisionBumpStatement());
+  try {
+    await runOrderBatch(exec, row, stmts);
+  } catch (error) {
+    const concurrent = await exec.queryAll('SELECT linked_sale_id FROM mall_orders WHERE id = ? LIMIT 1', [id]);
+    if (s(concurrent[0]?.linked_sale_id)) return detail(exec, id);
+    throw error;
+  }
+  return detail(exec, id);
+}
+
+const STATUS_ACTIONS: Record<string, { from: string[]; to: string }> = {
+  'start-processing': { from: ['confirmed'], to: 'processing' },
+  'mark-packed': { from: ['processing'], to: 'packed' },
+  'mark-ready': { from: ['packed'], to: 'ready_for_pickup' },
+  'mark-out-for-delivery': { from: ['packed'], to: 'out_for_delivery' },
+  complete: { from: ['ready_for_pickup', 'out_for_delivery'], to: 'completed' },
+};
+
+async function transitionOrder(exec: MallExecutor, id: string, actor: StaffActor, action: string, body: any = {}) {
+  if (!canOperate(actor)) fail(403, 'You do not have permission to update fulfilment.');
+  const transition = STATUS_ACTIONS[action];
+  if (!transition) fail(404, 'Unknown Mall order action.');
+  const row = await getOrderRow(exec, id);
+  const zone = deliveryData(row).zone || 'pickup';
+  if (action === 'mark-ready' && zone !== 'pickup') fail(409,'Delivery orders cannot enter the pickup branch.');
+  if (action === 'mark-out-for-delivery' && zone === 'pickup') fail(409,'Pickup orders cannot be dispatched.');
+  if (action === 'mark-out-for-delivery' && (typeof body?.courier !== 'string' || !body.courier.trim() || body.courier.length>120)) fail(400,'Assign a courier before dispatch.');
+  const status = s(row.status);
+  if (status === transition.to) return detail(exec, id);
+  if (!transition.from.includes(status)) fail(409, `An order in ${status} state cannot move to ${transition.to}.`);
+  if (!s(row.linked_sale_id)) fail(409, 'Payment must be recorded before fulfilment continues.');
+  const at = nowIso();
+  const stmts: MallStmt[] = [
+    { sql: 'UPDATE mall_orders SET status = ? WHERE id = ? AND status = ?', params: [transition.to, id, status] },
+    { sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'UPDATE_MALL_ORDER_STATUS', 'MallOrder', ?, ?, ?)`, params: [`audit-${uuid()}`, actor.id, id, `${actor.displayName} moved ${s(row.order_no)} from ${status} to ${transition.to}.`, at] },
+  ];
+  if (action === 'mark-out-for-delivery') {
+    const items = await getOrderItems(exec, id);
+    const invoice = await exec.queryAll('SELECT receipt_no FROM sales WHERE id = ? LIMIT 1', [row.linked_sale_id]);
+    const delivery = deliveryData(row);
+    const saleItems = items.map((item) => ({ productId: item.product_id, productName: item.product_name, sku: item.sku, quantity: n(item.qty), unitPrice: n(item.unit_price_kobo) / 100, costPrice: n(item.cost_price_kobo) / 100, total: n(item.total_kobo) / 100 }));
+    stmts.push({
+      // is_pickup_confirmed=1 + the expense below: the Mall settles the courier
+      // cost itself at dispatch, so the store's confirmDeliveryPickup flow sees
+      // the row as already confirmed and cannot create a duplicate expense.
+      sql: `INSERT OR IGNORE INTO delivery_orders (id, delivery_no, sale_id, invoice_no, customer_id, customer_name, customer_phone, delivery_address, items_json, delivery_fee_kobo, status, is_pickup_confirmed, courier_notes, notes, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending Pickup', 1, NULL, ?, ?, ?, ?)`,
+      params: [`del-${id}`, `DEL-${s(row.order_no).replace(/^MALL-/, '')}`, row.linked_sale_id, s(invoice[0]?.receipt_no), row.customer_id, row.customer_name, row.customer_phone, s(delivery.address), JSON.stringify(saleItems), row.delivery_fee_kobo, `Created from Mall order ${row.order_no}. ${s(delivery.note)}`, actor.displayName, at, at],
+    });
+    // Same Logistics expense the store books on pickup confirmation — booked in
+    // the same transaction as the dispatch so it can never be missing while the
+    // delivery row exists. Deterministic id lets the refund path void it exactly.
+    stmts.push({
+      sql: `INSERT OR IGNORE INTO expenses (id, title, category, amount_kobo, description, spent_by, payment_method, date, is_historical, sale_id, created_at) VALUES (?, ?, 'Logistics', ?, ?, ?, 'Cash', ?, 0, ?, ?)`,
+      params: [
+        `exp-mall-del-${id}`,
+        `Logistics Delivery Fee - DEL-${s(row.order_no).replace(/^MALL-/, '')} (${s(invoice[0]?.receipt_no)})`,
+        row.delivery_fee_kobo,
+        `Delivery fee expense auto-created on Mall dispatch for ${row.customer_name}. Order ${row.order_no}, Invoice ${s(invoice[0]?.receipt_no)}. Courier: ${body.courier.trim()}${s(delivery.address) ? '. Address: ' + s(delivery.address) : ''}`,
+        actor.displayName,
+        at.slice(0, 10),
+        row.linked_sale_id,
+        at,
+      ],
+    });
+    // The Logistics expense is a real cash outflow (the courier is paid from the
+    // till), so it must move the liquid ledger exactly as a POS-recorded expense
+    // does — otherwise Reports (expense-based) and Treasury (money-movement-based)
+    // drift by the delivery fee. Deterministic id keeps re-dispatch idempotent and
+    // lets the refund path void it precisely.
+    if (n(row.delivery_fee_kobo) > 0) {
+      stmts.push({
+        sql: `INSERT OR IGNORE INTO money_movements (id, date, type, subtype, source_account, dest_account, amount_kobo, notes, ref_no, ref_id, performed_by, created_at)
+              VALUES (?, ?, 'Expense Outflow', 'Logistics', 'Physical Cash', NULL, ?, ?, ?, ?, ?, ?)`,
+        params: [
+          `mm-exp-mall-del-${id}`, at,
+          row.delivery_fee_kobo,
+          `Logistics Delivery Fee - DEL-${s(row.order_no).replace(/^MALL-/, '')} (${s(invoice[0]?.receipt_no)})`,
+          `DEL-${s(row.order_no).replace(/^MALL-/, '')}`,
+          `exp-mall-del-${id}`, actor.displayName, at,
+        ],
+      });
+    }
+  }
+  if (action === 'mark-out-for-delivery') stmts.push({sql:"UPDATE delivery_orders SET status='Out for Delivery',courier_notes=?,updated_at=? WHERE sale_id=?",params:[body.courier.trim(),at,row.linked_sale_id]});
+  if (action === 'complete' && zone !== 'pickup') stmts.push({sql:"UPDATE delivery_orders SET status='Delivered',updated_at=? WHERE sale_id=?",params:[at,row.linked_sale_id]});
+  // Transitions write audit_logs and (on dispatch) a delivery_order — both
+  // client-visible stores: bump the revision.
+  stmts.push(revisionBumpStatement());
+  await runOrderBatch(exec, row, stmts);
+  return detail(exec, id);
+}
+
+async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, body: any) {
+  if (!['Administrator', 'Accountant'].includes(actor.role)) fail(403, 'Administrator or Accountant access is required to refund an order.');
+  const row = await getOrderRow(exec, id);
+  if (s(row.status) === 'refunded') return detail(exec, id);
+  if (!s(row.linked_sale_id) || s(row.payment_status) !== 'paid') fail(409, 'Only paid Mall orders can be refunded.');
+  const items = await getOrderItems(exec, id);
+  if (typeof body?.returnStock !== 'boolean') fail(400, 'Explicitly choose whether goods were returned to stock.');
+  const returnStock = body.returnStock;
+  const dispatched = ['out_for_delivery','completed'].includes(s(row.status));
+  if (returnStock && dispatched && (typeof body?.returnReference !== 'string' || !body.returnReference.trim())) fail(400,'A goods-received reference is required to restock dispatched goods.');
+  if (typeof body?.reason !== 'string' || !body.reason.trim()) fail(400, 'A refund reason is required.');
+  const reason = s(body?.reason, 'Customer refund').trim().slice(0, 300);
+  const at = nowIso();
+  const stmts: MallStmt[] = [{ sql: `UPDATE mall_orders SET status = 'refunded' WHERE id = ?`, params: [id] }];
+  stmts.push({sql:'INSERT INTO mall_returns(order_id,disposition,receipt_reference,reason,actor_id,created_at) VALUES (?,?,?,?,?,?)',params:[id,returnStock?'restocked':'not_restocked',s(body?.returnReference).trim().slice(0,120),reason,actor.id,at]});
+  stmts.push({sql:"UPDATE delivery_orders SET status='Cancelled',updated_at=?,notes=COALESCE(notes,'') || ? WHERE sale_id=?",params:[at,` | Mall refund: ${reason}${returnStock ? ' | Returned' : ''}`,row.linked_sale_id]});
+  // Void the Logistics expense booked at dispatch (kept, not deleted, so the
+  // audit trail survives); annotate it with the refund reason.
+  stmts.push({sql:"UPDATE expenses SET amount_kobo = 0, description = COALESCE(description,'') || ? WHERE id = ?",params:[` | Voided on Mall refund: ${reason}`,`exp-mall-del-${id}`]});
+  // The delivery-fee cash outflow must unwind with the expense, or the refund's
+  // full Sale Refund inflow reversal would still leave the courier cost as a
+  // permanent outflow on the ledger.
+  stmts.push({sql:"UPDATE money_movements SET amount_kobo = 0, notes = COALESCE(notes,'') || ? WHERE id = ?",params:[` | Voided on Mall refund: ${reason}`,`mm-exp-mall-del-${id}`]});
+  stmts.push({ sql: `UPDATE payments SET status = 'refunded', raw_json = ? WHERE order_id = ?`, params: [JSON.stringify({ orderNo: row.order_no, refundedBy: actor.displayName, refundedAt: at, reason, returnStock }), id] });
+  // Parity with the client-side refundSale(). A Mall refund is a FULL refund, so it
+  // has to settle the relational finance fields too: writing only `status` left
+  // total_refunded_kobo at 0, refunds_json NULL and sale_items.returned_qty at 0,
+  // which is exactly the shape ProcessSaleRefundModal reads as "nothing returned
+  // yet" — the sale stayed refundable from POS and could be refunded and restocked
+  // a second time.
+  const refundedItems = items.map((item) => ({
+    productId: s(item.product_id), productName: s(item.product_name), sku: s(item.sku),
+    quantityReturned: n(item.qty), unitPrice: n(item.unit_price_kobo) / 100,
+    costPrice: n(item.cost_price_kobo) / 100,
+    condition: returnStock ? 'Restock' : 'Damaged',
+    subtotal: n(item.total_kobo) / 100,
+  }));
+  const refundRecord = {
+    id: `ref-mall-${id}`, refundNo: `REF-${s(row.order_no)}-1`, refundDate: at,
+    performedBy: actor.displayName, reason, items: refundedItems,
+    itemsSubtotal: refundedItems.reduce((sum, it) => sum + it.subtotal, 0),
+    discountDeducted: 0, taxDeducted: 0, deliveryFeeRefunded: 0,
+    netRefundAmount: n(row.total_kobo) / 100,
+    // Settled back through the business account rather than a cash drawer.
+    settlementMethod: 'Biz Account',
+    notes: `Refunded from Mall order ${s(row.order_no)}.`,
+  };
+  stmts.push({
+    // updated_at (v12) alongside the finance fields: a Mall refund is a real
+    // mutation of the sale, so it must advance the same edit clock a POS-side
+    // edit does. Without it a refunded sale keeps its pre-refund stamp and the
+    // two changes are indistinguishable to the sync merge.
+    sql: `UPDATE sales SET status = 'Refunded', total_refunded_kobo = ?, refunds_json = ?, notes = COALESCE(notes, '') || ?, updated_at = ? WHERE id = ?`,
+    params: [n(row.total_kobo), JSON.stringify([refundRecord]), ` | Refunded from Mall: ${reason}`, at, row.linked_sale_id],
+  });
+  // Mark every line fully returned so a later POS refund sees zero remaining qty.
+  for (const item of items) {
+    stmts.push({ sql: `UPDATE sale_items SET returned_qty = qty WHERE sale_id = ? AND product_id = ?`, params: [row.linked_sale_id, item.product_id] });
+  }
+  stmts.push({ sql: `INSERT INTO money_movements (id, date, type, subtype, source_account, dest_account, amount_kobo, notes, ref_no, ref_id, performed_by, created_at) VALUES (?, ?, 'Sale Refund', ?, ?, NULL, ?, ?, ?, ?, ?, ?)`, params: [`mm-refund-${row.linked_sale_id}`, at, `Mall ${s(row.payment_provider) === 'Cash' ? 'Cash' : 'Biz Account'} Refund (Full)`, paymentDestination(s(row.payment_provider)), row.total_kobo, reason, row.order_no, row.linked_sale_id, actor.displayName, at] });
+  // Also claw back any store credit this sale created, mirroring refundSale():
+  // otherwise a refunded order leaves spendable credit behind on the customer.
+  if (row.customer_id) stmts.push({ sql: `UPDATE customers SET purchase_history_count = MAX(0, purchase_history_count - 1), lifetime_value_kobo = MAX(0, lifetime_value_kobo - ?), loyalty_points = MAX(0, loyalty_points - ?), overage_balance_kobo = MAX(0, overage_balance_kobo - COALESCE((SELECT overage_created_kobo FROM sales WHERE id = ?), 0)) WHERE id = ?`, params: [row.total_kobo, Math.floor(n(row.total_kobo) / 10_000), row.linked_sale_id, row.customer_id] });
+  if (returnStock) for (const item of items) {
+    stmts.push({ sql: 'UPDATE products SET stock_qty = stock_qty + ?, updated_at = ? WHERE id = ?', params: [item.qty, at, item.product_id] });
+    stmts.push({
+      // One products seek instead of two correlated subqueries (same shape as the
+      // checkout release path): prev = post-restock stock - qty, new = the restocked value.
+      sql: `INSERT INTO stock_movements (id, product_id, product_name, type, qty, prev_stock, new_stock, ref_id, notes, performed_by, created_at)
+        SELECT ?, p.id, ?, 'Returned', ?, p.stock_qty - ?, p.stock_qty, ?, ?, ?, ?
+        FROM products p WHERE p.id = ?`,
+      params: [`mv-refund-${id}-${item.id}`, item.product_name, item.qty, item.qty, `refund:${id}`, reason, actor.displayName, at, item.product_id],
+    });
+  }
+  stmts.push({ sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'REFUND_MALL_ORDER', 'MallOrder', ?, ?, ?)`, params: [`audit-refund-${id}`, actor.id, id, `${actor.displayName} refunded ${row.order_no}. ${reason}`, at] });
+  // The unwind rewrites sales, payments, money movements, customer metrics,
+  // stock and the delivery order — all client-visible: bump the revision.
+  stmts.push(revisionBumpStatement());
+  try { await runOrderBatch(exec, row, stmts); } catch (error) {
+    const concurrent = await exec.queryAll('SELECT status FROM mall_orders WHERE id = ?', [id]);
+    if (s(concurrent[0]?.status) === 'refunded') return detail(exec, id);
+    throw error;
+  }
+  return detail(exec, id);
+}
+
+/**
+ * Bridge: a counter-side POS edit/refund of a Mall-originated sale (`sale-<orderId>`)
+ * back onto the Mall order. The forward cascade (collect-payment) already creates
+ * the sale, items, treasury inflow and customer metrics; without this reverse hop a
+ * staff edit or POS refund left `mall_orders`/`mall_order_items`/`payments` frozen
+ * at checkout time, so the buyer's `/mall/orders` tracking page showed a stale
+ * total, stale lines and a stale status.
+ *
+ * The client sends the POS-side truth it just committed; this endpoint reconciles
+ * the Mall rows to it in one guarded batch and emits AMEND_MALL_ORDER_FROM_POS so
+ * the buyer is emailed the change. Only Administrator/Store Manager/Sales Staff
+ * may call it (the roles that can edit a sale), and only a sale id of the
+ * `sale-<orderId>` shape resolves — a POS walk-in sale has no Mall order to sync.
+ */
+async function syncFromPos(exec: MallExecutor, id: string, actor: StaffActor, body: any) {
+  if (!canOperate(actor)) fail(403, 'You do not have permission to amend Mall orders.');
+  const row = await getOrderRow(exec, id);
+  const status = s(row.status);
+  if (!s(row.linked_sale_id)) fail(409, 'This Mall order has no linked sale to reconcile.');
+  if (status === 'cancelled') fail(409, 'A cancelled Mall order cannot be amended.');
+
+  const totalKobo = n(body?.totalKobo);
+  if (totalKobo < 0) fail(400, 'A non-negative order total is required.');
+  const paidKobo = Math.max(0, n(body?.paidKobo));
+  const discountKobo = Math.max(0, n(body?.discountKobo));
+  const deliveryFeeKobo = Math.max(0, n(body?.deliveryFeeKobo));
+  const items = Array.isArray(body?.items) ? body.items : null;
+  // A wholesale line replacement must not be able to empty the order: an absent
+  // or empty `items` would DELETE every line while leaving a non-zero total.
+  if (!items || items.length === 0) fail(400, 'The amended line items are required.');
+  for (const item of items) {
+    if (n(item?.qty) <= 0) fail(400, 'Each line item needs a positive quantity.');
+    if (!s(item?.productId)) fail(400, 'Each line item needs a product id.');
+  }
+
+  // The line items are the authoritative truth of what the buyer ordered, so the
+  // subtotal is derived from them (never trusted from the client) and the client's
+  // total must agree with subtotal − discount + delivery fee. A tolerance of one
+  // naira absorbs per-line rounding drift; anything beyond that is a malformed or
+  // tampered amendment, not a price edit.
+  const itemsSubtotal = items.reduce((sum, it: any) => sum + n(it?.qty) * n(it?.unitPriceKobo), 0);
+  const derivedTotal = itemsSubtotal - discountKobo + deliveryFeeKobo;
+  if (Math.abs(totalKobo - derivedTotal) > 100) fail(400, 'Order total does not match the line items.');
+
+  const at = nowIso();
+  const stmts: MallStmt[] = [];
+  // Header: totals always; the status only when the caller sends one, so an edit
+  // that merely re-prices an unpaid order cannot flip it to `paid` in the buyer's
+  // view (and a refund that flips it to `refunded` still can).
+  stmts.push({
+    sql: `UPDATE mall_orders SET total_kobo = ?, subtotal_kobo = ?, discount_kobo = ?, delivery_fee_kobo = ?, status = ? WHERE id = ?`,
+    params: [derivedTotal, itemsSubtotal, discountKobo, deliveryFeeKobo, s(body?.orderStatus, status), id],
+  });
+  // Replace the lines wholesale: an edit can add, drop or re-price lines, and a
+  // diff would leave orphans behind. Deterministic ids keep the write idempotent.
+  stmts.push({ sql: 'DELETE FROM mall_order_items WHERE mall_order_id = ?', params: [id] });
+  items.forEach((item: any, index: number) => {
+    const qty = Math.max(0, n(item?.qty));
+    const unitKobo = Math.max(0, n(item?.unitPriceKobo));
+    stmts.push({
+      sql: `INSERT INTO mall_order_items (id, mall_order_id, product_id, product_name, qty, unit_price_kobo, total_kobo)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      params: [`${id}-item-${index}`, id, s(item?.productId), s(item?.name, 'Item'), qty, unitKobo, qty * unitKobo],
+    });
+  });
+  stmts.push({
+    sql: `UPDATE payments SET amount_kobo = ?, status = ?, raw_json = ? WHERE order_id = ?`,
+    params: [derivedTotal, s(body?.paymentStatus, s(row.payment_status, 'pending')), JSON.stringify({ amendedBy: actor.displayName, amendedAt: at, paidKobo }), id],
+  });
+  // The audit row is what the outbox trigger turns into the buyer's amendment
+  // email, so it must be written even when nothing else changed.
+  stmts.push({
+    sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'AMEND_MALL_ORDER_FROM_POS', 'MallOrder', ?, ?, ?)`,
+    params: [`audit-pos-sync-${id}-${uuid()}`, actor.id, id, `${actor.displayName} amended Mall order ${s(row.order_no)} from the counter POS.`, at],
+  });
+  stmts.push(revisionBumpStatement());
+  await runOrderBatch(exec, row, stmts);
+  return detail(exec, id);
+}
+
+async function parseBody(request: Request) {
+  const text=await request.text();
+  if(text.length>16_384) fail(413,'Request body is too large.');
+  try {
+    const body=text?JSON.parse(text):{};
+    if(!body || typeof body!=='object' || Array.isArray(body)) fail(400,'Expected a JSON object.');
+    return body;
+  } catch { fail(400,'Invalid JSON request body.'); }
+}
+
+async function reviewDelivery(exec:MallExecutor,id:string,actor:StaffActor,body:any) {
+  if (!['Administrator','Store Manager'].includes(actor.role)) fail(403,'Manager access required to verify delivery serviceability.');
+  const row=await getOrderRow(exec,id);
+  if (!['pending','confirmed'].includes(row.status) || row.linked_sale_id) fail(409,'Only unpaid orders can be reviewed.');
+  const delivery=deliveryData(row);
+  if (!delivery.zone || delivery.zone==='pickup') fail(409,'Pickup orders do not need delivery review.');
+  if(body?.confirmed!==true) fail(400,'Explicitly confirm the address is serviceable in the selected delivery zone.');
+  const at=nowIso();
+  await runOrderBatch(exec,row,[
+    {sql:'UPDATE mall_orders SET delivery_address_json=? WHERE id=?',params:[JSON.stringify({...delivery,addressVerified:true,addressVerifiedBy:actor.id,addressVerifiedAt:at}),id]},
+    {sql:"INSERT INTO audit_logs(id,actor_id,action,entity,entity_id,details,created_at) VALUES (?,?,'VERIFY_MALL_DELIVERY','MallOrder',?,?,?)",params:[crypto.randomUUID(),actor.id,id,`Address and ${delivery.zone} serviceability verified`,at]},
+    revisionBumpStatement(),
+  ]);
+  return detail(exec,id);
+}
+
+export async function handleStaffMallApi(request: Request, exec: MallExecutor, actor: StaffActor): Promise<Response> {
+  const mutating = request.method !== 'GET' && request.method !== 'HEAD';
+  try {
+    const response = await staffMallRoute(request, exec, actor);
+    // Any successful write must not leave a cached count/readiness payload
+    // behind: the sidebar polls counts every minute from every open tab.
+    if (mutating && response.ok) invalidateStaffMallCaches();
+    return response;
+  } catch (error) {
+    const known = error as DomainError;
+    return json({ error: error instanceof Error ? error.message : 'Mall order operation failed.' }, known.status || 500);
+  }
+}
+
+async function staffMallRoute(request: Request, exec: MallExecutor, actor: StaffActor): Promise<Response> {
+  {
+    if (!actor?.id) return json({ error: 'Authentication required.' }, 401);
+    if (!['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'].includes(actor.role)) fail(403, 'Staff Mall access is not permitted for this role.');
+    const url = new URL(request.url, 'http://localhost');
+    const prefix = '/api/staff/mall-orders';
+    const tail = url.pathname.slice(prefix.length).replace(/^\//, '');
+    const parts = tail ? tail.split('/') : [];
+    if (request.method === 'GET' && tail === 'operations') {
+      if (!['Administrator','Store Manager','Accountant'].includes(actor.role)) fail(403,'Management access required.');
+      // ~15 statements per poll from every open staff tab; the payload only
+      // moves when an order or its outbox row changes, so it is cached briefly.
+      if (cachedOperations && cachedOperations.expiresAt > Date.now()) return json(cachedOperations.payload);
+      const payload = await mallMetrics(exec);
+      cachedOperations = { expiresAt: Date.now() + OPERATIONS_CACHE_TTL_MS, payload };
+      return json(payload);
+    }
+    if (request.method === 'POST' && tail === 'retry-notifications') {
+      if (!['Administrator','Store Manager'].includes(actor.role)) fail(403,'Management access required.');
+      await exec.runBatch([{sql:"UPDATE mall_outbox SET status='pending',attempts=0,next_attempt_at=0 WHERE status='dead'"}]);
+      return json({ok:true});
+    }
+    if (request.method === 'GET' && parts.length === 0) return await listOrders(exec, url);
+    if (request.method === 'GET' && parts[0] === 'counts') return await counts(exec);
+    if (request.method === 'GET' && parts.length === 1) return await detail(exec, decodeURIComponent(parts[0]));
+    if (request.method === 'POST' && parts.length === 2) {
+      const id = decodeURIComponent(parts[0]);
+      const body = await parseBody(request);
+      if (parts[1] === 'confirm') return await confirmOrder(exec, id, actor);
+      if (parts[1] === 'review-delivery') return await reviewDelivery(exec,id,actor,body);
+      if (parts[1] === 'reject-payment') {
+        if(!['Administrator','Store Manager'].includes(actor.role)) fail(403,'Manager access required.');
+        return await cancelOrder(exec,id,actor,{reason:`Payment rejected: ${s(body?.reason,'Receipt could not be verified')}`});
+      }
+      if (parts[1] === 'quote-delivery') return await quoteDelivery(exec, id, actor, body);
+      if (parts[1] === 'cancel') return await cancelOrder(exec, id, actor, body);
+      if (parts[1] === 'collect-payment') return await finalizePayment(exec, id, actor, body, false);
+      if (parts[1] === 'verify-payment') return await finalizePayment(exec, id, actor, body, true);
+      if (parts[1] === 'refund') return await refundOrder(exec, id, actor, body);
+      if (parts[1] === 'sync-from-pos') return await syncFromPos(exec, id, actor, body);
+      if (STATUS_ACTIONS[parts[1]]) return await transitionOrder(exec, id, actor, parts[1], body);
+    }
+    return json({ error: 'Unknown staff Mall order route.' }, 404);
+  }
+}
+
+export async function maintainMall(exec: MallExecutor, send?: typeof fetch, options?: MallMaintenanceOptions) {
+  return runMallMaintenance(exec, id => handleStaffMallApi(new Request(`https://internal/api/staff/mall-orders/${encodeURIComponent(id)}/cancel`,{
+    method:'POST',body:JSON.stringify({reason:'Unpaid order expired; reserved stock released.'}),
+  }),exec,{id:'mall-scheduler',displayName:'Mall scheduler',role:'Administrator'}), send, options);
+}

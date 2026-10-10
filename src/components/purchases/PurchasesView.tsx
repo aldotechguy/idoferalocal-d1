@@ -44,6 +44,8 @@ import { PriceAdjustmentReportModal } from './PriceAdjustmentReportModal';
 import { OrderNoteModal } from './OrderNoteModal';
 import { ConfirmPlaceOrderModal } from './ConfirmPlaceOrderModal';
 import { ProductSearchPicker, POItemFormState } from './ProductSearchPicker';
+import { useInteractions } from '../../context/InteractionContext';
+import { localIsoDate } from '../../shared/localDate';
 import { QuickAddSupplierModal } from './QuickAddSupplierModal';
 import { AddProductModal } from '../modals/AddProductModal';
 
@@ -68,6 +70,7 @@ export const PurchasesView: React.FC = () => {
   } = useApp();
   const { currentUser, isSuperAdmin, isPrivacyMode } = useAuth();
   const { showToast } = useToast();
+  const { notify, confirm } = useInteractions();
 
   // Filters & Tabs State
   const [activeTab, setActiveTab] = useState<DeliveryTab>('All');
@@ -107,11 +110,14 @@ export const PurchasesView: React.FC = () => {
   const [selectedSupplierId, setSelectedSupplierId] = useState(suppliers[0]?.id || '');
   const [poItems, setPoItems] = useState<POItemFormState[]>([]);
   const [deliveryFee, setDeliveryFee] = useState<number>(0);
+  // Order and delivery dates are LOCAL calendar dates: the date inputs and every
+  // consumer treat them as local, while toISOString() gave the UTC date (one day
+  // earlier for anyone working before 01:00 WAT).
   const [poOrderDate, setPoOrderDate] = useState<string>(
-    new Date().toISOString().split('T')[0]
+    () => localIsoDate(new Date())
   );
   const [expectedDelivery, setExpectedDelivery] = useState(
-    new Date(Date.now() + 86400000 * 5).toISOString().split('T')[0]
+    () => localIsoDate(new Date(Date.now() + 86400000 * 5))
   );
   const [initialPaymentStatus, setInitialPaymentStatus] = useState<'Unpaid' | 'Paid'>('Unpaid');
   const [initialPaymentSource, setInitialPaymentSource] = useState<LiquidAccountType>('Biz Account');
@@ -127,9 +133,9 @@ export const PurchasesView: React.FC = () => {
   const draftPOsCount = draftPOs.length;
   const draftPOsValue = draftPOs.reduce((sum, po) => sum + po.totalAmount, 0);
 
-  const officialPOs = purchases.filter((po) => po.deliveryStatus !== 'Draft');
+  const officialPOs = React.useMemo(() => purchases.filter((po) => po.deliveryStatus !== 'Draft'), [purchases]);
   const totalPOsCount = purchases.length;
-  const totalPOValue = purchases.reduce((sum, po) => sum + po.totalAmount, 0);
+  const totalPOValue = React.useMemo(() => purchases.reduce((sum, po) => sum + po.totalAmount, 0), [purchases]);
 
   const pendingPOs = purchases.filter((po) => po.deliveryStatus === 'Pending' || po.deliveryStatus === 'Partial');
   const pendingUnitsCount = pendingPOs.reduce(
@@ -139,13 +145,18 @@ export const PurchasesView: React.FC = () => {
     0
   );
 
-  const unpaidTotal = officialPOs.reduce((sum, po) => sum + Math.max(0, po.totalAmount - po.paidAmount), 0);
-  const passedInspectionsCount = purchases.filter(
-    (po) => po.inspectionStatus === 'Passed' || po.inspectionStatus === 'Passed with Exceptions'
-  ).length;
+  const unpaidTotal = React.useMemo(
+    () => officialPOs.reduce((sum, po) => sum + Math.max(0, po.totalAmount - po.paidAmount), 0),
+    [officialPOs],
+  );
+  const passedInspectionsCount = React.useMemo(
+    () => purchases.filter((po) => po.inspectionStatus === 'Passed' || po.inspectionStatus === 'Passed with Exceptions').length,
+    [purchases],
+  );
 
-  // Filtered Purchases list
-  const filteredPurchases = purchases.filter((po) => {
+  // Filtered Purchases list. Memoized: it was rebuilt on every render, so the
+  // pagination memo below never hit and every keystroke re-filtered the list.
+  const filteredPurchases = React.useMemo(() => purchases.filter((po) => {
     // Delivery status tab
     if (activeTab === 'Draft' && po.deliveryStatus !== 'Draft') return false;
     if (activeTab === 'Pending' && po.deliveryStatus !== 'Pending') return false;
@@ -168,7 +179,7 @@ export const PurchasesView: React.FC = () => {
     }
 
     return true;
-  });
+  }), [purchases, activeTab, paymentFilter, searchQuery]);
 
   // Pagination State
   const [currentPage, setCurrentPage] = useState(1);
@@ -191,8 +202,8 @@ export const PurchasesView: React.FC = () => {
     setSelectedSupplierId(suppliers[0]?.id || '');
     setPoItems([]);
     setDeliveryFee(0);
-    setPoOrderDate(new Date().toISOString().split('T')[0]);
-    setExpectedDelivery(new Date(Date.now() + 86400000 * 5).toISOString().split('T')[0]);
+    setPoOrderDate(localIsoDate(new Date()));
+    setExpectedDelivery(localIsoDate(new Date(Date.now() + 86400000 * 5)));
     setInitialPaymentStatus('Unpaid');
     setDraftNotes('');
     setShowAddModal(true);
@@ -202,8 +213,8 @@ export const PurchasesView: React.FC = () => {
     setEditingDraftPo(draft);
     setSelectedSupplierId(draft.supplierId || suppliers[0]?.id || '');
     setDeliveryFee(draft.deliveryFee || 0);
-    setPoOrderDate(draft.createdAt ? draft.createdAt.split('T')[0] : new Date().toISOString().split('T')[0]);
-    setExpectedDelivery(draft.expectedDelivery || new Date(Date.now() + 86400000 * 5).toISOString().split('T')[0]);
+    setPoOrderDate(draft.createdAt ? draft.createdAt.split('T')[0] : localIsoDate(new Date()));
+    setExpectedDelivery(draft.expectedDelivery || localIsoDate(new Date(Date.now() + 86400000 * 5)));
     setDraftNotes(draft.notes || '');
     setPoItems(
       draft.items.map((i) => {
@@ -341,7 +352,7 @@ export const PurchasesView: React.FC = () => {
   const handleSaveDraftChanges = (openNoteAfter: boolean = false) => {
     if (!editingDraftPo) return;
     if (poItems.length === 0) {
-      alert('Please add at least one product item.');
+      notify('Please add at least one product item.', 'Purchase order is empty');
       return;
     }
 
@@ -408,7 +419,7 @@ export const PurchasesView: React.FC = () => {
   const handleSaveAndPlaceOfficialOrder = () => {
     if (!editingDraftPo) return;
     if (poItems.length === 0) {
-      alert('Please add at least one product item.');
+      notify('Please add at least one product item.', 'Purchase order is empty');
       return;
     }
 
@@ -466,7 +477,7 @@ export const PurchasesView: React.FC = () => {
 
   const handleCreatePO = (isDraftMode: boolean = false) => {
     if (poItems.length === 0) {
-      alert('Please add at least one product item to the purchase order.');
+      notify('Please add at least one product item to the purchase order.', 'Purchase order is empty');
       return;
     }
 
@@ -659,8 +670,8 @@ export const PurchasesView: React.FC = () => {
     setPriceAdjustmentItems([]);
   };
 
-  const handleDeletePO = (po: PurchaseOrder) => {
-    if (confirm(`Are you sure you want to cancel and remove Purchase Order ${po.poNumber}?`)) {
+  const handleDeletePO = async (po: PurchaseOrder) => {
+    if (await confirm({ title: 'Remove purchase order', message: `Cancel and remove purchase order ${po.poNumber}?`, confirmText: 'Remove order', variant: 'danger' })) {
       deletePurchaseOrder(po.id, currentUser?.displayName || 'Admin');
     }
   };
@@ -668,7 +679,7 @@ export const PurchasesView: React.FC = () => {
   const openPurchaseOrderEditor = (po: PurchaseOrder) => {
     if (!isSuperAdmin) return;
     setEditingPo(po);
-    const orderDateStr = po.createdAt ? po.createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
+    const orderDateStr = po.createdAt ? po.createdAt.split('T')[0] : localIsoDate(new Date());
     const receivedDateStr = po.inspectedAt
       ? po.inspectedAt.split('T')[0]
       : (po.receivingHistory && po.receivingHistory.length > 0 && po.receivingHistory[0].receivedAt)
@@ -2193,13 +2204,6 @@ export const PurchasesView: React.FC = () => {
         isOpen={!!orderNotePo}
         onClose={() => setOrderNotePo(null)}
         po={orderNotePo}
-        supplier={suppliers.find((s) => s.id === orderNotePo?.supplierId)}
-        products={products}
-        businessName={settings.businessName || 'Business Organization'}
-        businessAddress={settings.businessAddress}
-        businessPhone={settings.businessPhone}
-        businessEmail={settings.businessEmail}
-        currencySymbol={settings.currencySymbol}
         onPlaceOrder={(po) => {
           setOrderNotePo(null);
           setConfirmPlacePo(po);
@@ -2214,12 +2218,8 @@ export const PurchasesView: React.FC = () => {
       <ConfirmPlaceOrderModal
         isOpen={!!confirmPlacePo}
         onClose={() => setConfirmPlacePo(null)}
-        onConfirm={handleConfirmPlaceOrder}
         po={confirmPlacePo}
-        supplier={suppliers.find((s) => s.id === confirmPlacePo?.supplierId)}
-        products={products}
-        currencySymbol={settings.currencySymbol}
-        treasuryBalances={treasuryBalances}
+        onOrderPlaced={() => setConfirmPlacePo(null)}
       />
 
       {/* MODAL: Discard Draft Confirmation */}

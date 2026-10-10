@@ -1,12 +1,228 @@
-name = "idofera-packaging"
+# ============================================================================
+# PRODUCTION IS `--env mall` (Worker `idomall`). ALWAYS pass --env mall.
+#
+# The top-level `name = "idofera-packaging"` below is NOT a deployable target:
+# that worker does not exist on this account, so a bare `wrangler deploy`
+# fails with API error 10007 "This Worker does not exist on your account".
+# Verified 2026-10-05.
+#
+#   npx wrangler deploy --env mall      # production
+#   npx wrangler deploy --env preview   # disposable, isolated D1/R2
+#
+# NOTE: this top-level block is still REQUIRED. Named environments inherit
+# `main`, `compatibility_date`, `compatibility_flags` and `observability` from
+# it -- none of the [env.*] sections redefine those. Deleting the block below
+# would break `wrangler deploy --env mall`; only `name`, `vars`, `triggers`,
+# `assets` and the r2/d1 bindings are genuinely dead, and they are kept
+# commented as such rather than removed, so the inherited base stays intact.
+# ============================================================================
+name = "idofera-packaging"  # NEVER DEPLOYED -- see the header above.
 main = "sites-worker.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
-[site]
-bucket = "./dist"
+# Dead: only meaningful for the never-deployed default env. [env.mall] and
+# [env.preview] each define their own complete [vars].
+# Display-only: the health endpoint reports which bound D1 database answered.
+[vars]
+D1_DATABASE_ID = "3e95a550-a091-490b-819d-f0acb7ea8dd8"
+# Kill-switch for honoring the product-level POS promotional price on the Mall.
+# Default OFF: review what would change via posPromoPriceKobo in Mall Listings,
+# then set to "true" and redeploy.
+MALL_HONOR_POS_PROMOS = "false"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[observability]
+enabled = true
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+run_worker_first = true
+
+[[r2_buckets]]
+binding = "MALL_IMAGES"
+bucket_name = "idofera-mall-images"  # Dead: [env.mall] binds R2 `idomall`.
 
 [[d1_databases]]
 binding = "DB"
 database_name = "idofera-d1"
 database_id = "3e95a550-a091-490b-819d-f0acb7ea8dd8"
+
+# NOTE (2026-10-04): `idofera-d1` was the legacy document-store canon. The canon
+# was migrated into the relational D1 `idofera` (`[env.mall]` below), which is now
+# the single source of truth. This default binding is kept only as a frozen
+# read-only rollback target — do NOT write the canon back to it. See
+# docs/05-canon-migration.md.
+#
+# As of 2026-10-05 there is NO deployed worker bound to this database (the
+# `idofera-packaging` script does not exist on the account), so it is a data
+# archive rather than a live rollback target: to roll back, repoint `--env mall`
+# at it in a reviewed change.
+
+# Live Mall target: shortened public name, backed by relational D1 `idofera`.
+# Usage: `npx wrangler dev --env mall` / `npx wrangler deploy --env mall`
+[env.mall]
+name = "idomall"
+
+[env.mall.assets]
+directory = "./dist"
+binding = "ASSETS"
+run_worker_first = true
+
+# TWO crons, deliberately split by responsibility (src/server/mallOperations.ts
+# `MallMaintenanceMode`). The handler branches on `controller.cron`:
+#
+#   "*/10 * * * *" -> mode 'drain'  heartbeat + outbox drain + readiness marker.
+#                     Notification latency stays 0-10 minutes; this is the path
+#                     that owns readiness.scheduler, so a dead drain is still
+#                     detected (3 missed runs = 30 min, see mallReadiness).
+#   "7 * * * *"    -> mode 'sweep'  unpaid expiry, cleanup DELETEs, stale-order
+#                     alerts, delivery-ledger retention. Minute 7 is off every
+#                     "*/10" boundary so the two never share a minute.
+#
+# Running both bodies on every trigger cost ~3,264 D1 statements/day on a system
+# with no orders at all; this split is ~768/day with identical behaviour. The
+# sweep path deliberately does NOT refresh mall_job_runs, so it can never mask a
+# dead drain.
+[env.mall.triggers]
+crons = ["*/10 * * * *", "7 * * * *"]
+
+[[env.mall.d1_databases]]
+binding = "DB"
+database_name = "idofera"
+database_id = "3a3eb157-5aa5-419a-a8ce-2eade2afc436"
+
+# Live product-image bucket. This environment is no longer disposable preview.
+[[env.mall.r2_buckets]]
+binding = "MALL_IMAGES"
+bucket_name = "idomall"
+
+[env.mall.vars]
+# Display-only: the health endpoint reports which bound D1 database answered.
+D1_DATABASE_ID = "3a3eb157-5aa5-419a-a8ce-2eade2afc436"
+# Kill-switch for honoring the product-level POS promotional price on the Mall.
+# Default OFF: review what would change via posPromoPriceKobo in Mall Listings
+# (staff dashboard), then set to "true" and redeploy to enable catalog-wide.
+MALL_HONOR_POS_PROMOS = "false"
+# Cloudflare Access staff gate (docs/staff-access.md). Additive and OFF by
+# default: the storefront and the password login keep working unchanged until
+# these are filled in. The JWT is only verified once BOTH the team domain and
+# the application AUD are set; CF_ACCESS_SSO additionally mints the session
+# from that verified identity. CF_ACCESS_AUD accepts comma-separated tags —
+# one per Access application covering the staff paths (each mints its own,
+# and the /api/auth/session app's tag must be in the list for SSO to work).
+# Empty CF_ACCESS_SUPER_ADMIN_GROUP = the group leg is disabled (fail-open
+# on that one requirement, by design).
+CF_ACCESS_SSO = "true"
+CF_ACCESS_TEAM_DOMAIN = "https://long-scene-5c20.cloudflareaccess.com"
+# Every audience that may appear in a verified token: the per-host Access
+# applications harvested from their IdP redirects. The `kid` in an
+# `.../cdn-cgi/access/login/<host>?kid=<AUD>` redirect IS that application's
+# Audience tag, so it is the authoritative value for each host — a stale tag
+# here means Access authenticates the person and the Worker then rejects the
+# JWT, bouncing the browser back to the Mall:
+#   7a36c57c… = idomall.olz.workers.dev
+#   10a45885… = idofera.de5.net      (custom domain)
+#   111e3b49… = idomall-preview.olz.workers.dev
+#   7b38e6e9… = dashboard tag read during rollout
+# Re-read them with: npx tsx scripts/verify-access-apps.ts
+CF_ACCESS_AUD = "7a36c57c088b4fb3b04028c8791f8225ce2503b127fb5d16acdd9e575dfe6d86,10a45885f99683e4ae3e9e67fb185dff678dbc60c275f8fee581a0328f4728c7,111e3b4964f8cbaa522e929ad76bbc1aab2559ac81b2237b053b640c5e8025f0,7b38e6e9-f2e2-4881-9435-72e048d14733"
+CF_ACCESS_SUPER_ADMIN_GROUP = "5ca9257d32c94d8eb600e1e7677131ab"
+CF_ACCESS_STEP_UP_SECONDS = "600"
+# Non-sensitive Mall config. Update MALL_PICKUP_ADDRESS and MALL_PICKUP_HOURS
+# to your real pickup location and hours before accepting orders.
+MALL_CHECKOUT_ENABLED = "true"
+MALL_PICKUP_ADDRESS = "16 Atakpo Street, Uyo, Akwa Ibom"
+MALL_PICKUP_HOURS = "10AM - 6PM"
+  MALL_BANK_NAME = "MONIEPOINT"
+  MALL_BANK_ACCOUNT_NAME = "IDOFERA ENTERPRISE"
+  MALL_BANK_ACCOUNT_NUMBER = "8063766861"
+  MALL_WEBHOOK_URL = "https://idofera.de5.net/api/mall-webhook"
+  # Sender for order emails. Must be an address on a domain verified in Resend.
+  # Transactional mail is isolated on the `mail.` subdomain on purpose: the apex
+  # `idofera.de5.net` reputation was damaged by a Google block, and Resend's own
+  # guidance is to segment sending reputation per subdomain rather than share one
+  # across transactional and other mail. Re-verify `mail.idofera.de5.net` in
+  # Resend and publish its SPF/DKIM/DMARC records before relying on this.
+  # The sandbox sender `onboarding@resend.dev` is only a last-resort fallback in
+  # code: it 403s for any recipient other than the Resend account owner, so it
+  # cannot deliver the customer copy.
+  MALL_EMAIL_FROM = "Idofera <orders@mail.idofera.de5.net>"
+  # Outbox drain pacing. A drain used to take 10 rows and send them back to back,
+  # and every order event now emails the operator AND the buyer — so a backlog
+  # went out as ~20 near-identical messages in a few seconds. That burst is the
+  # documented trigger for Gmail's 550-5.7.1 UnsolicitedMessageError
+  # (docs/gmail-deliverability-fix.md). These are the safe defaults; a blank or
+  # unparseable value falls back to them rather than to "no throttle".
+  # Worst case is now 3 events (6 emails) spaced 2s apart, per drain run
+  # (the drain cron runs every ten minutes; see [env.mall.triggers]).
+  MALL_OUTBOX_DRAIN_BATCH = "3"
+  MALL_OUTBOX_DRAIN_GAP_MS = "2000"
+
+  # MALL_WEBHOOK_SECRET, MALL_NOTIFY_EMAIL and RESEND_API_KEY are Wrangler
+  # secrets (never committed): `npx wrangler secret put --env mall <NAME>`.
+  # The scheduled drain signs each outbox POST with MALL_WEBHOOK_SECRET and
+  # posts it to MALL_WEBHOOK_URL above; the receiver verifies that signature and
+  # emails the operator via Resend.
+
+# Disposable preview target for the launch contract checks (maximum intended cart
+# size and existing-schema rollout). Isolated D1 + R2 and placeholder business
+# config, so preview runs never touch live orders, stock, customers or bank
+# details. No cron trigger on purpose: the preview must not open a second
+# notification pipeline. Readiness therefore reports scheduler:false here.
+# Usage: `npx wrangler deploy --env preview`
+[env.preview]
+name = "idomall-preview"
+
+[env.preview.assets]
+directory = "./dist"
+binding = "ASSETS"
+run_worker_first = true
+
+# The top-level [triggers] cron is inherited by named environments, so it must be
+# explicitly emptied here: the disposable preview must not open a second
+# notification pipeline (or email the operator for contract-check orders).
+[env.preview.triggers]
+crons = []
+
+[[env.preview.d1_databases]]
+binding = "DB"
+database_name = "idofera-preview"
+database_id = "647becf9-e665-4a85-9fa5-dbb5dedbcefa"
+
+[[env.preview.r2_buckets]]
+binding = "MALL_IMAGES"
+bucket_name = "idomall-preview"
+
+[env.preview.vars]
+D1_DATABASE_ID = "647becf9-e665-4a85-9fa5-dbb5dedbcefa"
+MALL_HONOR_POS_PROMOS = "false"
+MALL_CHECKOUT_ENABLED = "true"
+# Cloudflare Access staff gate (docs/staff-access.md). The preview is covered by
+# the same Access applications as the live Worker, so a preview deployment is
+# never an unguarded copy of the staff workspace. Access already sits in front of
+# this host, so the gate must be CONFIGURED here too: leaving CF_ACCESS_SSO
+# "false" (or CF_ACCESS_AUD empty) made /api/auth/session un-mintable, and every
+# completed OTP bounced the browser straight back to the Mall.
+# The host-specific Audience tag for idomall-preview.olz.workers.dev is its
+# Access login redirect's `kid` (see [env.mall.vars] above for the full list).
+CF_ACCESS_SSO = "true"
+CF_ACCESS_TEAM_DOMAIN = "https://long-scene-5c20.cloudflareaccess.com"
+CF_ACCESS_AUD = "7a36c57c088b4fb3b04028c8791f8225ce2503b127fb5d16acdd9e575dfe6d86,10a45885f99683e4ae3e9e67fb185dff678dbc60c275f8fee581a0328f4728c7,111e3b4964f8cbaa522e929ad76bbc1aab2559ac81b2237b053b640c5e8025f0,7b38e6e9-f2e2-4881-9435-72e048d14733"
+# The group leg is intentionally left off in preview: the disposable database has
+# its own roster, and a group mismatch there must not look like a broken gate.
+CF_ACCESS_SUPER_ADMIN_GROUP = ""
+CF_ACCESS_STEP_UP_SECONDS = "600"
+MALL_PICKUP_ADDRESS = "Preview pickup (disposable)"
+MALL_PICKUP_HOURS = "9AM - 5PM"
+MALL_BANK_NAME = "PREVIEW BANK"
+MALL_BANK_ACCOUNT_NAME = "IDOFERA PREVIEW"
+MALL_BANK_ACCOUNT_NUMBER = "0000000000"
+  MALL_EMAIL_FROM = "Idofera Preview <orders@mail.idofera.de5.net>"
+MALL_WEBHOOK_URL = "https://idomall-preview.olz.workers.dev/api/mall-webhook"
+# MALL_WEBHOOK_SECRET, MALL_NOTIFY_EMAIL and RESEND_API_KEY are set the same way
+# as the mall environment: `npx wrangler secret put --env preview <NAME>`.
+

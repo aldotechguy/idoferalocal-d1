@@ -11,10 +11,12 @@ import {
 import { NairaSign } from '../common/NairaSign';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
+import { useInteractions } from '../../context/InteractionContext';
 
 export const PricingView: React.FC = () => {
   const { products, changeProductPrice, pricingHistory, settings } = useApp();
   const { currentUser, isPrivacyMode } = useAuth();
+  const { notify } = useInteractions();
 
   const [selectedProductId, setSelectedProductId] = useState<string>(products[0]?.id || '');
   const [priceType, setPriceType] = useState<'Retail' | 'Wholesale' | 'Dealer' | 'Promotional'>('Retail');
@@ -25,12 +27,41 @@ export const PricingView: React.FC = () => {
 
   const selectedProduct = products.find((p) => p.id === selectedProductId);
 
+  // Current price for a tier, for pre-filling the input and the overview.
+  const tierCurrentPrice = (type: 'Retail' | 'Wholesale' | 'Dealer' | 'Promotional'): number => {
+    if (!selectedProduct) return 0;
+    switch (type) {
+      case 'Retail': return Number(selectedProduct.retailPrice) || 0;
+      case 'Wholesale': return Number(selectedProduct.wholesalePrice) || 0;
+      case 'Dealer': return Number(selectedProduct.dealerPrice) || 0;
+      case 'Promotional': return Number(selectedProduct.promotionalPrice) || 0;
+    }
+  };
+
   const handlePriceSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedProduct || newPrice <= 0) return;
 
+    const isAdmin = currentUser?.role === 'Administrator';
+
+    // An override only makes sense for Administrators; a non-admin toggling it
+    // should never bypass the floor.
+    if (overrideRestrictions && !isAdmin) {
+      notify('Only Administrators may bypass the minimum selling price restriction.', 'Permission required', 'warning');
+      return;
+    }
+
     if (newPrice < (Number(selectedProduct.minimumSellingPrice) || 0) && !overrideRestrictions) {
-      alert(`Cannot set price below minimum selling threshold (${settings.currencySymbol}${(Number(selectedProduct.minimumSellingPrice) || 0).toFixed(2)}) without Administrator override permission.`);
+      notify(`Cannot set price below ${settings.currencySymbol}${(Number(selectedProduct.minimumSellingPrice) || 0).toFixed(2)} without Administrator override permission.`, 'Minimum price restriction', 'warning');
+      return;
+    }
+
+    // Cost floor: setting a selling price below cost silently erodes margin. Only
+    // warn for the retail/wholesale tiers (dealer/promotional may intentionally
+    // run near cost).
+    const cost = Number(selectedProduct.costPrice) || 0;
+    if ((priceType === 'Retail' || priceType === 'Wholesale') && cost > 0 && newPrice < cost && !overrideRestrictions) {
+      notify(`Price ${settings.currencySymbol}${newPrice.toFixed(2)} is below cost (${settings.currencySymbol}${cost.toFixed(2)}). Selling at a loss.`, 'Below cost warning', 'warning');
       return;
     }
 
@@ -97,7 +128,7 @@ export const PricingView: React.FC = () => {
                 }}
                 className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white border border-transparent focus:border-blue-500 font-medium"
               >
-                {products.map((p) => (
+                {products.filter((p) => p.status !== 'Archived').map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name} (SKU: {p.sku})
                   </option>
@@ -138,7 +169,13 @@ export const PricingView: React.FC = () => {
                 </label>
                 <select
                   value={priceType}
-                  onChange={(e) => setPriceType(e.target.value as any)}
+                  onChange={(e) => {
+                    const next = e.target.value as 'Retail' | 'Wholesale' | 'Dealer' | 'Promotional';
+                    setPriceType(next);
+                    // Re-sync the input to the selected tier's current price so a
+                    // tier switch can't silently submit the previous tier's value.
+                    setNewPrice(tierCurrentPrice(next));
+                  }}
                   className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white border border-transparent focus:border-blue-500 font-medium"
                 >
                   <option value="Retail">Retail Price</option>
@@ -176,19 +213,21 @@ export const PricingView: React.FC = () => {
               />
             </div>
 
-            {/* Admin Override */}
-            <div className="flex items-center gap-2 pt-2">
-              <input
-                type="checkbox"
-                id="override"
-                checked={overrideRestrictions}
-                onChange={(e) => setOverrideRestrictions(e.target.checked)}
-                className="rounded text-blue-600 focus:ring-blue-500"
-              />
-              <label htmlFor="override" className="text-slate-600 dark:text-slate-400 font-medium cursor-pointer">
-                Administrator Override (Bypass minimum selling price restriction)
-              </label>
-            </div>
+            {/* Admin Override — Administrators only; a non-admin can never bypass the floor. */}
+            {currentUser?.role === 'Administrator' && (
+              <div className="flex items-center gap-2 pt-2">
+                <input
+                  type="checkbox"
+                  id="override"
+                  checked={overrideRestrictions}
+                  onChange={(e) => setOverrideRestrictions(e.target.checked)}
+                  className="rounded text-blue-600 focus:ring-blue-500"
+                />
+                <label htmlFor="override" className="text-slate-600 dark:text-slate-400 font-medium cursor-pointer">
+                  Administrator Override (Bypass minimum selling price restriction)
+                </label>
+              </div>
+            )}
 
             <button
               type="submit"
@@ -212,7 +251,9 @@ export const PricingView: React.FC = () => {
                 No pricing history recorded yet.
               </p>
             ) : (
-              pricingHistory.map((ph) => (
+              [...pricingHistory]
+                .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+                .map((ph) => (
                 <div key={ph.id} className="pt-3 text-xs space-y-1">
                   <div className="flex justify-between items-start font-bold text-slate-900 dark:text-white">
                     <span className="truncate max-w-[150px]">{ph.productName}</span>

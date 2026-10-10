@@ -2,6 +2,8 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { Sale, SaleItem, PaymentMethod, SaleStatus, DeliveryStatus } from '../../types';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
+import { useInteractions } from '../../context/InteractionContext';
+import { loyaltyPointsForAmount } from '../../shared/customerLedger';
 import {
   Edit3,
   ShieldCheck,
@@ -32,6 +34,7 @@ interface EditSaleModalProps {
 export const EditSaleModal: React.FC<EditSaleModalProps> = ({ sale, onClose, onSaved }) => {
   const { products, customers, settings, deliveryOrders, updateSale } = useApp();
   const { currentUser, isSuperAdmin } = useAuth();
+  const { notify } = useInteractions();
 
   const [editingSaleItems, setEditingSaleItems] = useState<SaleItem[]>([]);
   const [editCustomerId, setEditCustomerId] = useState<string | undefined>(undefined);
@@ -124,7 +127,7 @@ export const EditSaleModal: React.FC<EditSaleModalProps> = ({ sale, onClose, onS
   }, [editCalculatedTotal, editPaidAmount]);
 
   const editLoyaltyPointsGain = useMemo(() => {
-    return Math.floor(editCalculatedTotal * (settings.pointsPerDollar || 0.01));
+    return loyaltyPointsForAmount(editCalculatedTotal, settings.pointsPerDollar);
   }, [editCalculatedTotal, settings.pointsPerDollar]);
 
   const handleDeliveryFeeChange = (val: number | string) => {
@@ -190,7 +193,7 @@ export const EditSaleModal: React.FC<EditSaleModalProps> = ({ sale, onClose, onS
       ? (editCustomerName.trim() || 'Walk-in Customer')
       : (editCustomerId ? (customers.find(c => c.id === editCustomerId)?.name || editCustomerName) : (editCustomerName.trim() || 'Walk-in Customer'));
 
-    updateSale(
+    const saved = updateSale(
       sale.id,
       {
         customerId: finalCustomerId,
@@ -213,16 +216,20 @@ export const EditSaleModal: React.FC<EditSaleModalProps> = ({ sale, onClose, onS
         deliveryFee: parsedDeliveryFee,
         totalAmount: calculatedTotal,
         paidAmount: sanitizedPaidAmount,
-        deliveryAddress: editDeliveryAddress.trim() || undefined,
-        deliveryPhone: editDeliveryPhone.trim() || undefined,
-        courierNotes: editCourierNotes.trim() || undefined,
-        deliveryStatus: editDeliveryStatus,
-        isPickupConfirmed: isPickupConfirmed,
+        ...(showDeliveryDetails ? {
+          deliveryAddress: editDeliveryAddress.trim() || undefined,
+          deliveryPhone: editDeliveryPhone.trim() || undefined,
+          courierNotes: editCourierNotes.trim() || undefined,
+          deliveryStatus: editDeliveryStatus,
+          isPickupConfirmed: isPickupConfirmed,
+        } : {}),
       },
       currentUser?.displayName || (isSuperAdmin ? 'Super-Admin' : 'Administrator'),
       isSuperAdmin
     );
 
+    // Keep the editor open on a refused edit so the in-progress changes survive.
+    if (!saved) return;
     onClose();
     if (onSaved) onSaved();
   };
@@ -641,12 +648,16 @@ export const EditSaleModal: React.FC<EditSaleModalProps> = ({ sale, onClose, onS
                 value={editStatus}
                 onChange={(e) => setEditStatus(e.target.value as SaleStatus)}
                 className="w-full px-3 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl text-xs font-bold text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500"
+                title={sale.status === 'Refunded' || sale.status === 'Partially Refunded' ? 'Refunded invoices are read-only here — use Process Refund to adjust returns.' : 'Refunds are processed via Process Refund, not by flipping status here.'}
               >
                 <option value="Completed">Completed</option>
                 <option value="Draft">Draft</option>
                 <option value="Held">Held</option>
-                <option value="Refunded">Refunded</option>
+                {(sale.status === 'Refunded' || sale.status === 'Partially Refunded') && (
+                  <option value={sale.status}>{sale.status} (read-only — use Process Refund)</option>
+                )}
               </select>
+              <p className="text-[10px] text-slate-500 mt-1">Refunds run through Process Refund so stock, ledger and treasury stay in sync.</p>
             </div>
 
             <div>
@@ -819,7 +830,7 @@ export const EditSaleModal: React.FC<EditSaleModalProps> = ({ sale, onClose, onS
                     onClick={() => {
                       const price = parseFloat(editClearanceAmount);
                       if (isNaN(price) || price <= 0) {
-                        alert('Please enter a valid clearance amount.');
+                        notify('Please enter a valid clearance amount.', 'Invalid amount');
                         return;
                       }
                       const qty = parseInt(editClearanceQty) || 1;

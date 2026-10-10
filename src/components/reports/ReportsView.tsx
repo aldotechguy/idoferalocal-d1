@@ -19,11 +19,13 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
+import { useCommittedMallStock } from '../../hooks/useCommittedMallStock';
 import { InvestmentPlannerView } from '../finance/InvestmentPlannerView';
 
 export const ReportsView: React.FC = () => {
   const { sales, products, expenses, settings } = useApp();
-  const { isPrivacyMode } = useAuth();
+  const { isPrivacyMode, currentUser } = useAuth();
+  const committedMallStock = useCommittedMallStock(currentUser);
 
   // Read any pre-selected period intent from navigation (e.g. from Dashboard "Past Month" button)
   const [selectedPeriod, setSelectedPeriod] = useState<string>(() => {
@@ -161,14 +163,17 @@ export const ReportsView: React.FC = () => {
     return validSales.filter((s) => s.createdAt && s.createdAt.startsWith(precedingMonthKey));
   }, [validSales, precedingMonthKey]);
 
+  // Net sale amount accounting for any partial refunds
+  const netSaleAmount = (s: any) => Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.totalRefunded) || 0));
+
   // Core Financial Aggregations for Active Period
   const periodRevenue = useMemo(
-    () => periodSales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0),
+    () => periodSales.reduce((acc, s) => acc + netSaleAmount(s), 0),
     [periodSales]
   );
 
   const precedingPeriodRevenue = useMemo(
-    () => precedingPeriodSales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0),
+    () => precedingPeriodSales.reduce((acc, s) => acc + netSaleAmount(s), 0),
     [precedingPeriodSales]
   );
 
@@ -178,12 +183,12 @@ export const ReportsView: React.FC = () => {
   }
 
   const periodRetailSales = useMemo(
-    () => periodSales.filter((s) => s.type === 'Retail').reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0),
+    () => periodSales.filter((s) => s.type === 'Retail').reduce((acc, s) => acc + netSaleAmount(s), 0),
     [periodSales]
   );
 
   const periodWholesaleSales = useMemo(
-    () => periodSales.filter((s) => s.type === 'Wholesale').reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0),
+    () => periodSales.filter((s) => s.type === 'Wholesale').reduce((acc, s) => acc + netSaleAmount(s), 0),
     [periodSales]
   );
 
@@ -244,7 +249,7 @@ export const ReportsView: React.FC = () => {
         map[method] = { count: 0, total: 0 };
       }
       map[method].count += 1;
-      map[method].total += Number(s.totalAmount) || 0;
+      map[method].total += netSaleAmount(s);
     });
     return Object.entries(map)
       .map(([method, data]) => ({
@@ -256,11 +261,13 @@ export const ReportsView: React.FC = () => {
       .sort((a, b) => b.total - a.total);
   }, [periodSales, periodRevenue]);
 
-  // Top Selling Products in Active Period
-  const productSalesMap: Record<
-    string,
-    { name: string; sku: string; unitsSold: number; totalRevenue: number; totalCost: number }
-  > = {};
+  // Top Selling Products in Active Period. Memoized: this aggregation walks
+  // every line of every sale in the period and used to re-run on every render.
+  const { topSellersList, deadStockList } = useMemo(() => {
+    const productSalesMap: Record<
+      string,
+      { name: string; sku: string; unitsSold: number; totalRevenue: number; totalCost: number }
+    > = {};
 
   periodSales.forEach((s) => {
     (s.items || []).forEach((item) => {
@@ -285,15 +292,17 @@ export const ReportsView: React.FC = () => {
     });
   });
 
-  const topSellersList = Object.values(productSalesMap).sort(
+  const topSellers = Object.values(productSalesMap).sort(
     (a, b) => b.totalRevenue - a.totalRevenue
   );
 
   // Dead / Slow Moving Stock Aggregation (Catalog-wide)
   const soldProductIds = new Set(Object.keys(productSalesMap));
-  const deadStockList = products.filter(
+  const deadStock = products.filter(
     (p) => !soldProductIds.has(p.id) || (productSalesMap[p.id]?.unitsSold || 0) === 0
   );
+    return { topSellersList: topSellers, deadStockList: deadStock };
+  }, [periodSales, products]);
 
   // Export CSV Handler
   const handleExportCSV = () => {
@@ -963,6 +972,12 @@ export const ReportsView: React.FC = () => {
             )}
 
             {/* Inventory Valuation Table */}
+            {reportType === 'InventoryValuation' && committedMallStock && committedMallStock.units > 0 && (
+              <div className="mb-4 p-3 rounded-xl border border-indigo-200 dark:border-indigo-800/60 bg-indigo-50 dark:bg-indigo-950/40 text-xs text-indigo-900 dark:text-indigo-200">
+                <span className="font-bold">Committed Mall stock: {committedMallStock.units.toLocaleString()} units</span>
+                {' '}valued at {isPrivacyMode ? `${cs}••••` : `${cs}${(committedMallStock.costKobo / 100).toFixed(2)}`} cost across {committedMallStock.orders} open Mall order(s). These units already left the shelf at checkout and are excluded from the on-hand valuation below until the order is settled or expires.
+              </div>
+            )}
             {reportType === 'InventoryValuation' && (
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-100 dark:border-slate-800 text-slate-400 uppercase text-[10px] tracking-wider font-bold">

@@ -33,7 +33,9 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       type = 'success',
       duration = 4000,
     }: Omit<ToastItem, 'id' | 'type'> & { type?: ToastType }) => {
-      const id = 'toast-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+      const id = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? `toast-${crypto.randomUUID()}`
+        : `toast-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       const newToast: ToastItem = { id, title, message, type, duration };
 
       setTimeout(() => {
@@ -57,6 +59,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       <div
         className="fixed top-5 right-5 z-[9999] flex flex-col gap-2.5 max-w-sm w-full pointer-events-none px-3 sm:px-0"
         aria-live="polite"
+        aria-relevant="additions"
       >
         {toasts.map((toast) => {
           let bgColors = 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white';
@@ -78,6 +81,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             <div
               key={toast.id}
               className={`pointer-events-auto p-4 rounded-2xl border shadow-xl flex items-start gap-3 transition-all transform animate-in slide-in-from-top-4 fade-in duration-200 ${bgColors}`}
+              role={toast.type === 'error' ? 'alert' : 'status'}
             >
               <IconComponent className={`w-5 h-5 shrink-0 mt-0.5 ${iconColor}`} />
 
@@ -94,6 +98,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 onClick={() => removeToast(toast.id)}
                 className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-0.5 rounded-lg transition-colors"
                 title="Dismiss"
+                aria-label={`Dismiss ${toast.title}`}
               >
                 <X className="w-4 h-4" />
               </button>

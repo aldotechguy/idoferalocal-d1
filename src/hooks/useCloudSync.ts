@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   uploadD1BackupToDrive,
   restoreFromLatestDriveBackup,
@@ -8,8 +8,6 @@ import {
   getLastBackupFileName,
   getLastBackupTime,
   getUnsyncedLocalChangesCount,
-  isHeaderSyncActivated,
-  REQUIRED_HEADER_SYNC_RECORDS,
   clearUnsyncedLocalChanges,
   getUnsyncedItemKeys,
   captureUnsyncedItemVersions,
@@ -23,33 +21,86 @@ import {
   requestGoogleDriveAuthorization,
 } from '../services/googleDriveService';
 import { useToast } from '../context/ToastContext';
-import { ALL_STORES, getAllItems } from '../db/indexedDB';
-import { syncLocalRecordsToD1, checkD1Health, type D1Snapshot, type D1HealthStatus } from '../services/d1StorageService';
+import { ALL_STORES, getAllItems, getItem, type StoreName } from '../db/indexedDB';
+import {
+  syncLocalRecordsToD1,
+  checkD1Health,
+  autoSyncChangedRecords,
+  registerAutoSyncFlush,
+  flushAutoSyncNow,
+  scheduleAutoSync,
+  getD1PendingDeletions,
+  D1_AUTO_PING_INTERVAL_MS,
+  type D1Snapshot,
+  type D1HealthStatus,
+  type ChangedRecord,
+} from '../services/d1StorageService';
+
+/**
+ * Health polling cadence. This hook is mounted by more than one component (the
+ * always-present Header, Settings, and the unsynced-changes modal), so the gate
+ * below makes the *first* caller do the work and lets the others reuse its
+ * result. Without it, three instances would triple every probe.
+ *
+ * Imported, not declared: the badge renders the cadence to users, and it used to
+ * say "5 minutes" here while this constant said 15 — three hardcoded strings
+ * promising 3x the monitoring that actually ran. Sourcing both from
+ * D1_AUTO_PING_MINUTES makes drift impossible.
+ */
+const AUTO_PING_INTERVAL_MS = D1_AUTO_PING_INTERVAL_MS;
+
+let lastHealthPingAt = 0;
+let lastHealthStatus: D1HealthStatus | null = null;
+let healthInFlight: Promise<D1HealthStatus> | null = null;
+
+function readJsonHealth(detail: boolean): Promise<D1HealthStatus> {
+  if (healthInFlight && !detail) return healthInFlight;
+  const pending = checkD1Health(detail);
+  if (detail) return pending;
+  healthInFlight = pending;
+  return pending.finally(() => {
+    healthInFlight = null;
+    lastHealthPingAt = Date.now();
+  });
+}
+
+/** Coalesces concurrent probes and honours the interval across all instances. */
+async function sharedD1Health(detail: boolean, force: boolean): Promise<D1HealthStatus> {
+  if (!detail && !force && lastHealthStatus && Date.now() - lastHealthPingAt < AUTO_PING_INTERVAL_MS) {
+    return lastHealthStatus;
+  }
+  const status = await readJsonHealth(detail);
+  lastHealthStatus = status;
+  if (!detail) lastHealthPingAt = Date.now();
+  return status;
+}
+
+const isStoreName = (name: string): name is StoreName => (ALL_STORES as readonly string[]).includes(name);
 
 export function useCloudSync() {
   const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [hasDriveUnsynced, setHasDriveUnsynced] = useState<boolean>(hasUnsyncedLocalChanges());
   const [unsyncedRecordsCount, setUnsyncedRecordsCount] = useState<number>(getUnsyncedLocalChangesCount());
-  const [isHeaderSyncActive, setIsHeaderSyncActive] = useState<boolean>(isHeaderSyncActivated());
   const [lastDriveBackupFile, setLastDriveBackupFile] = useState<string | null>(getLastBackupFileName());
   const [lastDriveBackupTime, setLastDriveBackupTime] = useState<string | null>(getLastBackupTime());
   const [driveRestorePreview, setDriveRestorePreview] = useState<DriveRestorePreview | null>(null);
   const [driveAuthStatus, setDriveAuthStatus] = useState(getGoogleDriveAuthStatus());
   const [isDriveAuthModalOpen, setIsDriveAuthModalOpen] = useState<boolean>(false);
 
-  // Network health monitoring to Cloudflare D1 (every 5 minutes or on-demand)
-  const AUTO_PING_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+  // Network health monitoring to Cloudflare D1 (every 15 minutes or on-demand)
   const [d1Health, setD1Health] = useState<D1HealthStatus | null>(null);
   const d1HealthRef = useRef<D1HealthStatus | null>(null);
   const [isCheckingHealth, setIsCheckingHealth] = useState<boolean>(false);
 
   const { showToast } = useToast();
 
-  const pingD1Health = async (): Promise<D1HealthStatus> => {
+  const pingD1Health = useCallback(async (options?: {detail?: boolean; force?: boolean}): Promise<D1HealthStatus> => {
+    const detail = Boolean(options?.detail);
+    const force = Boolean(options?.force);
     setIsCheckingHealth(true);
     try {
-      const health = await checkD1Health();
+      const health = await sharedD1Health(detail, force);
       d1HealthRef.current = health;
       setD1Health(health);
       setIsOnline(health.connected);
@@ -59,7 +110,10 @@ export function useCloudSync() {
         connected: false,
         latencyMs: 0,
         lastChecked: Date.now(),
-        databaseId: '3e95a550-a091-490b-819d-f0acb7ea8dd8',
+        // 'unknown', never the archived idofera-d1: the probe threw before it
+        // reached the server, so we do not know which database answered. See
+        // the same note in checkD1Health.
+        databaseId: 'unknown',
         revision: 0,
         totalDocuments: 0,
         endpoint: 'Cloudflare D1 Storage API',
@@ -72,13 +126,12 @@ export function useCloudSync() {
     } finally {
       setIsCheckingHealth(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     const unsub = subscribeGoogleDriveSync(() => {
       setHasDriveUnsynced(hasUnsyncedLocalChanges());
       setUnsyncedRecordsCount(getUnsyncedLocalChangesCount());
-      setIsHeaderSyncActive(isHeaderSyncActivated());
       setLastDriveBackupFile(getLastBackupFileName());
       setLastDriveBackupTime(getLastBackupTime());
       setDriveAuthStatus(getGoogleDriveAuthStatus());
@@ -106,12 +159,14 @@ export function useCloudSync() {
     window.addEventListener('offline', handleOffline);
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    // Initial ping on mount
+    // Initial ping on mount. Non-forced, so a second component mounting the hook
+    // reuses this result instead of issuing its own probe.
     pingD1Health();
 
-    // Automatic health ping interval strictly every 5 minutes
+    // Automatic health ping, but only while the tab is actually visible: a hidden
+    // tab polls nothing, and returning to it re-checks via the listener above.
     const interval = setInterval(() => {
-      pingD1Health();
+      if (document.visibilityState === 'visible') pingD1Health();
     }, AUTO_PING_INTERVAL_MS);
 
     return () => {
@@ -123,8 +178,58 @@ export function useCloudSync() {
     };
   }, []);
 
-  // Trigger Google Drive Backup Upload
-  const triggerDriveSync = async () => {
+  /**
+   * Automatic save. A local edit marks only its own key, so this sends just those
+   * records in one micro-batch. It deliberately avoids the full-store push and
+   * the health read that the manual Sync path performs; convergence on other
+   * devices' writes rides the revision-guarded full snapshot (refresh or Pull).
+   */
+  const flushAutoSync = useCallback(async () => {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+    const keys = getUnsyncedItemKeys();
+    const changes: ChangedRecord[] = [];
+    for (const key of keys) {
+      const separator = key.lastIndexOf(':');
+      if (separator <= 0) continue;
+      changes.push({collection: key.slice(0, separator), documentId: key.slice(separator + 1)});
+    }
+    const deps = {
+      readRecord: async (collection: string, documentId: string) => (
+        isStoreName(collection) ? getItem<Record<string, unknown>>(collection, documentId) : null
+      ),
+    };
+    try {
+      if (!changes.length) {
+        // Nothing edited, but a deletion may still be pending. Deletions travel on
+        // the records endpoint, so an empty upsert set is a valid request.
+        if (getD1PendingDeletions().length) await syncLocalRecordsToD1({});
+        return;
+      }
+      const versions = captureUnsyncedItemVersions(keys);
+      const result = await autoSyncChangedRecords(changes, deps);
+      if (result.pushed || result.skipped === 'not-newer') acknowledgeUnsyncedItemKeys(versions);
+    } catch (error) {
+      console.warn('Automatic save failed:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    const unregister = registerAutoSyncFlush(() => { void flushAutoSync(); });
+    // `pagehide`/hidden cannot await, so the save is fire-and-forget; the debounce
+    // already collapsed rapid edits into one batch before this point.
+    const handleLeaving = () => { flushAutoSyncNow(); };
+    const handleOnline = () => { scheduleAutoSync(0); };
+    window.addEventListener('pagehide', handleLeaving);
+    document.addEventListener('visibilitychange', handleLeaving);
+    window.addEventListener('online', handleOnline);
+    return () => {
+      unregister();
+      window.removeEventListener('pagehide', handleLeaving);
+      document.removeEventListener('visibilitychange', handleLeaving);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [flushAutoSync]);
+  const triggerDriveSync = useCallback(async () => {
     if (isSyncing) return;
 
     if (!navigator.onLine) {
@@ -154,9 +259,9 @@ export function useCloudSync() {
     } finally {
       setIsSyncing(false);
     }
-  };
+  }, [isSyncing, showToast]);
 
-  const triggerD1Sync = async (forceFull = false) => {
+  const triggerD1Sync = useCallback(async (forceFull = false) => {
     if (isSyncing) return;
     if (!navigator.onLine) {
       showToast({title: 'Offline Mode', message: 'Cannot synchronize with Cloudflare D1 while offline.', type: 'warning'});
@@ -196,27 +301,10 @@ export function useCloudSync() {
     } finally {
       setIsSyncing(false);
     }
-  };
-
-  const triggerD1Pull = async () => {
-    if (isSyncing) return;
-    if (!navigator.onLine) {
-      showToast({title: 'Offline Mode', message: 'Cannot pull from Cloudflare D1 while offline.', type: 'warning'});
-      return;
-    }
-    setIsSyncing(true);
-    try {
-      window.dispatchEvent(new CustomEvent('idofera_pull_d1'));
-      await pingD1Health();
-    } catch (err: any) {
-      showToast({title: 'D1 Pull Failed', message: err?.message || 'Could not pull from Cloudflare D1.', type: 'error'});
-    } finally {
-      setIsSyncing(false);
-    }
-  };
+  }, [isSyncing, showToast, pingD1Health]);
 
   // Trigger Google Drive Backup Restore
-  const prepareDriveRestore = async (): Promise<DriveRestorePreview | null> => {
+  const prepareDriveRestore = useCallback(async (): Promise<DriveRestorePreview | null> => {
     if (isSyncing) return null;
     if (!navigator.onLine) {
       showToast({title: 'Offline Mode', message: 'Cannot inspect a Drive backup while offline.', type: 'warning'});
@@ -236,9 +324,9 @@ export function useCloudSync() {
     } finally {
       setIsSyncing(false);
     }
-  };
+  }, [isSyncing, showToast, pingD1Health]);
 
-  const restoreDriveBackup = async () => {
+  const restoreDriveBackup = useCallback(async () => {
     if (isSyncing) return;
 
     if (!navigator.onLine) {
@@ -277,35 +365,16 @@ export function useCloudSync() {
     } finally {
       setIsSyncing(false);
     }
-  };
+  }, [isSyncing, showToast, pingD1Health]);
 
-  return {
+  return useMemo(() => ({
     isOnline,
     isNetworkGood: Boolean(d1Health ? d1Health.connected : isOnline),
     d1Health,
     isCheckingHealth,
     pingD1Health,
-    syncMode: 'manual',
     isSyncing,
-    syncProgress: null,
-    stats: {
-      totalLocalRecords: 0,
-      unsyncedRecordsCount: unsyncedRecordsCount,
-      lastSyncTime: lastDriveBackupTime,
-      hasUnsynced: hasDriveUnsynced,
-    },
-    conflicts: [],
-    isConflictModalOpen: false,
-    setIsConflictModalOpen: (_open?: boolean) => {},
-    resolveConflict: () => {},
-    resolveAllConflicts: () => {},
-    createSimulatedConflict: () => {},
-    isSyncButtonActive: isHeaderSyncActive,
-    isHeaderSyncActive,
     unsyncedRecordsCount,
-    requiredRecordsForHeaderSync: REQUIRED_HEADER_SYNC_RECORDS,
-    isLiveSyncActive: false,
-    isQuotaExceeded: false,
     hasDriveUnsynced,
     lastDriveBackupFile,
     lastDriveBackupTime,
@@ -316,13 +385,11 @@ export function useCloudSync() {
     authorizeDrive: requestGoogleDriveAuthorization,
     triggerSync: triggerD1Sync,
     triggerSyncAll: () => triggerD1Sync(true),
-    triggerD1Pull,
     triggerDriveSync,
     restoreDriveBackup,
     prepareDriveRestore,
     driveRestorePreview,
-    pullCentralRecords: triggerD1Pull,
-    toggleSyncMode: () => {},
-    refreshStats: async () => {},
-  };
+  }), [isOnline, d1Health, isCheckingHealth, pingD1Health, isSyncing, unsyncedRecordsCount, hasDriveUnsynced,
+    lastDriveBackupFile, lastDriveBackupTime, driveAuthStatus, isDriveAuthModalOpen,
+    triggerD1Sync, triggerDriveSync, restoreDriveBackup, prepareDriveRestore, driveRestorePreview]);
 }

@@ -7,6 +7,7 @@ import {
 } from '../../types';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
+import { useInteractions } from '../../context/InteractionContext';
 import {
   X,
   RotateCcw,
@@ -54,6 +55,11 @@ export const ProcessSaleRefundModal: React.FC<ProcessSaleRefundModalProps> = ({
 }) => {
   const { customers, settings, refundSale } = useApp();
   const { currentUser } = useAuth();
+  // Unified-mall convention: no native dialogs. `notify` renders in the app's own
+  // toast layer, so a blocked or failed refund stays visible without the browser
+  // chrome stalling the flow. Enforced by scripts/audit-frontend.mjs, which
+  // rejects native dialog calls in components.
+  const { notify } = useInteractions();
 
   const [returnMode, setReturnMode] = useState<'partial' | 'full'>('partial');
   const [refundReason, setRefundReason] = useState('Customer returned item');
@@ -85,8 +91,17 @@ export const ProcessSaleRefundModal: React.FC<ProcessSaleRefundModalProps> = ({
       return;
     }
 
+    // Defensive parity guard: a refund written by the Mall admin API — or by any
+    // build predating the returned_qty columns — can set status='Refunded' without
+    // per-line return records. Reading that as "nothing returned yet" would let POS
+    // refund and restock the same goods a second time, so a fully-Refunded sale
+    // with no refund records is treated as having returned every line.
+    const legacyFullRefund = sale.status === 'Refunded' && !(sale.refunds && sale.refunds.length > 0);
+
     const initial = sale.items.map((it) => {
-      const alreadyReturned = Number(it.returnedQuantity) || 0;
+      const alreadyReturned = legacyFullRefund
+        ? Number(it.quantity) || 0
+        : Number(it.returnedQuantity) || 0;
       const remaining = Math.max(0, it.quantity - alreadyReturned);
       return {
         productId: it.productId,
@@ -261,7 +276,7 @@ export const ProcessSaleRefundModal: React.FC<ProcessSaleRefundModalProps> = ({
 
   const handleConfirmRefund = () => {
     if (totalUnitsBeingReturned === 0) {
-      alert('Please specify at least 1 item quantity to return.');
+      notify('Please specify at least 1 item quantity to return.', 'Nothing to return', 'warning');
       return;
     }
 
@@ -297,7 +312,7 @@ export const ProcessSaleRefundModal: React.FC<ProcessSaleRefundModalProps> = ({
       onClose();
     } catch (err) {
       console.error('Refund processing error:', err);
-      alert('An error occurred while processing this return.');
+      notify('An error occurred while processing this return.', 'Refund failed', 'error');
     } finally {
       setIsSubmitting(false);
     }

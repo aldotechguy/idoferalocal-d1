@@ -1,18 +1,139 @@
-interface Env {
-  ASSETS: {fetch(request: Request): Promise<Response>};
+interface R2ObjectBody {
+  arrayBuffer(): Promise<ArrayBuffer>;
+  httpMetadata?: { contentType?: string };
+}
+interface R2BucketLike {
+  put(key: string, value: Uint8Array, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
+  get(key: string): Promise<R2ObjectBody | null>;
+  delete(key: string): Promise<unknown>;
+}
+
+interface Env extends MallConfig {
+  ASSETS: { fetch(request: Request): Promise<Response> };
   DB: D1Database;
+  MALL_IMAGES?: R2BucketLike;
   GEMINI_API_KEY?: string;
+  BOOTSTRAP_ADMIN_EMAIL?: string;
+  BOOTSTRAP_ADMIN_USERNAME?: string;
+  BOOTSTRAP_ADMIN_PASSWORD?: string;
+  RESEND_API_KEY?: string;
+  MALL_NOTIFY_EMAIL?: string;
+  MALL_EMAIL_FROM?: string;
+  /** Cloudflare Access staff gate. 'true' enables the SSO session bootstrap. */
+  CF_ACCESS_SSO?: string;
+  /** https://<team-name>.cloudflareaccess.com — the JWKS URL and `iss` check. */
+  CF_ACCESS_TEAM_DOMAIN?: string;
+  /** Audience (AUD) tag(s) of the Access applications, comma-separated. */
+  CF_ACCESS_AUD?: string;
+  /** Optional IdP group that must also be present for a super-admin session. */
+  CF_ACCESS_SUPER_ADMIN_GROUP?: string;
+  /** Optional step-up lifetime in seconds (default 600). */
+  CF_ACCESS_STEP_UP_SECONDS?: string;
+  /** Optional app-session idle window in seconds (default 1800). */
+  CF_SESSION_IDLE_SECONDS?: string;
+  /** Bound D1 database ID, set per environment in wrangler.toml (display-only). */
+  D1_DATABASE_ID?: string;
 }
 
 interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement;
   run(): Promise<unknown>;
-  all<T = Record<string, unknown>>(): Promise<{results?: T[]}>;
+  all<T = Record<string, unknown>>(): Promise<{ results?: T[] }>;
 }
 
 interface D1Database {
   prepare(query: string): D1PreparedStatement;
   batch(statements: D1PreparedStatement[]): Promise<unknown[]>;
+}
+
+// Phase 4 — relational backend for the edge worker. Wrangler bundles this entry
+// with esbuild, which follows imports, so the mapper/DDL/write builders are the
+// SAME modules server.ts uses (no more duplicated inline logic).
+// Money is INTEGER kobo in D1, naira floats on the wire; frontend contract unchanged.
+import { RELATIONAL_DDL, RELATIONAL_INDEXES } from './src/server/relationalDdl.js';
+import { buildSnapshot, SNAPSHOT_PUSH_DOC_LIMIT } from './src/server/relationalSnapshot.js';
+import {
+  upsertToStatements,
+  deleteToStatements,
+  replaceCollectionStatements,
+  backfillStatementsFromDocumentRows,
+} from './src/server/relationalWrites.js';
+import { handleMallApi, MALL_OVERSELL_TRIGGER_SQL, invalidateMallFacetCache } from './src/server/mallApi.js';
+import { handleStaffMallApi, maintainMall } from './src/server/mallOrderAdminApi.js';
+import { handleStaffMallListingApi } from './src/server/mallListingApi.js';
+import { handleStaffProductImageApi, handlePublicImageRequest } from './src/server/productImageApi.js';
+import type { ImageStore } from './src/server/imageStore.js';
+import { MALL_OPERATIONS_DDL, MALL_MERCH_COLUMNS, MALL_ORDER_COLUMNS, RELATIONAL_FINANCE_COLUMNS, MALL_SCHEMA_VERSION, isDuplicateColumnError, signMallWebhook, type MallConfig } from './src/server/mallOperations.js';
+import { MALL_SAFETY_DDL, MALL_CATALOG_INDEX_COLUMNS, MALL_CATALOG_INDEXES } from './src/server/mallSafety.js';
+import { bootstrapAdmin } from './src/server/adminBootstrap.js';
+import { handleMallWebhook } from './src/server/mallWebhook.js';
+import type { QueryAll } from './src/server/relationalMapper.js';
+import { isStaffPage, isPrivateApi, issueEntrance, hasEntrance, revokeEntrance, entranceCookie } from './src/server/staffEntrance.js';
+import { readAccessIdentity, ACCESS_JWT_HEADER, type AccessIdentity } from './src/server/accessJwt.js';
+import { staffSuperAdminSession, staffPrivilegeCheck, staffEditorCheck } from './src/server/staffPrivileges.js';
+import { STEP_UP_SECONDS, issueStepUp, hasStepUp, revokeStepUp, revokeStepUpForUser, stepUpCookie } from './src/server/stepUp.js';
+import { SESSION_COOKIE, sessionExpiry, sessionIdleSeconds, sessionIdleExpired, isMissingIdleColumn } from './src/server/staffSession.js';
+
+/** Rows out of D1 -> the QueryAll shape the shared mapper expects. */
+function makeD1QueryAll(env: Env): QueryAll {
+  return async (sql: string, params: any[] = []) => {
+    const res = await env.DB.prepare(sql).bind(...params).all<any>();
+    return res.results || [];
+  };
+}
+
+/** #14 — R2-backed image store for the edge runtime. */
+function makeR2ImageStore(env: Env): ImageStore | undefined {
+  const bucket = env.MALL_IMAGES;
+  if (!bucket) return undefined;
+  return {
+    async put(key, image) {
+      await bucket.put(key, image.bytes, { httpMetadata: { contentType: image.contentType } });
+    },
+    async get(key) {
+      const object = await bucket.get(key);
+      if (!object) return null;
+      const bytes = new Uint8Array(await object.arrayBuffer());
+      return { bytes, contentType: object.httpMetadata?.contentType || 'application/octet-stream' };
+    },
+    async remove(key) { await bucket.delete(key); },
+  };
+}
+
+/** One row out of D1. */
+async function d1Get(env: Env, sql: string, params: any[] = []): Promise<any> {
+  const res = await env.DB.prepare(sql).bind(...params).all<any>();
+  return res.results?.[0] || null;
+}
+
+/**
+ * 100% relational sync watermark (edge). Mirrors src/server/syncWatermark.ts: the
+ * document store's `sync_revisions` row is replaced by a monotonic INTEGER kept in
+ * the `settings` table under `key = 'sync_watermark'`. Shared semantics with the
+ * Node runtime so both report the same revision contract.
+ */
+const SYNC_WATERMARK_KEY = 'sync_watermark';
+
+async function currentWatermark(env: Env): Promise<number> {
+  try {
+    const row = await d1Get(env, 'SELECT value_json FROM settings WHERE key = ?', [SYNC_WATERMARK_KEY]);
+    if (row?.value_json != null) {
+      const parsed = JSON.parse(String(row.value_json));
+      const value = typeof parsed === 'number' ? parsed : Number(parsed?.revision);
+      if (Number.isFinite(value)) return value;
+    }
+  } catch {
+    // settings table absent on a brand-new database — treat as revision 0.
+  }
+  return 0;
+}
+
+async function bumpWorkerWatermark(env: Env, revision: number): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
+     WHERE CAST(excluded.value_json AS INTEGER) > CAST(settings.value_json AS INTEGER)`,
+  ).bind(SYNC_WATERMARK_KEY, JSON.stringify(revision), Date.now()).run();
 }
 
 const ALLOWED_STORES = new Set([
@@ -24,12 +145,11 @@ const ALLOWED_STORES = new Set([
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
-    headers: {'content-type': 'application/json; charset=utf-8'},
+    headers: { 'content-type': 'application/json; charset=utf-8' },
   });
 
 const encoder = new TextEncoder();
 const BUSINESS_OWNER_ID = 'idofera-business';
-const SESSION_COOKIE = 'idofera_session';
 const PASSWORD_ITERATIONS = 100000;
 
 const toHex = (bytes: ArrayBuffer | Uint8Array) =>
@@ -48,7 +168,7 @@ async function sha256(value: string) {
 async function hashPassword(password: string, salt: string, iterations = PASSWORD_ITERATIONS) {
   const key = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
   return toHex(await crypto.subtle.deriveBits(
-    {name: 'PBKDF2', hash: 'SHA-256', salt: encoder.encode(salt), iterations},
+    { name: 'PBKDF2', hash: 'SHA-256', salt: encoder.encode(salt), iterations },
     key,
     256,
   ));
@@ -97,25 +217,32 @@ function publicUser(user: AppUserRow) {
   };
 }
 
-let isSchemaEnsured = false;
+const schemaReady = new WeakSet<D1Database>();
+
+/**
+ * Row-read guard. `schemaReady` is per-isolate, so before this check every cold
+ * isolate replayed the whole bootstrap (~80 DDL statements, plus 5 ALTERs that
+ * are expected to throw `duplicate column name`). A matching marker row means
+ * the schema is already in place: one primary-key lookup instead.
+ */
+async function schemaVersionCurrent(env: Env) {
+  try {
+    const rows = await env.DB.prepare('SELECT 1 AS present FROM mall_schema_versions WHERE version = ?')
+      .bind(MALL_SCHEMA_VERSION).all();
+    return Boolean(rows.results?.length);
+  } catch {
+    // The marker table itself is missing, so this is a fresh (or pre-marker) database.
+    return false;
+  }
+}
 
 async function ensureSchema(env: Env) {
-  if (isSchemaEnsured) return;
-  await env.DB.batch([
-    env.DB.prepare(`CREATE TABLE IF NOT EXISTS app_documents (
-      owner_id TEXT NOT NULL,
-      collection TEXT NOT NULL,
-      document_id TEXT NOT NULL,
-      payload TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (owner_id, collection, document_id)
-    )`),
-    env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_app_documents_owner_collection ON app_documents (owner_id, collection)`),
-    env.DB.prepare(`CREATE TABLE IF NOT EXISTS sync_revisions (
-      owner_id TEXT PRIMARY KEY NOT NULL,
-      revision INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    )`),
+  if (schemaReady.has(env.DB)) return;
+  if (await schemaVersionCurrent(env)) {
+    schemaReady.add(env.DB);
+    return;
+  }
+  const statements: D1PreparedStatement[] = [
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS app_users (
       id TEXT PRIMARY KEY NOT NULL,
       email TEXT NOT NULL UNIQUE,
@@ -138,13 +265,62 @@ async function ensureSchema(env: Env) {
       token_hash TEXT PRIMARY KEY NOT NULL,
       user_id TEXT NOT NULL,
       created_at INTEGER NOT NULL,
-      expires_at INTEGER NOT NULL
+      expires_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL DEFAULT 0
     )`),
     env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_app_sessions_user_expiry ON app_sessions (user_id, expires_at)`),
-  ]);
+    // Phase 4: the 30 relational tables + 23 indexes, same DDL as drizzle/0000.
+    ...RELATIONAL_DDL.map((ddl) => env.DB.prepare(ddl.endsWith(';') ? ddl.slice(0, -1) : ddl)),
+    ...RELATIONAL_INDEXES.map((sql) => env.DB.prepare(sql.endsWith(';') ? sql.slice(0, -1) : sql)),
+    // Phase 5: oversell is impossible store-wide once this trigger exists.
+    env.DB.prepare(MALL_OVERSELL_TRIGGER_SQL.endsWith(';') ? MALL_OVERSELL_TRIGGER_SQL.slice(0, -1) : MALL_OVERSELL_TRIGGER_SQL),
+  ];
+  for (let offset = 0; offset < statements.length; offset += 50) {
+    await env.DB.batch(statements.slice(offset, offset + 50));
+  }
+  await env.DB.batch(MALL_OPERATIONS_DDL.map(sql => env.DB.prepare(sql)));
+  // Safety DDL second: its maintenance indexes (mall_rate_limits, mall_metrics)
+  // and staff-page indexes assume the operations tables the batch above just
+  // created, and its catalog covering indexes assume RELATIONAL_DDL tables.
+  await env.DB.batch(MALL_SAFETY_DDL.map(sql => env.DB.prepare(sql)));
+  // #10 merchandising columns + the status column the catalog indexes cover, and
+  // v10's RELATIONAL_FINANCE_COLUMNS (store credit, partial refunds, GRN
+  // variance) on the core relational tables: additive guarded ALTERs; a duplicate
+  // column is the expected no-op on every start after the first.
+  for (const column of [...MALL_MERCH_COLUMNS, ...MALL_ORDER_COLUMNS, ...MALL_CATALOG_INDEX_COLUMNS, ...RELATIONAL_FINANCE_COLUMNS]) {
+    try { await env.DB.prepare(column.ddl).run(); }
+    catch (error) { if (!isDuplicateColumnError(error)) throw error; }
+  }
+  // Idle tracking on an app_sessions table that predates it. `DEFAULT 0` is
+  // deliberate: an existing row reads as "never seen", so the first request after
+  // this deploy refreshes it rather than granting a fresh full idle window to a
+  // session that may have been abandoned days ago.
+  try { await env.DB.prepare('ALTER TABLE app_sessions ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0').run(); }
+  catch (error) { if (!isDuplicateColumnError(error)) throw error; }
+  // Catalog read indexes: the visibility predicate, the merchandising order, and
+  // the two facet columns the category/brand lists group by.
+  for (const index of MALL_CATALOG_INDEXES) {
+    try { await env.DB.prepare(index).run(); }
+    catch (error) { console.warn('Catalog index skipped:', index, error instanceof Error ? error.message : error); }
+  }
+  // Record the marker last: the guard above must never pass before the work is done.
+  await env.DB.prepare('INSERT OR IGNORE INTO mall_schema_versions(version, installed_at) VALUES (?, ?)')
+    .bind(MALL_SCHEMA_VERSION, new Date().toISOString()).run();
+  schemaReady.add(env.DB);
 }
 
-async function seedUser(env: Env, user: {id: string; email: string; username: string; displayName: string; password: string; superAdmin: boolean}) {
+/**
+ * 100% relational: the legacy `app_documents` -> relational backfill bridge and its
+ * `emptyRelational` probe are REMOVED. `idofera` carries no document mirror, so
+ * there is nothing to project. Kept as an explicit no-op for the snapshot response.
+ */
+async function ensureRelationalBackfill(env: Env): Promise<{ documents: number; statements: number; skipped: number }> {
+  return { documents: 0, statements: 0, skipped: 0 };
+}
+void ensureRelationalBackfill;
+
+
+async function seedUser(env: Env, user: { id: string; email: string; username: string; displayName: string; password: string; superAdmin: boolean }) {
   await ensureSchema(env);
   const existing = await env.DB.prepare('SELECT id FROM app_users WHERE id = ?').bind(user.id).all();
   if (existing.results?.length) return;
@@ -157,40 +333,203 @@ async function seedUser(env: Env, user: {id: string; email: string; username: st
 }
 
 async function ensureAuthSeed(env: Env) {
-  await seedUser(env, {id: 'usr-superadmin-idofera', email: 'michaelidongesit5@gmail.com', username: 'idofera', displayName: 'Super Admin', password: 'aidy2800', superAdmin: true});
-  await seedUser(env, {id: 'usr-admin-1', email: 'admin@idoferapackaging.com', username: 'admin', displayName: 'Administrator', password: 'admin123', superAdmin: false});
+  await ensureSchema(env);
+  if (await d1Get(env, 'SELECT id FROM app_users LIMIT 1')) return;
+  const admin = bootstrapAdmin(env);
+  if (admin) await seedUser(env, admin);
 }
 
-async function ensureBusinessDataOwner(env: Env) {
-  const current = await env.DB.prepare('SELECT 1 AS present FROM app_documents WHERE owner_id = ? LIMIT 1').bind(BUSINESS_OWNER_ID).all();
-  if (current.results?.length) return;
-  const legacy = await env.DB.prepare('SELECT owner_id FROM app_documents WHERE owner_id != ? GROUP BY owner_id ORDER BY COUNT(*) DESC LIMIT 1')
-    .bind(BUSINESS_OWNER_ID).all<{owner_id: string}>();
-  const legacyOwner = legacy.results?.[0]?.owner_id;
-  if (!legacyOwner) return;
-  await env.DB.batch([
-    env.DB.prepare('INSERT OR IGNORE INTO app_documents (owner_id, collection, document_id, payload, updated_at) SELECT ?, collection, document_id, payload, updated_at FROM app_documents WHERE owner_id = ?').bind(BUSINESS_OWNER_ID, legacyOwner),
-    env.DB.prepare('INSERT OR IGNORE INTO sync_revisions (owner_id, revision, updated_at) SELECT ?, revision, updated_at FROM sync_revisions WHERE owner_id = ?').bind(BUSINESS_OWNER_ID, legacyOwner),
-  ]);
-}
+// 100% relational: the legacy document-store owner migration is REMOVED with the
+// document mirror. The relational store is owner-less and canonical.
 
 async function requireAppUser(request: Request, env: Env): Promise<AppUserRow | null> {
   const token = readCookie(request, SESSION_COOKIE);
   if (!token) return null;
   const tokenHash = await sha256(token);
-  const rows = await env.DB.prepare(
-    'SELECT u.* FROM app_sessions s JOIN app_users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND u.status = ?',
-  ).bind(tokenHash, Date.now(), 'Active').all<AppUserRow>();
-  return rows.results?.[0] || null;
+  const now = Date.now();
+  const idleSeconds = sessionIdleSeconds(env);
+  let user: (AppUserRow & { session_last_seen: number | null; session_created: number | null }) | undefined;
+  try {
+    const rows = await env.DB.prepare(
+      'SELECT u.*, s.last_seen_at AS session_last_seen, s.created_at AS session_created FROM app_sessions s JOIN app_users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND u.status = ?',
+    ).bind(tokenHash, now, 'Active').all<AppUserRow & { session_last_seen: number | null; session_created: number | null }>();
+    user = rows.results?.[0];
+  } catch (error) {
+    // The gate runs before `ensureSchema`, so between a deploy and the first
+    // migration pass the idle column does not exist. Fall back to the
+    // pre-migration shape rather than 500-ing every gated request.
+    if (!isMissingIdleColumn(error)) throw error;
+    const rows = await env.DB.prepare(
+      'SELECT u.*, NULL AS session_last_seen, s.created_at AS session_created FROM app_sessions s JOIN app_users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND u.status = ?',
+    ).bind(tokenHash, now, 'Active').all<AppUserRow & { session_last_seen: number | null; session_created: number | null }>();
+    user = rows.results?.[0];
+  }
+  if (!user) return null;
+  // An abandoned terminal must stop authorizing private APIs even though the
+  // absolute expiry has not passed (docs/staff-access.md). A null/zero
+  // `last_seen_at` means the row predates idle tracking, so the mint time is the
+  // baseline — never a fresh full window handed to a session nobody has touched.
+  const lastSeen = Number(user.session_last_seen || 0) || Number(user.session_created || 0);
+  if (lastSeen && sessionIdleExpired(lastSeen, now, idleSeconds)) return null;
+  // Touch the row so the next request measures idleness from THIS request. Written
+  // on the hot path on purpose: without it every request would compare against the
+  // mint time and a genuinely active seven-day session would expire mid-shift.
+  try {
+    await env.DB.prepare('UPDATE app_sessions SET last_seen_at = ? WHERE token_hash = ?').bind(now, tokenHash).run();
+  } catch (error) {
+    // Same pre-migration window: the read above already succeeded, so the caller
+    // is authenticated. Failing to record activity must not fail the request.
+    if (!isMissingIdleColumn(error)) throw error;
+  }
+  return user;
 }
 
 async function createSession(userId: string, env: Env) {
   const token = randomHex(32);
   const now = Date.now();
-  const expiresAt = now + 7 * 24 * 60 * 60 * 1000;
-  await env.DB.prepare('INSERT INTO app_sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
-    .bind(await sha256(token), userId, now, expiresAt).run();
-  return {token, maxAge: Math.floor((expiresAt - now) / 1000)};
+  const expiresAt = sessionExpiry(now);
+  await env.DB.prepare('INSERT INTO app_sessions (token_hash, user_id, created_at, expires_at, last_seen_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(await sha256(token), userId, now, expiresAt, now).run();
+  return { token, maxAge: Math.floor((expiresAt - now) / 1000) };
+}
+
+/* ------------------------------------------------------------------ *
+ * Cloudflare Access staff gate (docs/staff-access.md)
+ *
+ * Access authenticates a person and injects a signed JWT on every request to
+ * a covered path. It grants no privileges: the roster below decides who the
+ * email is, `app_users.is_super_admin` decides what they may do, and a fresh
+ * step-up is required before any privileged change.
+ * ------------------------------------------------------------------ */
+
+function stepUpLifetimeSeconds(env: Env) {
+  const parsed = Number(env.CF_ACCESS_STEP_UP_SECONDS);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : STEP_UP_SECONDS;
+}
+
+/** Verifies the Access JWT when the gate is configured. Raw headers are never trusted. */
+async function accessIdentityFor(request: Request, env: Env): Promise<AccessIdentity | null> {
+  if (!env.CF_ACCESS_TEAM_DOMAIN || !env.CF_ACCESS_AUD) return null;
+  return await readAccessIdentity(request, { teamDomain: env.CF_ACCESS_TEAM_DOMAIN, audience: env.CF_ACCESS_AUD });
+}
+
+/**
+ * True when Cloudflare Access clearly authenticated this request (it injected its
+ * signed-assertion header) yet this deployment still cannot read an identity
+ * from it. That combination is always a deployment bug — a stale/absent
+ * `CF_ACCESS_AUD` tag for THIS hostname, or the gate left disabled on an
+ * environment Access still sits in front of — because the only way the header
+ * reaches the Worker is through an Access application that covers the path.
+ *
+ * It never means "anonymous": an unauthenticated browser is redirected by the
+ * edge and never gets here with the header set. Treating it as ordinary
+ * "no entrance" is what silently bounced a completed OTP back to the Mall, so
+ * the gate reports it (see `accessGateMisconfiguredResponse`) instead.
+ */
+function accessGateMisconfigured(request: Request, env: Env) {
+  if (!request.headers.get(ACCESS_JWT_HEADER)) return false;
+  if (env.CF_ACCESS_SSO !== 'true') return true;
+  return !env.CF_ACCESS_TEAM_DOMAIN || !env.CF_ACCESS_AUD;
+}
+
+/**
+ * Reads the `aud` claim out of the unverified Access assertion, purely to NAME
+ * the expected Audience tag in the misconfiguration page above. This value is
+ * NEVER used for an authentication decision — `readAccessIdentity` does that, and
+ * it verifies the signature, issuer, expiry and audience before anything is
+ * trusted. A misleading string here can only produce a misleading error message.
+ */
+function accessAudienceFromAssertion(request: Request): string {
+  const token = request.headers.get(ACCESS_JWT_HEADER) || '';
+  const payloadSegment = token.split('.')[1];
+  if (!payloadSegment) return '';
+  try {
+    const padded = payloadSegment.replace(/-/g, '+').replace(/_/g, '/');
+    const parsed = JSON.parse(atob(padded + '='.repeat((4 - (padded.length % 4)) % 4))) as { aud?: unknown };
+    if (typeof parsed.aud === 'string') return parsed.aud;
+    if (Array.isArray(parsed.aud)) return parsed.aud.filter((entry) => typeof entry === 'string').join(', ');
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The operator-facing answer for the state above. A staff PAGE cannot be served
+ * (the entrance gate is intact and correct — the identity, not the gate, is
+ * misconfigured), so it returns an explicit 503 page naming the hostname and the
+ * Audience tag Access is actually minting for it, plus the exact command to fix
+ * it. That tag is delivered by the edge inside the JWT `aud` claim, which is why
+ * this response — unlike a redirect — makes the broken configuration legible
+ * without any dashboard access.
+ */
+function accessGateMisconfiguredResponse(request: Request) {
+  const hostname = new URL(request.url).hostname;
+  const tag = accessAudienceFromAssertion(request) || 'unavailable';
+  return new Response(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>Staff Access is misconfigured</title></head>` +
+    `<body style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:2rem">` +
+    `<main style="max-width:44rem;margin:0 auto">` +
+    `<h1 style="font-size:1.5rem;color:#fbbf24">Cloudflare Access is configured, but this deployment of the Worker is not</h1>` +
+    `<p>Access authenticated you for <strong>${hostname}</strong>, and then handed the Worker a signed identity it could not verify. ` +
+    `This is a <strong>deployment configuration</strong> problem — your OTP was accepted; the staff gate for this hostname has not been granted the Audience tag Access uses.</p>` +
+    `<p>Access is minting this Audience tag for <strong>${hostname}</strong>:</p>` +
+    `<pre style="background:#1e293b;padding:.75rem;border-radius:.5rem;overflow-wrap:anywhere;white-space:pre-wrap">${tag}</pre>` +
+    `<p>Add it to <code>CF_ACCESS_AUD</code> (comma-separated) in <code>wrangler.toml</code> for whichever environment serves this hostname, ` +
+    `make sure <code>CF_ACCESS_SSO = "true"</code> and <code>CF_ACCESS_TEAM_DOMAIN</code> is set there too, then redeploy that environment.</p>` +
+    `<p style="color:#94a3b8">No shopper is affected: the storefront and checkout are deliberately outside the Access application.</p>` +
+    `</main></body></html>`,
+    { status: 503, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } },
+  );
+}
+
+const stepUpRequired = () => json({ error: 'Confirm your password to continue.', code: 'STEP_UP_REQUIRED' }, 403);
+
+async function stepUpVerified(request: Request, env: Env, userId: string) {
+  return await hasStepUp(request.headers.get('cookie') || '', userId, makeD1QueryAll(env));
+}
+
+/**
+ * A super-admin session is the DB column AND, when `CF_ACCESS_SUPER_ADMIN_GROUP`
+ * is configured, the IdP group. Both are re-evaluated on every request, so
+ * removing somebody from the IdP group downgrades their next call without any
+ * database write.
+ */
+async function superAdminSession(request: Request, env: Env, actor: Pick<AppUserRow, 'id' | 'is_super_admin'>) {
+  return staffSuperAdminSession(actor, await accessIdentityFor(request, env), env.CF_ACCESS_SUPER_ADMIN_GROUP);
+}
+
+const privilegeResponse = (decision: { status: 401 | 403; error: string; code?: string }) =>
+  json({ error: decision.error, ...(decision.code ? { code: decision.code } : {}) }, decision.status);
+
+/** Super-admin action: DB flag + IdP group + a fresh password step-up. */
+async function requireSuperAdmin(request: Request, env: Env): Promise<{ actor: AppUserRow } | { error: Response }> {
+  const actor = await requireAppUser(request, env);
+  const decision = staffPrivilegeCheck({
+    actor,
+    identity: await accessIdentityFor(request, env),
+    requiredGroup: env.CF_ACCESS_SUPER_ADMIN_GROUP,
+    stepUp: actor ? await stepUpVerified(request, env, actor.id) : false,
+  });
+  // `.ok === false` (not `!decision.ok`): without strictNullChecks a truthiness
+  // check doesn't narrow this union, a literal comparison does.
+  if (decision.ok === false) return { error: privilegeResponse(decision) };
+  return { actor: actor as AppUserRow };
+}
+
+/**
+ * Mints a session and writes the cookies. Shared by the password login, the
+ * Google login and the Access SSO bootstrap so all three answer the same shape.
+ */
+async function establishSession(user: AppUserRow, request: Request, env: Env, payload: Record<string, unknown>) {
+  const session = await createSession(user.id, env);
+  const response = json({ ...payload, canSuperAdmin: await superAdminSession(request, env, user) });
+  response.headers.set('cache-control', 'no-store');
+  response.headers.set('set-cookie', sessionCookie(session.token, session.maxAge));
+  await revokeEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
+  response.headers.append('set-cookie', entranceCookie());
+  return response;
 }
 
 async function authLogin(request: Request, env: Env) {
@@ -198,120 +537,246 @@ async function authLogin(request: Request, env: Env) {
   const body = await readJson(request);
   const identifier = String(body?.identifier || '').trim().toLowerCase();
   const password = String(body?.password || '');
-  if (!identifier || !password) return json({error: 'Email/username and password are required.'}, 400);
-  const rows = await env.DB.prepare('SELECT * FROM app_users WHERE lower(email) = ? OR lower(username) = ? LIMIT 1')
+  if (!identifier || !password) return json({ error: 'Email/username and password are required.' }, 400);
+  // Emails are stored lowercased at every write, so a direct (indexable) email
+  // seek replaces lower(email) = ?, which forced a full table scan per login
+  // attempt. Usernames are NOT normalized on write, so their case-insensitive
+  // match keeps the lower() wrapper.
+  const rows = await env.DB.prepare('SELECT * FROM app_users WHERE email = ? OR lower(username) = ? LIMIT 1')
     .bind(identifier, identifier).all<AppUserRow>();
   const user = rows.results?.[0];
-  if (!user || user.status !== 'Active') return json({error: 'Invalid credentials or inactive account.'}, 401);
+  if (!user || user.status !== 'Active') return json({ error: 'Invalid credentials or inactive account.' }, 401);
   const candidate = await hashPassword(password, user.password_salt, user.password_iterations);
-  if (!safeEqual(candidate, user.password_hash)) return json({error: 'Invalid credentials or inactive account.'}, 401);
+  if (!safeEqual(candidate, user.password_hash)) return json({ error: 'Invalid credentials or inactive account.' }, 401);
   const lastLogin = new Date().toISOString();
   await env.DB.prepare('UPDATE app_users SET last_login = ? WHERE id = ?').bind(lastLogin, user.id).run();
-  const session = await createSession(user.id, env);
-  await ensureBusinessDataOwner(env);
-  const response = json({user: publicUser({...user, last_login: lastLogin})});
-  response.headers.set('set-cookie', sessionCookie(session.token, session.maxAge));
-  return response;
+  return await establishSession({ ...user, last_login: lastLogin }, request, env, { user: publicUser({ ...user, last_login: lastLogin }) });
 }
 
 async function authGoogle(request: Request, env: Env) {
   await ensureAuthSeed(env);
   const body = await readJson(request);
   const accessToken = String(body?.accessToken || '');
-  if (!accessToken) return json({error: 'Google access token is required.'}, 400);
-  const googleResponse = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {headers: {authorization: `Bearer ${accessToken}`}});
-  if (!googleResponse.ok) return json({error: 'Google authentication could not be verified.'}, 401);
-  const googleUser = await googleResponse.json() as {email?: string; email_verified?: boolean};
-  if (!googleUser.email || googleUser.email_verified === false) return json({error: 'A verified Google email is required.'}, 401);
+  if (!accessToken) return json({ error: 'Google access token is required.' }, 400);
+  const googleResponse = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { authorization: `Bearer ${accessToken}` } });
+  if (!googleResponse.ok) return json({ error: 'Google authentication could not be verified.' }, 401);
+  const googleUser = await googleResponse.json() as { email?: string; email_verified?: boolean };
+  if (!googleUser.email || googleUser.email_verified === false) return json({ error: 'A verified Google email is required.' }, 401);
   const rows = await env.DB.prepare('SELECT * FROM app_users WHERE lower(email) = ? LIMIT 1').bind(googleUser.email.toLowerCase()).all<AppUserRow>();
   const user = rows.results?.[0];
-  if (!user || user.status !== 'Active') return json({error: 'This Google account is not registered or is inactive.'}, 403);
+  if (!user || user.status !== 'Active') return json({ error: 'This Google account is not registered or is inactive.' }, 403);
   const lastLogin = new Date().toISOString();
   await env.DB.prepare('UPDATE app_users SET last_login = ? WHERE id = ?').bind(lastLogin, user.id).run();
-  const session = await createSession(user.id, env);
-  await ensureBusinessDataOwner(env);
-  const response = json({user: publicUser({...user, last_login: lastLogin})});
-  response.headers.set('set-cookie', sessionCookie(session.token, session.maxAge));
-  return response;
+  return await establishSession({ ...user, last_login: lastLogin }, request, env, { user: publicUser({ ...user, last_login: lastLogin }) });
 }
 
 async function authSession(request: Request, env: Env) {
   await ensureAuthSeed(env);
+  const cookie = request.headers.get('cookie') || '';
   const user = await requireAppUser(request, env);
-  return json({ user: user ? publicUser(user) : null, authenticated: Boolean(user) });
+  if (user) {
+    const response = json({
+      user: publicUser(user),
+      authenticated: true,
+      entranceAllowed: false,
+      canSuperAdmin: await superAdminSession(request, env, user),
+    });
+    response.headers.set('cache-control', 'no-store');
+    return response;
+  }
+  // Cloudflare Access SSO bootstrap. This is the ONLY place a session is minted
+  // without a password, so it must never create or upgrade an account: Access
+  // proves the email, the roster decides whether that email has an active
+  // account, and the database flag still decides what that account may do.
+  const identity = env.CF_ACCESS_SSO === 'true' ? await accessIdentityFor(request, env) : null;
+  if (identity) {
+    const rows = await env.DB.prepare('SELECT * FROM app_users WHERE lower(email) = ? LIMIT 1').bind(identity.email).all<AppUserRow>();
+    const matched = rows.results?.[0];
+    if (matched && matched.status === 'Active') {
+      const lastLogin = new Date().toISOString();
+      await env.DB.prepare('UPDATE app_users SET last_login = ? WHERE id = ?').bind(lastLogin, matched.id).run();
+      return await establishSession({ ...matched, last_login: lastLogin }, request, env, {
+        user: publicUser({ ...matched, last_login: lastLogin }),
+        authenticated: true,
+        entranceAllowed: false,
+        accessEmail: identity.email,
+      });
+    }
+    const unregistered = json({ user: null, authenticated: false, entranceAllowed: false, accessEmail: identity.email, registered: false });
+    unregistered.headers.set('cache-control', 'no-store');
+    return unregistered;
+  }
+  const entranceAllowed = await hasEntrance(cookie, makeD1QueryAll(env));
+  const response = json({ user: null, authenticated: false, entranceAllowed });
+  response.headers.set('cache-control', 'no-store');
+  return response;
+}
+
+/**
+ * Step-up: re-prove possession of the caller's own password before a privileged
+ * change. The token is bound to the account that confirmed it and expires, so a
+ * stolen cookie cannot be replayed by a different staff member.
+ */
+async function authStepUp(request: Request, env: Env) {
+  const actor = await requireAppUser(request, env);
+  if (!actor) return json({ error: 'Authentication required.' }, 401);
+  const body = await readJson(request);
+  const password = String(body?.password || '');
+  if (!password) return json({ error: 'Enter your current password to continue.' }, 400);
+  const candidate = await hashPassword(password, actor.password_salt, actor.password_iterations);
+  if (!safeEqual(candidate, actor.password_hash)) return json({ error: 'That password is not correct.' }, 401);
+  const seconds = stepUpLifetimeSeconds(env);
+  const token = await issueStepUp(makeD1QueryAll(env), actor.id, seconds);
+  const response = json({ ok: true, expiresInSeconds: seconds, canSuperAdmin: await superAdminSession(request, env, actor) });
+  response.headers.set('cache-control', 'no-store');
+  response.headers.set('set-cookie', stepUpCookie(token, true, seconds));
+  return response;
 }
 
 async function authLogout(request: Request, env: Env) {
+  await revokeEntrance(request.headers.get('cookie') || '', makeD1QueryAll(env));
+  await revokeStepUp(request.headers.get('cookie') || '', makeD1QueryAll(env));
   const token = readCookie(request, SESSION_COOKIE);
   if (token) await env.DB.prepare('DELETE FROM app_sessions WHERE token_hash = ?').bind(await sha256(token)).run();
-  const response = json({ok: true});
+  const response = json({ ok: true });
   response.headers.set('set-cookie', sessionCookie('', 0));
+  response.headers.append('set-cookie', entranceCookie());
+  // The step-up cookie is HttpOnly and bound to the account; clearing it here
+  // keeps a sign-out from leaving a live privileged proof in the browser.
+  response.headers.append('set-cookie', stepUpCookie());
+  return response;
+}
+
+/**
+ * Lock the workspace: a deliberate AFK action that is NOT a sign-out.
+ *
+ * The app session stays valid, so unlocking is immediate and needs no password
+ * and no second OTP — but the step-up proof is revoked, so the terminal that was
+ * left unattended cannot be used to change users, roles or passwords without a
+ * fresh password. The caller clears its own client state and returns to the
+ * staff entrance; nothing here needs a new session.
+ *
+ * The idle window in `staffSession.ts` is the automatic version of this same
+ * action, which is why locking early costs the operator nothing.
+ */
+async function authLock(request: Request, env: Env) {
+  await revokeStepUp(request.headers.get('cookie') || '', makeD1QueryAll(env));
+  const response = json({ ok: true });
+  response.headers.set('cache-control', 'no-store');
+  response.headers.set('set-cookie', stepUpCookie());
+  return response;
+}
+
+/**
+ * Where the browser must go to end the CLOUDFLARE ACCESS session, not just the
+ * app session. Sign-out is incomplete without it: Access keeps its own
+ * `CF_AppSession` cookie, so a 3-second cart hold would walk straight back into
+ * the workspace with no OTP at all — which defeats the gate on a shared device.
+ *
+ * The team domain lives only on the server, so the client asks rather than
+ * hardcoding it. `url: null` means the gate is off (local development), where
+ * there is no Access session to end and the caller falls back to the Mall.
+ */
+function accessLogoutUrl(env: Env, mallOrigin: string) {
+  if (env.CF_ACCESS_SSO !== 'true' || !env.CF_ACCESS_TEAM_DOMAIN) return null;
+  const team = env.CF_ACCESS_TEAM_DOMAIN.replace(/\/+$/, '');
+  const response = json({ url: `${team}/cdn-cgi/access/logout?returnTo=${encodeURIComponent(mallOrigin)}` });
+  response.headers.set('cache-control', 'no-store');
   return response;
 }
 
 async function authUsers(request: Request, env: Env) {
   const actor = await requireAppUser(request, env);
-  if (!actor) return json({error: 'Authentication required.'}, 401);
+  if (!actor) return json({ error: 'Authentication required.' }, 401);
   const rows = await env.DB.prepare('SELECT * FROM app_users ORDER BY is_super_admin DESC, display_name').all<AppUserRow>();
-  return json({users: (rows.results || []).map(publicUser)});
+  return json({ users: (rows.results || []).map(publicUser) });
 }
 
 async function upsertAuthUser(request: Request, env: Env) {
   const actor = await requireAppUser(request, env);
-  if (!actor || actor.role !== 'Administrator') return json({error: 'Administrator access required.'}, 403);
+  // Creating an account, changing a role or setting a password is privileged:
+  // the Administrator role and a fresh step-up are both required (docs/staff-access.md).
+  const editorCheck = staffEditorCheck({ actor, stepUp: actor ? await stepUpVerified(request, env, actor.id) : false });
+  if (editorCheck.ok === false) return privilegeResponse(editorCheck);
   const body = await readJson(request);
   const input = body?.user || {};
   const id = String(input.id || '');
-  if (!id || !input.email || !input.displayName) return json({error: 'User id, email, and display name are required.'}, 400);
+  if (!id || !input.email || !input.displayName) return json({ error: 'User id, email, and display name are required.' }, 400);
   const existingRows = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(id).all<AppUserRow>();
   const existing = existingRows.results?.[0];
+  // Same guard as changeAuthPassword: a regular Administrator must never be able
+  // to rewrite the super administrator's profile — the upsert would otherwise
+  // let them reset the super-admin password (and with it take over the account)
+  // or point the protected identity at their own email.
+  if (existing?.is_super_admin && !await superAdminSession(request, env, actor)) return json({ error: 'Only the super administrator can modify this account.' }, 403);
+  if (existing?.is_protected && !await superAdminSession(request, env, actor)) return json({ error: 'Only the super administrator can modify this protected account.' }, 403);
   const password = String(body?.password || input.password || '');
-  if (!existing && password.length < 8) return json({error: 'A password of at least 8 characters is required.'}, 400);
+  if (!existing && password.length < 8) return json({ error: 'A password of at least 8 characters is required.' }, 400);
   let salt = existing?.password_salt || randomHex(16);
   let hash = existing?.password_hash || '';
   let changedAt = existing?.password_last_changed || new Date().toISOString();
   if (password) {
-    if (password.length < 8) return json({error: 'Password must be at least 8 characters.'}, 400);
+    if (password.length < 8) return json({ error: 'Password must be at least 8 characters.' }, 400);
     salt = randomHex(16); hash = await hashPassword(password, salt); changedAt = new Date().toISOString();
   }
   await env.DB.prepare(
     'INSERT INTO app_users (id, email, username, display_name, role, status, avatar_url, password_hash, password_salt, password_iterations, is_super_admin, is_protected, created_at, last_login, password_last_changed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, username=excluded.username, display_name=excluded.display_name, role=excluded.role, status=excluded.status, avatar_url=excluded.avatar_url, password_hash=excluded.password_hash, password_salt=excluded.password_salt, password_iterations=excluded.password_iterations, last_login=excluded.last_login, password_last_changed=excluded.password_last_changed',
   ).bind(id, String(input.email).toLowerCase(), input.username || null, input.displayName, input.role || 'Sales Staff', input.status || 'Active', input.avatarUrl || null, hash, salt, PASSWORD_ITERATIONS, existing?.is_super_admin || 0, existing?.is_protected || 0, input.createdAt || existing?.created_at || new Date().toISOString(), input.lastLogin || existing?.last_login || null, changedAt).run();
-  return json({ok: true});
+  // A password change on another account must revoke that account's sessions,
+  // exactly like changeAuthPassword does — otherwise the old sessions survive
+  // the reset and the takeover is never fully revoked.
+  if (password && existing && id !== actor.id) {
+    await env.DB.prepare('DELETE FROM app_sessions WHERE user_id = ?').bind(id).run();
+    await revokeStepUpForUser(makeD1QueryAll(env), id);
+  }
+  return json({ ok: true });
 }
 
 async function deleteAuthUser(request: Request, env: Env, id: string) {
-  const actor = await requireAppUser(request, env);
-  if (!actor || !actor.is_super_admin) return json({error: 'Super administrator access required.'}, 403);
-  if (id === actor.id || id === 'usr-superadmin-idofera') return json({error: 'Protected account cannot be deleted.'}, 400);
+  // Deleting an account is the most destructive staff action: DB flag, IdP
+  // group (when configured) and a fresh password step-up are all required.
+  const privileged = await requireSuperAdmin(request, env);
+  if ('error' in privileged) return privileged.error;
+  const { actor } = privileged;
+  // Self-deletion is always blocked; otherwise honour the stored is_protected
+  // flag. The previous hardcoded legacy id protected nothing the flag does not
+  // already cover, and only made an old default-seeded account un-deletable.
+  const target = await d1Get(env, 'SELECT is_protected FROM app_users WHERE id = ?', [id]);
+  if (id === actor.id || Number(target?.is_protected) === 1) return json({ error: 'Protected account cannot be deleted.' }, 400);
   await env.DB.prepare('DELETE FROM app_users WHERE id = ?').bind(id).run();
-  return json({ok: true});
+  await revokeStepUpForUser(makeD1QueryAll(env), id);
+  return json({ ok: true });
 }
 
 async function changeAuthPassword(request: Request, env: Env) {
   const actor = await requireAppUser(request, env);
-  if (!actor) return json({error: 'Authentication required.'}, 401);
+  if (!actor) return json({ error: 'Authentication required.' }, 401);
   const body = await readJson(request);
   const targetId = String(body?.targetUserId || actor.id);
   const newPassword = String(body?.newPassword || '');
   const oldPassword = String(body?.oldPassword || '');
-  if (newPassword.length < 8) return json({error: 'Password must be at least 8 characters.'}, 400);
+  if (newPassword.length < 8) return json({ error: 'Password must be at least 8 characters.' }, 400);
   const rows = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(targetId).all<AppUserRow>();
   const target = rows.results?.[0];
-  if (!target) return json({error: 'User not found.'}, 404);
+  if (!target) return json({ error: 'User not found.' }, 404);
   if (targetId === actor.id) {
     const candidate = await hashPassword(oldPassword, actor.password_salt, actor.password_iterations);
-    if (!oldPassword || !safeEqual(candidate, actor.password_hash)) return json({error: 'Current password is incorrect.'}, 401);
+    if (!oldPassword || !safeEqual(candidate, actor.password_hash)) return json({ error: 'Current password is incorrect.' }, 401);
   } else {
-    if (actor.role !== 'Administrator') return json({error: 'Administrator access required.'}, 403);
-    if (target.is_super_admin && !actor.is_super_admin) return json({error: 'Only the super administrator can reset this password.'}, 403);
+    if (actor.role !== 'Administrator') return json({ error: 'Administrator access required.' }, 403);
+    // Resetting somebody else's password is privileged: the caller must confirm
+    // their own password, and a super-admin target also needs the IdP group.
+    if (!await stepUpVerified(request, env, actor.id)) return stepUpRequired();
+    if (target.is_super_admin && !await superAdminSession(request, env, actor)) return json({ error: 'Only the super administrator can reset this password.' }, 403);
   }
   const salt = randomHex(16);
   const changedAt = new Date().toISOString();
   await env.DB.prepare('UPDATE app_users SET password_hash = ?, password_salt = ?, password_iterations = ?, password_last_changed = ? WHERE id = ?')
     .bind(await hashPassword(newPassword, salt), salt, PASSWORD_ITERATIONS, changedAt, targetId).run();
   if (targetId !== actor.id) await env.DB.prepare('DELETE FROM app_sessions WHERE user_id = ?').bind(targetId).run();
-  return json({ok: true, passwordLastChanged: changedAt});
+  // A password change invalidates every step-up proof that account was given.
+  await revokeStepUpForUser(makeD1QueryAll(env), targetId);
+  return json({ ok: true, passwordLastChanged: changedAt });
 }
 
 async function verifyAuthPassword(request: Request, env: Env) {
@@ -342,63 +807,109 @@ async function readJson(request: Request) {
 
 async function saveSnapshot(request: Request, env: Env) {
   await ensureSchema(env);
-  const ownerId = BUSINESS_OWNER_ID;
   const body = await readJson(request);
-  if (!body?.stores || typeof body.stores !== 'object') return json({error: 'A stores object is required.'}, 400);
-
-  const revisionRows = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
-    .bind(ownerId).all<{revision: number}>();
-  const currentRevision = Number(revisionRows.results?.[0]?.revision || 0);
-  const expectedRevision = Number(body.expectedRevision || 0);
-  if (expectedRevision !== currentRevision) {
-    return json({error: 'Snapshot revision conflict.', revision: currentRevision}, 409);
+  if (!body?.stores || typeof body.stores !== 'object') return json({ error: 'A stores object is required.' }, 400);
+  // Bound the restore before touching a single row: a runaway payload would
+  // otherwise translate into tens of thousands of statements per request.
+  const totalDocuments = Object.values(body.stores).reduce<number>((sum, documents) =>
+    sum + (Array.isArray(documents) ? documents.length : 0), 0);
+  if (totalDocuments > SNAPSHOT_PUSH_DOC_LIMIT) {
+    return json({ error: `Snapshot exceeds the maximum of ${SNAPSHOT_PUSH_DOC_LIMIT} documents. Restore a bounded slice and sync the rest with record PATCHes.` }, 413);
   }
 
-  const now = Date.now();
-  const revision = Math.max(now, currentRevision + 1);
-  const statements: D1PreparedStatement[] = [];
+  const current = await currentWatermark(env);
+  const expectedRevision = Number(body.expectedRevision || 0);
+  const isForce = Boolean(body.force) || expectedRevision === -1;
+  if (!isForce && expectedRevision !== current) {
+    return json({ error: 'Snapshot revision conflict.', revision: current }, 409);
+  }
+
+  const nowIso = new Date().toISOString();
+  const relationalStmts: { sql: string; params: any[] }[] = [];
+  // 100% relational full replace: child-first DELETE + upsert per collection.
+  // No document mirror is written — there is nothing to mirror into.
   for (const [collection, documents] of Object.entries(body.stores)) {
     if (!ALLOWED_STORES.has(collection) || !Array.isArray(documents)) continue;
-    statements.push(env.DB.prepare('DELETE FROM app_documents WHERE owner_id = ? AND collection = ?').bind(ownerId, collection));
-    for (const document of documents) {
-      if (!document || typeof document !== 'object') continue;
-      const documentId = String((document as Record<string, unknown>).id || 'singleton');
-      statements.push(
-        env.DB.prepare(
-          'INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at',
-        ).bind(ownerId, collection, documentId, JSON.stringify(document), now),
-      );
-    }
+    relationalStmts.push(...replaceCollectionStatements(collection, documents, nowIso));
   }
-  statements.push(
-    env.DB.prepare(
-      'INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?) ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at',
-    ).bind(ownerId, revision, now),
-  );
 
-  for (let offset = 0; offset < statements.length; offset += 75) {
-    await env.DB.batch(statements.slice(offset, offset + 75));
+  // The relational tables are what every read serves, so write them FIRST and
+  // refuse to move the revision if they fail.
+  try {
+    await runStatements(env, toD1Statements(env, relationalStmts));
+  } catch (error) {
+    const relationalError = error instanceof Error ? error.message : String(error);
+    console.warn('Relational snapshot write failed:', relationalError);
+    return json({
+      error: 'The snapshot could not be written to the live catalog; nothing was replaced and the revision is unchanged. Retry the restore.',
+      relationalError,
+    }, 500);
   }
-  return json({ok: true, revision, collections: Object.keys(body.stores).filter((name) => ALLOWED_STORES.has(name))});
+  const revision = Math.max(Date.now(), current + 1);
+  await bumpWorkerWatermark(env, revision);
+  // A snapshot restore can replace every product; drop the catalog facet cache.
+  invalidateMallFacetCache();
+  return json({
+    ok: true,
+    revision,
+    collections: Object.keys(body.stores).filter((name) => ALLOWED_STORES.has(name)),
+    backend: 'relational',
+    relationalStatements: relationalStmts.length,
+    relationalSynced: true,
+  });
+}
+
+/** Convert shared mapper SqlStmt[] into D1 prepared statements. */
+function toD1Statements(env: Env, stmts: { sql: string; params?: any[] }[]): D1PreparedStatement[] {
+  return stmts.map((st) => env.DB.prepare(st.sql).bind(...(Array.isArray(st.params) ? st.params : [])));
+}
+
+/** D1 batch caps statement counts, so chunk the relational mirrors. */
+async function runStatements(env: Env, statements: D1PreparedStatement[]) {
+  for (let offset = 0; offset < statements.length; offset += 50) {
+    await env.DB.batch(statements.slice(offset, offset + 50));
+  }
+}
+
+/**
+ * Snapshot revalidation. The Dashboard read the whole store (1,592 documents /
+ * ~554 KB) on every boot even when nothing had changed since its last read.
+ * The revision already bumps on every snapshot write, so it is a sound
+ * validator: revision + the backend that served it, matching what the client
+ * stores after each successful read.
+ */
+const snapshotGuard = (revision: number, backend: string) => `"${revision}-${backend}"`;
+
+function snapshotNotModified(request: Request, revision: number, backend: string) {
+  const header = request.headers.get('if-none-match');
+  if (!revision || !header) return false;
+  return header.split(',').some((value) => value.trim() === snapshotGuard(revision, backend));
+}
+
+const snapshotUnchanged = (revision: number, backend: string) =>
+  new Response(null, { status: 304, headers: { 'cache-control': 'no-store', 'etag': snapshotGuard(revision, backend) } });
+
+function snapshotResponse(body: Record<string, unknown>, revision: number, backend: string) {
+  const response = json(body);
+  response.headers.set('etag', snapshotGuard(revision, backend));
+  response.headers.set('cache-control', 'no-store');
+  return response;
 }
 
 async function readSnapshot(request: Request, env: Env) {
   await ensureSchema(env);
-  const ownerId = BUSINESS_OWNER_ID;
-  const rows = await env.DB.prepare(
-    'SELECT collection, document_id, payload, updated_at FROM app_documents WHERE owner_id = ? ORDER BY collection, document_id',
-  ).bind(ownerId).all<{collection: string; document_id: string; payload: string; updated_at: number}>();
-  const stores: Record<string, unknown[]> = {};
-  for (const row of rows.results || []) {
-    try {
-      (stores[row.collection] ||= []).push(JSON.parse(row.payload));
-    } catch {
-      // Ignore a malformed row without making the rest of the snapshot unreadable.
-    }
-  }
-  const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
-    .bind(ownerId).all<{revision: number}>();
-  return json({stores, hasData: Object.keys(stores).length > 0, revision: Number(revisions.results?.[0]?.revision || 0)});
+  // 100% relational: the snapshot is built from the relational tables only. The
+  // legacy `app_documents` fallback is REMOVED — there is no document mirror.
+  const revision = await currentWatermark(env);
+  if (snapshotNotModified(request, revision, 'relational')) return snapshotUnchanged(revision, 'relational');
+  const { stores, capped } = await buildSnapshot(makeD1QueryAll(env));
+  return snapshotResponse({
+    stores,
+    hasData: true,
+    revision,
+    backend: 'relational',
+    ...(capped.length ? { bounds: { capped } } : {}),
+  }, revision, 'relational');
 }
 
 async function patchRecords(request: Request, env: Env) {
@@ -407,39 +918,68 @@ async function patchRecords(request: Request, env: Env) {
   const body = await readJson(request);
   const upserts = Array.isArray(body?.upserts) ? body.upserts : [];
   const deletes = Array.isArray(body?.deletes) ? body.deletes : [];
-  if (upserts.length + deletes.length > 5000) return json({error: 'Too many records in one sync.'}, 413);
+  if (upserts.length + deletes.length > 5000) return json({ error: 'Too many records in one sync.' }, 413);
 
   const now = Date.now();
-  const statements: D1PreparedStatement[] = [];
+  const nowIso = new Date(now).toISOString();
+  // Mirror-less PATCH (option B): a staff edit writes ONLY the relational rows
+  // it changes. The app_documents mirror no longer receives per-edit upserts or
+  // deletes — snapshot PUTs keep it current — so a PATCH stops paying the mirror
+  // rewrite on every index entry it touches plus the 50-row probe pages that
+  // pre-read every candidate from the mirror. The unchanged re-push guard went
+  // with the probe: it compared against mirror payloads that PATCHes no longer
+  // refresh, so it could never make a correct skip decision again. A repeated
+  // push now costs only its idempotent relational upserts.
+  const relationalStmts: { sql: string; params: any[] }[] = [];
+  const writtenKeys: { collection: string; documentId: string }[] = [];
   for (const item of upserts) {
     const collection = String(item?.collection || '');
     const document = item?.document;
     if (!ALLOWED_STORES.has(collection) || !document || typeof document !== 'object') continue;
     const documentId = String(document.id || 'singleton');
-    statements.push(env.DB.prepare(
-      'INSERT INTO app_documents (owner_id, collection, document_id, payload, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(owner_id, collection, document_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at',
-    ).bind(ownerId, collection, documentId, JSON.stringify(document), now));
+    writtenKeys.push({ collection, documentId });
+    relationalStmts.push(...upsertToStatements(collection, document, nowIso));
   }
   for (const item of deletes) {
     const collection = String(item?.collection || '');
     const documentId = String(item?.documentId || '');
     if (!ALLOWED_STORES.has(collection) || !documentId) continue;
-    statements.push(env.DB.prepare(
-      'DELETE FROM app_documents WHERE owner_id = ? AND collection = ? AND document_id = ?',
-    ).bind(ownerId, collection, documentId));
+    relationalStmts.push(...deleteToStatements(collection, documentId));
   }
 
-  const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?')
-    .bind(ownerId).all<{revision: number}>();
-  const revision = Math.max(now, Number(revisions.results?.[0]?.revision || 0) + 1);
-  statements.push(env.DB.prepare(
-    'INSERT INTO sync_revisions (owner_id, revision, updated_at) VALUES (?, ?, ?) ON CONFLICT(owner_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at',
-  ).bind(ownerId, revision, now));
-
-  for (let offset = 0; offset < statements.length; offset += 75) {
-    await env.DB.batch(statements.slice(offset, offset + 75));
+  // Write the relational rows FIRST and only bump the watermark when they are
+  // actually in place. Bumping first meant a failed relational batch still
+  // answered ok:true with a moved revision: the client acked its keys and never
+  // retried, while the revision-guarded full read 304'd the pre-write world — the
+  // record was lost on every device. A failure now leaves the revision untouched
+  // and answers 5xx, so the client keeps its dirty keys and retries.
+  try {
+    await runStatements(env, toD1Statements(env, relationalStmts));
+  } catch (error) {
+    const relationalError = error instanceof Error ? error.message : String(error);
+    console.warn('Relational record write failed:', relationalError);
+    return json({
+      error: 'The live catalog update failed; no records were written and the revision is unchanged. Retry the sync.',
+      relationalError,
+    }, 500);
   }
-  return json({ok: true, revision, upserted: upserts.length, deleted: deletes.length});
+  const revision = Math.max(now, (await currentWatermark(env)) + 1);
+  await bumpWorkerWatermark(env, revision);
+  // Product writes change the catalog facet lists; drop the in-memory cache so
+  // the next catalog request rebuilds the counts including this write.
+  invalidateMallFacetCache();
+  return json({
+    ok: true,
+    revision,
+    upserted: writtenKeys.length,
+    deleted: deletes.length,
+    // The mirror probe is gone, so nothing is ever skipped; the field stays in
+    // the response so older clients keep parsing it without a fallback.
+    skippedUnchanged: 0,
+    backend: 'relational',
+    relationalStatements: relationalStmts.length,
+    relationalSynced: true,
+  });
 }
 
 async function askGemini(apiKey: string, prompt: string) {
@@ -448,14 +988,14 @@ async function askGemini(apiKey: string, prompt: string) {
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
     {
       method: 'POST',
-      headers: {'content-type': 'application/json'},
-      body: JSON.stringify({contents: [{parts: [{text: prompt}]}]}),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
     },
   );
   if (!response.ok) throw new Error(`Gemini request failed (${response.status})`);
   const data = await response.json() as any;
   return (data.candidates?.[0]?.content?.parts || [])
-    .map((part: {text?: string}) => part.text || '')
+    .map((part: { text?: string }) => part.text || '')
     .join('')
     .trim();
 }
@@ -466,7 +1006,7 @@ function stripJsonFence(text: string) {
 
 async function businessAssistant(request: Request, env: Env) {
   const body = await readJson(request);
-  if (!body?.prompt) return json({error: 'A prompt is required.'}, 400);
+  if (!body?.prompt) return json({ error: 'A prompt is required.' }, 400);
   const context = body.businessContext || {};
   if (!env.GEMINI_API_KEY) {
     return json({
@@ -478,13 +1018,13 @@ async function businessAssistant(request: Request, env: Env) {
     env.GEMINI_API_KEY,
     `You are IdoferaLabs AI Business Assistant. Give concise, actionable retail and wholesale advice.\n\nBusiness context:\n${JSON.stringify(context, null, 2)}\n\nQuestion:\n${body.prompt}`,
   );
-  return json({answer, source: 'gemini-2.5-flash'});
+  return json({ answer, source: 'gemini-2.5-flash' });
 }
 
 async function pricingAssistant(request: Request, env: Env) {
   const body = await readJson(request);
   const product = body?.product;
-  if (!product) return json({error: 'A product is required.'}, 400);
+  if (!product) return json({ error: 'A product is required.' }, 400);
   const cost = Number(product.costPrice) || 100;
   if (!env.GEMINI_API_KEY) {
     const retail = Math.round(cost * 145) / 100;
@@ -504,7 +1044,7 @@ async function pricingAssistant(request: Request, env: Env) {
     env.GEMINI_API_KEY,
     `Return only valid JSON with recommendedRetailPrice, recommendedWholesalePrice, suggestedDiscountPct, projectedProfitMargin, riskLevel, and explanation for this product:\n${JSON.stringify(product, null, 2)}`,
   );
-  return json({...JSON.parse(stripJsonFence(text)), source: 'gemini-2.5-flash'});
+  return json({ ...JSON.parse(stripJsonFence(text)), source: 'gemini-2.5-flash' });
 }
 
 async function salesForecast(request: Request, env: Env) {
@@ -527,7 +1067,7 @@ async function salesForecast(request: Request, env: Env) {
     env.GEMINI_API_KEY,
     `Return only valid JSON with forecastDays, predictedRevenue, predictedSalesCount, highRiskStockouts, suggestedReorderDate, cashFlowTrend, and insights. Sales count: ${sales.length}. Products: ${JSON.stringify(products.slice(0, 20), null, 2)}`,
   );
-  return json({...JSON.parse(stripJsonFence(text)), source: 'gemini-2.5-flash'});
+  return json({ ...JSON.parse(stripJsonFence(text)), source: 'gemini-2.5-flash' });
 }
 
 async function serveAsset(request: Request, env: Env) {
@@ -535,36 +1075,151 @@ async function serveAsset(request: Request, env: Env) {
   const url = new URL(request.url);
   const acceptsHtml = request.method === 'GET' && (request.headers.get('accept') || '').includes('text/html');
   if (response.status === 404 && acceptsHtml) {
-    response = await env.ASSETS.fetch(new Request(new URL('/index.html', url), request));
+    // Fetch the canonical HTML internally: /index.html redirects to / in
+    // Workers Assets, which would otherwise discard the browser's staff route.
+    response = await env.ASSETS.fetch(new Request(new URL('/', url), request));
   }
   const headers = new Headers(response.headers);
-  if (url.pathname === '/' || url.pathname === '/index.html') {
-    headers.set('cache-control', 'no-cache, max-age=0');
+  if ((response.headers.get('content-type') || '').includes('text/html')) {
+    headers.set('cache-control', isStaffPage(url.pathname) ? 'no-store' : 'no-cache, max-age=0');
     headers.delete('content-length');
     const html = (await response.text()).replaceAll('__SITE_ORIGIN__', url.origin);
-    return new Response(html, {status: response.status, statusText: response.statusText, headers});
+    return new Response(html, { status: response.status, statusText: response.statusText, headers });
   } else if (url.pathname.startsWith('/assets/')) {
     headers.set('cache-control', 'public, max-age=31536000, immutable');
   }
-  return new Response(response.body, {status: response.status, statusText: response.statusText, headers});
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
 export default {
+  async scheduled(controller: unknown, env: Env): Promise<void> {
+    await ensureSchema(env);
+    // Two crons drive this handler (see [env.mall.triggers]): a ten-minute drain
+    // and an hourly sweep. Cloudflare hands back the matched expression as
+    // `controller.cron`, so the handler splits on it rather than repeating all
+    // the work 144 times a day.
+    //
+    // The comparison EXACT-MATCHES one expression on purpose. An unrecognised or
+    // absent cron string resolves to `'drain'`, never to `'sweep'`: a typo in
+    // wrangler.toml must fail toward draining the queue and keeping readiness
+    // green, not toward silently skipping expiry and cleanup. Note that `'drain'`
+    // still writes the readiness marker, and only `'sweep'` steps aside from it.
+    const mode = (controller as { cron?: string } | undefined)?.cron === '7 * * * *'
+      ? 'sweep'
+      : 'drain';
+    await maintainMall({
+      config: env, queryAll: makeD1QueryAll(env), runBatch: async stmts => {
+        const result = await env.DB.batch(toD1Statements(env, stmts));
+        return result.map((row: any) => Number(row?.meta?.changes ?? 0));
+      }
+    }, async (input, init) => {
+      // Deliver the signed outbox POST to the receiver IN PROCESS. Reaching
+      // MALL_WEBHOOK_URL over the network would mean this Worker fetching a
+      // hostname its own route matches, which Cloudflare answers with error 1042
+      // ("Internal request count exceeded") once the subrequest chain grows.
+      // The receiver still verifies the HMAC, so the signature path is real.
+      // Only method/headers/body are carried over: `signal` and `redirect` are
+      // transport concerns that do not apply to an in-process call.
+      const request = new Request(String(input), {
+        method: init?.method || 'POST',
+        headers: init?.headers as Record<string, string>,
+        body: init?.body as string,
+      });
+      return await handleMallWebhook(request, env);
+    }, { mode });
+  },
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     try {
-      if (url.pathname === '/api/health') return json({status: 'ok', app: 'IdoferaLabs API', timestamp: new Date().toISOString()});
+      const query = makeD1QueryAll(env);
+      const cookie = request.headers.get('cookie') || '';
+      if (url.pathname === '/api/auth/entrance') {
+        if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
+        if (request.headers.get('origin') !== url.origin || request.headers.get('x-staff-entrance') !== 'cart-hold') return json({ error: 'Forbidden' }, 403);
+        const response = json({ ok: true });
+        response.headers.set('cache-control', 'no-store');
+        response.headers.set('set-cookie', entranceCookie(await issueEntrance(query)));
+        return response;
+      }
+      const login = ['/api/auth/login', '/api/auth/google'].includes(url.pathname);
+      const staffPage = isStaffPage(url.pathname);
+      if (staffPage || isPrivateApi(url.pathname) || login) {
+        // The staff entrance gates the staff pages and the private APIs, NOT the
+        // sign-in endpoints: the entrance cookie is only issued after a
+        // successful sign-in, so requiring it in order to sign in is circular.
+        // This term was inverted (it applied the entrance to private APIs and
+        // skipped it for login), so a signed-out POST /api/auth/login was
+        // rejected 401 STAFF_ENTRANCE_REQUIRED before any credential check.
+        //
+        // Staff PAGES (not private APIs) additionally accept a verified
+        // Cloudflare Access identity: after Access signs the caller in at the
+        // edge, the SPA shell must load so /api/auth/session can mint the app
+        // session the API handlers below require. APIs still need an entrance
+        // or a session — a JWT alone authorizes nothing, exactly like the edge
+        // contract.
+        let entrance = login ? true : await hasEntrance(cookie, query);
+        if (!entrance && staffPage && env.CF_ACCESS_SSO === 'true') {
+          entrance = (await accessIdentityFor(request, env)) !== null;
+        }
+        if (!entrance && !await requireAppUser(request, env)) {
+          // Access authenticated this request but this deployment still cannot
+          // read the identity (stale/absent CF_ACCESS_AUD for this hostname, or
+          // the gate left unconfigured on a host Access fronts). Bouncing to `/`
+          // here is what made a completed OTP look like "nothing happened", so
+          // the misconfiguration is reported explicitly instead of silently
+          // resending the operator through the Mall.
+          if (staffPage && accessGateMisconfigured(request, env)) {
+            return accessGateMisconfiguredResponse(request);
+          }
+          if (isStaffPage(url.pathname)) return new Response(null, { status: 302, headers: { location: '/', 'cache-control': 'no-store' } });
+          if (login) return json({ error: 'Staff entrance expired. Return to the Mall and hold the Cart button for 3 seconds to reopen Staff Login.', code: 'STAFF_ENTRANCE_REQUIRED' }, 401);
+          return json({ error: 'Authentication required.' }, 401);
+        }
+      }
+      if (url.pathname === '/api/health') return json({ status: 'ok', app: 'IdoferaLabs API', timestamp: new Date().toISOString() });
       if (url.pathname === '/api/storage/d1/health') {
+        const healthStart = performance.now();
         await ensureSchema(env);
-        const ownerId = BUSINESS_OWNER_ID;
-        const revisions = await env.DB.prepare('SELECT revision FROM sync_revisions WHERE owner_id = ?').bind(ownerId).all<{revision: number}>();
-        const docCount = await env.DB.prepare('SELECT count(*) as count FROM app_documents WHERE owner_id = ?').bind(ownerId).all<{count: number}>();
+        const revision = await currentWatermark(env);
+        // Counting five relational tables costs ~2,185 rows. Liveness only needs
+        // the revision, so the counts are opt-in (`?detail=1`) and used by the
+        // Settings panel rather than by every poll.
+        const wantsDetail = new URL(request.url).searchParams.get('detail') === '1';
+        let relational: Record<string, unknown> | undefined;
+        if (wantsDetail) {
+          try {
+            const row = await d1Get(env, `SELECT
+              (SELECT COUNT(*) FROM products) as products,
+              (SELECT COUNT(*) FROM sales) as sales,
+              (SELECT COUNT(*) FROM customers) as customers,
+              (SELECT COUNT(*) FROM suppliers) as suppliers,
+              (SELECT COUNT(*) FROM sale_items) as sale_items`);
+            relational = {
+              products: Number(row?.products || 0),
+              sales: Number(row?.sales || 0),
+              customers: Number(row?.customers || 0),
+              suppliers: Number(row?.suppliers || 0),
+              saleItems: Number(row?.sale_items || 0),
+            };
+          } catch (error) {
+            relational = { error: error instanceof Error ? error.message : String(error) };
+          }
+        }
         return json({
           status: 'healthy',
           connected: true,
-          databaseId: '3e95a550-a091-490b-819d-f0acb7ea8dd8',
-          revision: Number(revisions.results?.[0]?.revision || 0),
-          totalDocuments: Number(docCount.results?.[0]?.count || 0),
+          backend: 'relational',
+          databaseId: env.D1_DATABASE_ID || 'unconfigured',
+          revision,
+          totalDocuments: 0,
+          relational,
+          detail: wantsDetail,
+          // Server-measured, reported so the client can grade on it. Without
+          // this key the client's `data.latencyMs` was always undefined and it
+          // silently fell back to round-trip time, which getLatencyBadge()
+          // classifies into its sub-150ms bands — so a healthy connection was
+          // drawn as 'Normal' or 'High Latency' by the badge.
+          latencyMs: Math.max(1, Math.round(performance.now() - healthStart)),
           endpoint: 'Cloudflare D1 Edge Worker',
           timestamp: new Date().toISOString(),
         });
@@ -572,7 +1227,10 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/auth/login') return await authLogin(request, env);
       if (request.method === 'POST' && url.pathname === '/api/auth/google') return await authGoogle(request, env);
       if (request.method === 'GET' && url.pathname === '/api/auth/session') return await authSession(request, env);
+      if (request.method === 'POST' && url.pathname === '/api/auth/step-up') return await authStepUp(request, env);
       if (request.method === 'POST' && url.pathname === '/api/auth/logout') return await authLogout(request, env);
+      if (request.method === 'POST' && url.pathname === '/api/auth/lock') return await authLock(request, env);
+      if (request.method === 'GET' && url.pathname === '/api/auth/access-logout-url') return accessLogoutUrl(env, url.origin) || json({ url: null });
       if (request.method === 'GET' && url.pathname === '/api/auth/users') return await authUsers(request, env);
       if (request.method === 'PUT' && url.pathname === '/api/auth/users') return await upsertAuthUser(request, env);
       if (request.method === 'DELETE' && url.pathname.startsWith('/api/auth/users/')) return await deleteAuthUser(request, env, decodeURIComponent(url.pathname.slice('/api/auth/users/'.length)));
@@ -584,10 +1242,82 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/ai/business-assistant') return await businessAssistant(request, env);
       if (request.method === 'POST' && url.pathname === '/api/ai/pricing-assistant') return await pricingAssistant(request, env);
       if (request.method === 'POST' && url.pathname === '/api/ai/sales-forecasting') return await salesForecast(request, env);
-      if (url.pathname.startsWith('/api/')) return json({error: 'Not found'}, 404);
+      if (url.pathname === '/api/staff/product-images') {
+        const actor = await requireAppUser(request, env);
+        if (!actor) return json({ error: 'Authentication required.' }, 401);
+        await ensureSchema(env);
+        return await handleStaffProductImageApi(request, makeR2ImageStore(env), {
+          config: env,
+          queryAll: makeD1QueryAll(env),
+          runBatch: async (stmts) => {
+            const results = await env.DB.batch(toD1Statements(env, stmts));
+            return results.map((result: any) => Number(result?.meta?.changes ?? 0));
+          },
+        }, { id: actor.id, displayName: actor.display_name, role: actor.role });
+      }
+      if (url.pathname === '/api/staff/mall-listings' || url.pathname.startsWith('/api/staff/mall-listings/')) {
+        const actor = await requireAppUser(request, env);
+        if (!actor) return json({ error: 'Authentication required.' }, 401);
+        await ensureSchema(env);
+        return await handleStaffMallListingApi(request, {
+          config: env,
+          queryAll: makeD1QueryAll(env),
+          runBatch: async (stmts) => {
+            const results = await env.DB.batch(toD1Statements(env, stmts));
+            return results.map((result: any) => Number(result?.meta?.changes ?? 0));
+          },
+        }, { id: actor.id, displayName: actor.display_name, role: actor.role });
+      }
+      if (url.pathname === '/api/staff/mall-orders' || url.pathname.startsWith('/api/staff/mall-orders/')) {
+        await ensureSchema(env);
+        const actor = await requireAppUser(request, env);
+        if (!actor) return json({ error: 'Authentication required.' }, 401);
+        return await handleStaffMallApi(request, {
+          config: env,
+          imagesConfigured: !!env.MALL_IMAGES,
+          queryAll: makeD1QueryAll(env),
+          runBatch: async (stmts) => {
+            const results = await env.DB.batch(toD1Statements(env, stmts));
+            return results.map((result: any) => Number(result?.meta?.changes ?? 0));
+          },
+        }, { id: actor.id, displayName: actor.display_name, role: actor.role });
+      }
+      // #18 — email notification webhook receiver (public, HMAC-signed).
+      if (request.method === 'POST' && url.pathname === '/api/mall-webhook') {
+        await ensureSchema(env);
+        return await handleMallWebhook(request, env);
+      }
+      // Phase 5: mall storefront API (public catalog/cart/checkout/track).
+      if (url.pathname === '/api/mall' || url.pathname.startsWith('/api/mall/')) {
+        await ensureSchema(env);
+        return await handleMallApi(request, {
+          config: env,
+          imagesConfigured: !!env.MALL_IMAGES,
+          clientIp: request.headers.get('cf-connecting-ip') || 'unknown',
+          queryAll: makeD1QueryAll(env),
+          runBatch: async (stmts) => {
+            const results = await env.DB.batch(toD1Statements(env, stmts));
+            return results.map((r: any) => Number(r?.meta?.changes ?? 0));
+          },
+        });
+      }
+      if (url.pathname.startsWith('/api/')) return json({ error: 'Not found' }, 404);
+      // #14 — public, immutable product images (served from R2, never the asset bucket).
+      if (url.pathname.startsWith('/mall-images/')) {
+        return await handlePublicImageRequest(request, makeR2ImageStore(env), decodeURIComponent(url.pathname.slice('/mall-images/'.length)));
+      }
       return await serveAsset(request, env);
     } catch (error) {
-      return json({error: error instanceof Error ? error.message : 'Unexpected server error'}, 500);
+      // Preserve Mall domain semantics when an error propagates from the Mall
+      // handlers (status + structured payload). Anything else falls back to a
+      // generic 500 so unexpected failures never escape as non-Response throws.
+      const known = error as Error & { mallStatus?: number; mallPayload?: unknown };
+      const status = known?.mallStatus ?? 500;
+      const body: Record<string, unknown> = { error: error instanceof Error ? error.message : 'Unexpected server error' };
+      if (known?.mallPayload !== undefined) body.payload = known.mallPayload;
+      const resp = json(body, status);
+      resp.headers.set('cache-control', 'no-store');
+      return resp;
     }
   },
 };

@@ -54,15 +54,51 @@ import { Sale, SaleItem, PaymentMethod, SaleStatus, Customer, DeliveryOrder, Del
 import { ReceiptModal } from '../common/ReceiptModal';
 import { Pagination } from '../common/Pagination';
 import { InvoiceWorkshopModal } from './InvoiceWorkshopModal';
+import { useInteractions } from '../../context/InteractionContext';
 import { ProcessSaleRefundModal } from './ProcessSaleRefundModal';
+import { loyaltyPointsForAmount } from '../../shared/customerLedger';
 
 interface SalesViewProps {
   onNavigate?: (page: string) => void;
 }
 
+const GUEST_CUSTOMER_NAMES = new Set(['walk-in customer', 'cash customer', 'guest customer', 'walk-in']);
+
+/** True when a sale has no real customer identity (case-insensitive). */
+const isGuestCustomerName = (name?: string): boolean => {
+  const normalized = String(name || '').trim().toLowerCase();
+  return normalized === '' || GUEST_CUSTOMER_NAMES.has(normalized);
+};
+
+/**
+ * Net revenue actually retained from a sale, after any partial/full refund.
+ * Refunded sales are excluded by callers, but Partially Refunded sales are
+ * kept — so a gross `totalAmount` overstates what the business kept. The
+ * receipt and Reports already net this; the day/KPI aggregations must too.
+ */
+const netSaleAmount = (s: Sale): number =>
+  Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.totalRefunded) || 0));
+
+/**
+ * Amount actually tendered. Legacy/imported sales without a `paidAmount` were
+ * recorded as fully paid (the receipt and `processSale` treat `undefined` as
+ * `totalAmount`), yet `<sale>.paidAmount || 0` silently booked them as unpaid.
+ * Normalise to one rule: missing `paidAmount` == paid-in-full.
+ */
+const paidForSale = (s: Sale): number =>
+  s.paidAmount !== undefined ? Math.max(0, Number(s.paidAmount) || 0) : (Number(s.totalAmount) || 0);
+
+/**
+ * Net units sold (sold minus returned) for a sale. Uses each line's
+ * `returnedQuantity` (the per-line net the refund flow maintains).
+ */
+const netUnitsForSale = (s: Sale): number =>
+  (s.items || []).reduce((sum, item) => sum + Math.max(0, (Number(item.quantity) || 0) - (Number(item.returnedQuantity) || 0)), 0);
+
 export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
   const { sales, products, customers, deliveryOrders, settings, refundSale, updateSale, deleteSale } = useApp();
   const { currentUser, isSuperAdmin, hasPermission, isPrivacyMode } = useAuth();
+  const { notify } = useInteractions();
 
   // Active view tab: 'calendar' (Daily Calendar History) or 'list' (Table list)
   const [activeTab, setActiveTab] = useState<'calendar' | 'list'>('calendar');
@@ -161,7 +197,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
   }, [editCalculatedTotal, editSanitizedPaid]);
 
   const editLoyaltyPointsGain = useMemo(() => {
-    return Math.floor(editCalculatedTotal * (settings.pointsPerDollar || 0.01));
+    return loyaltyPointsForAmount(editCalculatedTotal, settings.pointsPerDollar);
   }, [editCalculatedTotal, settings.pointsPerDollar]);
 
   const filteredCustomersForEdit = useMemo(() => {
@@ -198,10 +234,10 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
 
   const isTransferringOwnership = useMemo(() => {
     if (!editSaleTarget) return false;
-    const origKey = editSaleTarget.customerId || (editSaleTarget.customerName && editSaleTarget.customerName.toLowerCase() !== 'walk-in customer' ? editSaleTarget.customerName.toLowerCase() : '__walkin__');
+    const origKey = editSaleTarget.customerId || (editSaleTarget.customerName && !isGuestCustomerName(editSaleTarget.customerName) ? editSaleTarget.customerName.toLowerCase() : '__walkin__');
     const newKey = isCustomGuestMode
       ? `__custom_${editCustomerName.toLowerCase()}__`
-      : (selectedCustomerObj?.id || (editCustomerName.toLowerCase() !== 'walk-in customer' ? editCustomerName.toLowerCase() : '__walkin__'));
+      : (selectedCustomerObj?.id || (!isGuestCustomerName(editCustomerName) ? editCustomerName.toLowerCase() : '__walkin__'));
     return origKey !== newKey;
   }, [editSaleTarget, isCustomGuestMode, editCustomerName, selectedCustomerObj]);
 
@@ -218,7 +254,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
   // Super-Admin can edit ALL sales records. Regular Admins can edit historical sales records.
   const canEditSale = (sale: Sale): boolean => {
     if (isSuperAdmin) return true;
-    if (currentUser?.role === 'Administrator' || currentUser?.role === 'Admin') {
+    // NB: 'Administrator' only — 'Admin' is not a valid UserRole and never matched.
+    if (currentUser?.role === 'Administrator') {
       return isHistoricalSale(sale);
     }
     return false;
@@ -234,7 +271,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
     setEditCustomerName(sale.customerName || 'Walk-in Customer');
     setCustomerSearchQuery('');
     setIsCustomerDropdownOpen(false);
-    setIsCustomGuestMode(!sale.customerId && Boolean(sale.customerName) && sale.customerName !== 'Walk-in Customer' && sale.customerName !== 'Cash Customer');
+    setIsCustomGuestMode(!sale.customerId && isGuestCustomerName(sale.customerName));
     setEditType(sale.type || 'Retail');
     setEditPaymentMethod(sale.paymentMethod || 'Card');
     setEditStatus(sale.status || 'Completed');
@@ -285,7 +322,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
       ? (editCustomerName.trim() || 'Walk-in Customer')
       : (editCustomerId ? (customers.find(c => c.id === editCustomerId)?.name || editCustomerName) : (editCustomerName.trim() || 'Walk-in Customer'));
 
-    updateSale(
+    const saved = updateSale(
       editSaleTarget.id,
       {
         customerId: finalCustomerId,
@@ -308,17 +345,21 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
         deliveryFee: parsedDeliveryFee,
         totalAmount: calculatedTotal,
         paidAmount: sanitizedPaidAmount,
-        deliveryAddress: editDeliveryAddress.trim() || undefined,
-        deliveryPhone: editDeliveryPhone.trim() || undefined,
-        courierNotes: editCourierNotes.trim() || undefined,
-        deliveryStatus: editDeliveryStatus,
-        isPickupConfirmed: isPickupConfirmed,
+        ...(showDeliveryDetails ? {
+          deliveryAddress: editDeliveryAddress.trim() || undefined,
+          deliveryPhone: editDeliveryPhone.trim() || undefined,
+          courierNotes: editCourierNotes.trim() || undefined,
+          deliveryStatus: editDeliveryStatus,
+          isPickupConfirmed: isPickupConfirmed,
+        } : {}),
       },
       currentUser?.displayName || (isSuperAdmin ? 'Super-Admin' : 'Administrator'),
       isSuperAdmin
     );
 
-    setEditSaleTarget(null);
+    // A refused edit (restricted role, or the sale no longer exists) must keep the
+    // editor open — closing here discarded the user's work with only a toast.
+    if (saved) setEditSaleTarget(null);
   };
 
   // Helper to extract YYYY-MM-DD from timestamp string
@@ -375,7 +416,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
       const prevDate = new Date(year, month - 1, pDay);
       const dateStr = getLocalDateString(prevDate.toISOString());
       const daySales = salesByDate.get(dateStr) || [];
-      const totalRevenue = daySales.filter(s => s.status !== 'Refunded').reduce((acc, s) => acc + s.totalAmount, 0);
+      const totalRevenue = daySales.filter(s => s.status !== 'Refunded').reduce((acc, s) => acc + netSaleAmount(s), 0);
       grid.push({
         dateString: dateStr,
         dayNumber: pDay,
@@ -390,7 +431,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
       const dateObj = new Date(year, month, d);
       const dateStr = getLocalDateString(dateObj.toISOString());
       const daySales = salesByDate.get(dateStr) || [];
-      const totalRevenue = daySales.filter(s => s.status !== 'Refunded').reduce((acc, s) => acc + s.totalAmount, 0);
+      const totalRevenue = daySales.filter(s => s.status !== 'Refunded').reduce((acc, s) => acc + netSaleAmount(s), 0);
       grid.push({
         dateString: dateStr,
         dayNumber: d,
@@ -412,9 +453,9 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
   // Selected Day Aggregated KPI Metrics
   const selectedDayStats = useMemo(() => {
     const activeSales = selectedDaySales.filter((s) => s.status !== 'Refunded');
-    const totalRevenue = activeSales.reduce((acc, s) => acc + s.totalAmount, 0);
-    const totalPaid = activeSales.reduce((acc, s) => acc + (s.paidAmount || 0), 0);
-    const totalItems = activeSales.reduce((acc, s) => acc + s.items.reduce((sum, item) => sum + item.quantity, 0), 0);
+    const totalRevenue = activeSales.reduce((acc, s) => acc + netSaleAmount(s), 0);
+    const totalPaid = activeSales.reduce((acc, s) => acc + paidForSale(s), 0);
+    const totalItems = activeSales.reduce((acc, s) => acc + netUnitsForSale(s), 0);
     const refundedCount = selectedDaySales.filter((s) => s.status === 'Refunded').length;
 
     // Helper to calculate payment method contributions for the day (including split breakdown)
@@ -424,29 +465,45 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
     let mobileTransferTxCount = 0;
 
     activeSales.forEach((s) => {
-      const paid = s.paidAmount !== undefined ? s.paidAmount : s.totalAmount;
+      const paid = paidForSale(s);
       if (s.paymentMethod === 'Cash') {
         cashTotal += paid;
         cashTxCount += 1;
       } else if (s.paymentMethod === 'Mobile Transfer') {
         mobileTransferTotal += paid;
         mobileTransferTxCount += 1;
-      } else if (s.paymentMethod === 'Split' && s.notes) {
-        // Parse split details if recorded in format "Split Payment breakdown: Cash: ₦100, Mobile Transfer: ₦200" or similar
-        const cashMatch = s.notes.match(/Cash:\s*[^0-9]*([\d,]+(\.\d+)?)/i);
-        if (cashMatch && cashMatch[1]) {
-          const val = parseFloat(cashMatch[1].replace(/,/g, ''));
-          if (!isNaN(val)) {
-            cashTotal += val;
+      } else if (s.paymentMethod === 'Split') {
+        // Trust the structured breakdown the till wrote at checkout; it is the
+        // authoritative record and round-trips through relational storage. Only
+        // legacy sales without it fall back to parsing the free-text note.
+        const breakdown = s.paymentBreakdown;
+        if (breakdown && Object.keys(breakdown).length > 0) {
+          const cash = Number(breakdown.Cash) || 0;
+          if (cash > 0) {
+            cashTotal += cash;
             cashTxCount += 1;
           }
-        }
-        const transferMatch = s.notes.match(/Mobile Transfer:\s*[^0-9]*([\d,]+(\.\d+)?)/i);
-        if (transferMatch && transferMatch[1]) {
-          const val = parseFloat(transferMatch[1].replace(/,/g, ''));
-          if (!isNaN(val)) {
-            mobileTransferTotal += val;
+          const transfer = Number(breakdown['Mobile Transfer']) || 0;
+          if (transfer > 0) {
+            mobileTransferTotal += transfer;
             mobileTransferTxCount += 1;
+          }
+        } else if (s.notes) {
+          const cashMatch = s.notes.match(/Cash:\s*[^0-9]*([\d,]+(\.\d+)?)/i);
+          if (cashMatch && cashMatch[1]) {
+            const val = parseFloat(cashMatch[1].replace(/,/g, ''));
+            if (!isNaN(val)) {
+              cashTotal += val;
+              cashTxCount += 1;
+            }
+          }
+          const transferMatch = s.notes.match(/Mobile Transfer:\s*[^0-9]*([\d,]+(\.\d+)?)/i);
+          if (transferMatch && transferMatch[1]) {
+            const val = parseFloat(transferMatch[1].replace(/,/g, ''));
+            if (!isNaN(val)) {
+              mobileTransferTotal += val;
+              mobileTransferTxCount += 1;
+            }
           }
         }
       }
@@ -572,21 +629,15 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
 
   // Aggregate KPI metrics
   const stats = useMemo(() => {
-    const totalVolume = filteredSales
-      .filter((s) => s.status !== 'Refunded')
-      .reduce((acc, s) => acc + s.totalAmount, 0);
-
-    const totalPaid = filteredSales
-      .filter((s) => s.status !== 'Refunded')
-      .reduce((acc, s) => acc + (s.paidAmount || 0), 0);
+    const activeFiltered = filteredSales.filter((s) => s.status !== 'Refunded');
+    const totalVolume = activeFiltered.reduce((acc, s) => acc + netSaleAmount(s), 0);
+    const totalPaid = activeFiltered.reduce((acc, s) => acc + paidForSale(s), 0);
 
     const totalUnpaidDebt = Math.max(0, totalVolume - totalPaid);
 
-    const totalItems = filteredSales
-      .filter((s) => s.status !== 'Refunded')
-      .reduce((acc, s) => acc + s.items.reduce((sum, item) => sum + item.quantity, 0), 0);
+    const totalItems = activeFiltered.reduce((acc, s) => acc + netUnitsForSale(s), 0);
 
-    const avgOrderValue = filteredSales.length > 0 ? totalVolume / filteredSales.length : 0;
+    const avgOrderValue = activeFiltered.length > 0 ? totalVolume / activeFiltered.length : 0;
 
     return {
       totalVolume,
@@ -618,31 +669,38 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
       'Notes',
     ];
 
+    // Every text field is quoted and internal quotes doubled — only notes were
+    // escaped before, so a customer name containing a quote corrupted the row.
+    const cell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
     const rows = filteredSales.map((s) => [
-      `"${s.invoiceNo}"`,
-      `"${new Date(s.createdAt).toLocaleString()}"`,
-      `"${s.customerName}"`,
-      `"${s.type}"`,
+      cell(s.invoiceNo),
+      cell(new Date(s.createdAt).toLocaleString()),
+      cell(s.customerName),
+      cell(s.type),
       (s.items || []).length,
       (Number(s.subtotal) || 0).toFixed(2),
       (Number(s.discount) || 0).toFixed(2),
       (Number(s.tax) || 0).toFixed(2),
-      (Number(s.totalAmount) || 0).toFixed(2),
-      (Number(s.paidAmount) || 0).toFixed(2),
-      `"${s.paymentMethod}"`,
-      `"${s.status}"`,
-      `"${s.createdBy}"`,
-      `"${(s.notes || '').replace(/"/g, '""')}"`,
+      netSaleAmount(s).toFixed(2),
+      paidForSale(s).toFixed(2),
+      cell(s.paymentMethod),
+      cell(s.status),
+      cell(s.createdBy),
+      cell(s.notes),
     ]);
 
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
-    const encodedUri = encodeURI(csvContent);
+    // Blob URL instead of an encodeURI'd data: URI: '#' or '%' in any field
+    // truncated or mangled the download.
+    const csvContent = [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+    const encodedUri = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
     link.setAttribute('download', `Sales_Records_${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(encodedUri);
   };
 
   const getPaymentIcon = (method: PaymentMethod) => {
@@ -1119,6 +1177,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                       const isRefunded = s.status === 'Refunded';
                       const timeString = new Date(s.createdAt).toLocaleTimeString([], {
                         hour: '2-digit',
+                        hour12: true,
                         minute: '2-digit',
                       });
 
@@ -1225,7 +1284,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                                     <Sliders className="w-3.5 h-3.5" /> Invoice Workshop
                                   </button>
                                 )}
-                                {!isRefunded && (hasPermission('sales.refund') || currentUser?.role === 'Manager') && (
+                                {!isRefunded && (hasPermission(['Administrator', 'Store Manager'])) && (
                                   <button
                                     onClick={() => setRefundSaleTarget(s)}
                                     className="w-full px-3 py-2 text-left hover:bg-amber-50 dark:hover:bg-amber-950/50 text-amber-800 dark:text-amber-200 font-bold text-[10px] rounded-lg flex items-center gap-2"
@@ -1242,13 +1301,13 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                                     <Edit3 className="w-3.5 h-3.5" /> {isSuperAdmin ? 'Edit Record' : 'Edit Prices'}
                                   </button>
                                 ) : (
-                                  (currentUser?.role === 'Administrator' || currentUser?.role === 'Admin') && (
+                                  (currentUser?.role === 'Administrator') && (
                                     <button disabled className="w-full px-3 py-2 text-left text-slate-400 dark:text-slate-600 font-bold text-[10px] rounded-lg flex items-center gap-2 cursor-not-allowed">
                                       <Edit3 className="w-3.5 h-3.5" /> Edit Disabled
                                     </button>
                                   )
                                 )}
-                                {(currentUser?.role === 'Administrator' || currentUser?.role === 'Admin') && (
+                                {(currentUser?.role === 'Administrator') && (
                                   <button
                                     onClick={() => setDeleteSaleTarget(s)}
                                     className="w-full px-3 py-2 text-left hover:bg-rose-50 dark:hover:bg-rose-950/50 text-rose-700 dark:text-rose-300 font-bold text-[10px] rounded-lg flex items-center gap-2"
@@ -1280,7 +1339,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                               </button>
                             )}
 
-                            {!isRefunded && (hasPermission('sales.refund') || currentUser?.role === 'Manager') && (
+                            {!isRefunded && (hasPermission(['Administrator', 'Store Manager'])) && (
                               <button
                                 onClick={() => setRefundSaleTarget(s)}
                                 className="px-2.5 py-1 bg-amber-100 dark:bg-amber-950 hover:bg-amber-600 hover:text-white text-amber-800 dark:text-amber-200 font-bold text-[10px] rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
@@ -1304,7 +1363,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                                 <span>{isSuperAdmin ? 'Edit Record' : 'Edit Prices'}</span>
                               </button>
                             ) : (
-                              (currentUser?.role === 'Administrator' || currentUser?.role === 'Admin') && (
+                              (currentUser?.role === 'Administrator') && (
                                 <button
                                   disabled
                                   className="px-2.5 py-1 font-bold text-[10px] rounded-lg transition-colors flex items-center gap-1 bg-slate-100 dark:bg-slate-800/80 text-slate-400 dark:text-slate-600 cursor-not-allowed opacity-50"
@@ -1316,7 +1375,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                               )
                             )}
 
-                            {(currentUser?.role === 'Administrator' || currentUser?.role === 'Admin') && (
+                            {(currentUser?.role === 'Administrator') && (
                               <button
                                 onClick={() => setDeleteSaleTarget(s)}
                                 className="px-2.5 py-1 bg-rose-100 dark:bg-rose-950 hover:bg-rose-600 hover:text-white text-rose-800 dark:text-rose-200 font-bold text-[10px] rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
@@ -1515,6 +1574,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
             >
               <option value="All">All Statuses</option>
               <option value="Completed">Completed</option>
+              <option value="Draft">Draft</option>
+              <option value="Held">Held</option>
               <option value="Partially Refunded">Partially Refunded</option>
               <option value="Refunded">Refunded</option>
             </select>
@@ -1579,7 +1640,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                 </tr>
               ) : (
                 paginatedSales.map((sale) => {
-                  const itemsCount = sale.items.reduce((sum, i) => sum + i.quantity, 0);
+                  const grossUnits = (sale.items || []).reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+                  const returnedUnits = (sale.items || []).reduce((sum, i) => sum + (Number(i.returnedQuantity) || 0), 0);
                   const isRefunded = sale.status === 'Refunded';
 
                   return (
@@ -1634,7 +1696,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                           {sale.items.map((i) => `${i.productName} (${i.quantity})`).join(', ')}
                         </div>
                         <span className="text-[10px] text-slate-400 font-semibold">
-                          {itemsCount} {itemsCount === 1 ? 'unit' : 'units'} across {sale.items.length} line items
+                          {grossUnits} {grossUnits === 1 ? 'unit' : 'units'} across {sale.items.length} line items
+                          {returnedUnits > 0 && <span className="text-amber-500"> • {returnedUnits} returned</span>}
                         </span>
                       </td>
 
@@ -1665,9 +1728,9 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                             {sale.paymentMethod}
                           </span>
                         </div>
-                        {!isPrivacyMode && Number(sale.paidAmount || 0) < Number(sale.totalAmount || 0) && !isRefunded && (
+                        {!isPrivacyMode && paidForSale(sale) < netSaleAmount(sale) && !isRefunded && (
                           <div className="text-[10px] text-amber-600 dark:text-amber-400 font-bold mt-0.5">
-                            Unpaid: {settings.currencySymbol}{(Number(sale.totalAmount || 0) - Number(sale.paidAmount || 0)).toFixed(2)}
+                            Unpaid: {settings.currencySymbol}{(netSaleAmount(sale) - paidForSale(sale)).toFixed(2)}
                           </div>
                         )}
                       </td>
@@ -1680,6 +1743,8 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                               ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
                               : sale.status === 'Partially Refunded'
                               ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-800'
+                              : sale.status === 'Draft' || sale.status === 'Held'
+                              ? 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
                               : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
                           }`}
                         >
@@ -1692,6 +1757,11 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                             <>
                               <RotateCcw className="w-3 h-3" />
                               <span>Partially Refunded</span>
+                            </>
+                          ) : sale.status === 'Draft' || sale.status === 'Held' ? (
+                            <>
+                              <Clock className="w-3 h-3" />
+                              <span>{sale.status === 'Draft' ? 'Draft' : 'Held'}</span>
                             </>
                           ) : (
                             <>
@@ -1746,7 +1816,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                               <Edit3 className="w-4 h-4" />
                             </button>
                           ) : (
-                            (currentUser?.role === 'Administrator' || currentUser?.role === 'Admin') && (
+                            (currentUser?.role === 'Administrator') && (
                               <button
                                 disabled
                                 className="p-1.5 text-slate-300 dark:text-slate-700 cursor-not-allowed opacity-40 rounded-xl"
@@ -1757,7 +1827,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                             )
                           )}
 
-                          {(currentUser?.role === 'Administrator' || currentUser?.role === 'Admin') && (
+                          {(currentUser?.role === 'Administrator') && (
                             <button
                               onClick={() => setDeleteSaleTarget(sale)}
                               className="p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/60 rounded-xl transition-colors"
@@ -1832,7 +1902,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
             </div>
 
             <p className="text-xs text-slate-600 dark:text-slate-300 font-medium leading-relaxed">
-              Are you sure you want to permanently delete sale record <strong className="text-slate-900 dark:text-white">{deleteSaleTarget.invoiceNo}</strong> ({settings.currencySymbol}{(Number(deleteSaleTarget.totalAmount) || 0).toFixed(2)})?
+              Are you sure you want to permanently delete sale record <strong className="text-slate-900 dark:text-white">{deleteSaleTarget.invoiceNo}</strong> ({settings.currencySymbol}{netSaleAmount(deleteSaleTarget).toFixed(2)})?
             </p>
 
             <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-800/60 rounded-2xl space-y-1.5 text-[11px] text-amber-900 dark:text-amber-200">
@@ -1841,7 +1911,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                 <span>Automatic Cascading Actions:</span>
               </p>
               <ul className="list-disc list-inside space-y-0.5 text-amber-700 dark:text-amber-300/90 pl-1">
-                <li>Restores sold item quantities ({deleteSaleTarget.items.reduce((acc, it) => acc + it.quantity, 0)} units) back to inventory stock</li>
+                <li>Restores sold item quantities ({netUnitsForSale(deleteSaleTarget)} units) back to inventory stock</li>
                 <li>Deducts customer outstanding balance, order count & loyalty points</li>
                 <li>Removes linked delivery orders & logistics expenses</li>
                 <li>Unlinks and resets converted WhatsApp pre-orders</li>
@@ -2288,12 +2358,16 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                     value={editStatus}
                     onChange={(e) => setEditStatus(e.target.value as SaleStatus)}
                     className="w-full px-3 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl text-xs font-bold text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500"
+                    title={editSaleTarget.status === 'Refunded' || editSaleTarget.status === 'Partially Refunded' ? 'Refunded invoices are read-only here — use Process Refund to adjust returns.' : 'Refunds are processed via Process Refund, not by flipping status here.'}
                   >
                     <option value="Completed">Completed</option>
                     <option value="Draft">Draft</option>
                     <option value="Held">Held</option>
-                    <option value="Refunded">Refunded</option>
+                    {(editSaleTarget.status === 'Refunded' || editSaleTarget.status === 'Partially Refunded') && (
+                      <option value={editSaleTarget.status}>{editSaleTarget.status} (read-only — use Process Refund)</option>
+                    )}
                   </select>
+                  <p className="text-[10px] text-slate-500 mt-1">Refunds run through Process Refund so stock, ledger and treasury stay in sync.</p>
                 </div>
 
                 <div>
@@ -2370,17 +2444,29 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                         onClick={() => {
                           const prodToAdd = products.find((p) => p.id === selectedAddProductId);
                           if (prodToAdd) {
+                            const unitPrice = editType === 'Wholesale' ? prodToAdd.wholesalePrice : prodToAdd.retailPrice;
                             const newItem: SaleItem = {
                               productId: prodToAdd.id,
                               productName: prodToAdd.name,
                               sku: prodToAdd.sku,
                               quantity: 1,
-                              unitPrice: editType === 'Wholesale' ? prodToAdd.wholesalePrice : prodToAdd.retailPrice,
+                              unitPrice,
                               costPrice: prodToAdd.costPrice,
-                              total: editType === 'Wholesale' ? prodToAdd.wholesalePrice : prodToAdd.retailPrice,
+                              total: unitPrice,
                               isWholesale: editType === 'Wholesale',
                             };
-                            setEditingSaleItems((prev) => [newItem, ...prev]);
+                            // A product already on the sale is incremented, not
+                            // duplicated: two rows with the same productId gave
+                            // the list duplicate keys and ambiguous totals.
+                            setEditingSaleItems((prev) => {
+                              const existing = prev.find((line) => line.productId === newItem.productId);
+                              if (existing) {
+                                return prev.map((line) => line.productId === newItem.productId
+                                  ? { ...line, quantity: line.quantity + 1, total: (line.quantity + 1) * (Number(line.unitPrice) || 0) }
+                                  : line);
+                              }
+                              return [newItem, ...prev];
+                            });
                             setSelectedAddProductId('');
                           }
                         }}
@@ -2466,7 +2552,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                         onClick={() => {
                           const price = parseFloat(editClearanceAmount);
                           if (isNaN(price) || price <= 0) {
-                            alert('Please enter a valid clearance amount.');
+                            notify('Please enter a valid clearance amount.', 'Invalid amount');
                             return;
                           }
                           const qty = parseInt(editClearanceQty) || 1;
@@ -2510,7 +2596,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ onNavigate }) => {
                   ) : (
                     editingSaleItems.map((item, index) => (
                       <div
-                        key={index}
+                        key={item.productId || `edit-line-${index}`}
                         className="p-3 bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/80 rounded-2xl space-y-2.5"
                       >
                         <div className="flex justify-between items-start gap-2">

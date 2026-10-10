@@ -20,6 +20,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { Product } from '../../types';
+import { productStockLabel } from '../../shared/productStatus';
 import { AddProductModal } from '../modals/AddProductModal';
 import { ConfirmModal } from '../common/ConfirmModal';
 import { Pagination } from '../common/Pagination';
@@ -37,6 +38,9 @@ export const ProductsView: React.FC<ProductsViewProps> = ({ onNavigate }) => {
     const skuMap = new Map<string, number>();
     let dupes = 0;
     products.forEach((p) => {
+      // Only the active catalog matters for the "duplicate detected" banner;
+      // archived records are off the shelf and don't collide on the till.
+      if (p.status === 'Archived') return;
       if (p.sku && p.sku.trim()) {
         const k = p.sku.trim().toUpperCase();
         const count = (skuMap.get(k) || 0) + 1;
@@ -63,9 +67,9 @@ export const ProductsView: React.FC<ProductsViewProps> = ({ onNavigate }) => {
   const totalProductsCount = products.length;
   const archivedCount = products.filter((p) => p.status === 'Archived').length;
   const activeProductsCount = products.filter((p) => p.status !== 'Archived').length;
-  const lowStockCount = products.filter((p) => p.status !== 'Archived' && (p.status === 'Low Stock' || (p.currentStock > 0 && p.currentStock <= p.minimumStockLevel))).length;
-  const outOfStockCount = products.filter((p) => p.status !== 'Archived' && (p.status === 'Out of Stock' || p.currentStock <= 0)).length;
-  const totalStockUnits = products.filter((p) => p.status !== 'Archived').reduce((acc, p) => acc + (p.currentStock || 0), 0);
+  const lowStockCount = products.filter((p) => productStockLabel(p) === 'Low Stock').length;
+  const outOfStockCount = products.filter((p) => productStockLabel(p) === 'Out of Stock').length;
+  const totalStockUnits = products.filter((p) => p.status !== 'Archived').reduce((acc, p) => acc + Math.max(0, p.currentStock || 0), 0);
 
   // Filtering & Sorting Logic
   const filteredProducts = products.filter((p) => {
@@ -82,9 +86,9 @@ export const ProductsView: React.FC<ProductsViewProps> = ({ onNavigate }) => {
     if (selectedStatus === 'All') {
       matchesStatus = p.status !== 'Archived';
     } else if (selectedStatus === 'Out of Stock') {
-      matchesStatus = p.status !== 'Archived' && (p.status === 'Out of Stock' || p.currentStock <= 0);
+      matchesStatus = productStockLabel(p) === 'Out of Stock';
     } else if (selectedStatus === 'Low Stock') {
-      matchesStatus = p.status !== 'Archived' && (p.status === 'Low Stock' || (p.currentStock > 0 && p.currentStock <= p.minimumStockLevel));
+      matchesStatus = productStockLabel(p) === 'Low Stock';
     } else {
       matchesStatus = p.status === selectedStatus;
     }
@@ -117,28 +121,37 @@ export const ProductsView: React.FC<ProductsViewProps> = ({ onNavigate }) => {
   };
 
   const handleExportCSV = () => {
+    if (products.length === 0) return;
     const headers = ['Name', 'SKU', 'Barcode', 'Category', 'Cost Price', 'Retail Price', 'Wholesale Price', 'Stock', 'Unit', 'Status'];
+    // Quote every field (double internal quotes) — a name/SKU/barcode/category
+    // containing a comma or quote previously corrupted the row; and a leading
+    // '=' in any field doubles as a CSV formula-injection vector.
+    const cell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
     const rows = products.map((p) => [
-      `"${p.name}"`,
-      p.sku,
-      p.barcode,
-      `"${p.category}"`,
-      p.costPrice,
-      p.retailPrice,
-      p.wholesalePrice,
-      p.currentStock,
-      p.unit,
-      p.status,
+      cell(p.name),
+      cell(p.sku),
+      cell(p.barcode),
+      cell(p.category),
+      cell(p.costPrice),
+      cell(p.retailPrice),
+      cell(p.wholesalePrice),
+      cell(p.currentStock),
+      cell(p.unit),
+      cell(p.status),
     ]);
 
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
-    const encodedUri = encodeURI(csvContent);
+    // Blob URL instead of an encodeURI'd data: URI — '#' or '%' in any field
+    // previously truncated/mangled the download.
+    const csvContent = [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+    const encodedUri = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
     link.setAttribute('download', `Idofera_Packaging_Products_${new Date().toISOString().split('T')[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(encodedUri);
   };
 
   return (
@@ -222,7 +235,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({ onNavigate }) => {
         <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-xs flex items-center justify-between">
           <div>
             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Active Inventory Stock</p>
-            <p className="text-2xl font-black text-emerald-600 dark:text-emerald-400 mt-0.5">{totalStockUnits.toLocaleString()} pcs</p>
+            <p className="text-2xl font-black text-emerald-600 dark:text-emerald-400 mt-0.5">{totalStockUnits.toLocaleString()} units</p>
             <p className="text-[10px] font-medium text-slate-500 mt-0.5">Across {activeProductsCount} active SKUs</p>
           </div>
           <div className="w-10 h-10 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
@@ -447,16 +460,16 @@ export const ProductsView: React.FC<ProductsViewProps> = ({ onNavigate }) => {
                     <td className="py-3 px-3">
                       <span
                         className={`inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-1 rounded-full ${
-                          product.status === 'Out of Stock'
+                          productStockLabel(product) === 'Out of Stock'
                             ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-400'
-                            : product.status === 'Low Stock'
+                            : productStockLabel(product) === 'Low Stock'
                             ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400'
                             : product.status === 'Archived'
                             ? 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
                             : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400'
                         }`}
                       >
-                        {product.status}
+                        {productStockLabel(product)}
                       </span>
                     </td>
 

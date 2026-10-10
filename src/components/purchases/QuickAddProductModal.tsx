@@ -146,6 +146,9 @@ export const QuickAddProductModal: React.FC<QuickAddProductModalProps> = ({
       status: 'Out of Stock',
     });
 
+    // addProduct returns null when the SKU collides (duplicate rejected) — keep
+    // this modal open so the user can correct it rather than injecting a null.
+    if (!newProd) return;
     onProductCreated(newProd, orderQty, cost);
   };
 

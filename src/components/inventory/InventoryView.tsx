@@ -36,6 +36,7 @@ export const InventoryView: React.FC = () => {
   const [targetProductId, setTargetProductId] = useState<string>(products[0]?.id || '');
   const [movementType, setMovementType] = useState<MovementType>('Adjustment');
   const [quantity, setQuantity] = useState<number>(1);
+  const [sign, setSign] = useState<'add' | 'remove'>('add');
   const [notes, setNotes] = useState<string>('');
 
   // Reset pagination when filters, search query, or sorting change
@@ -54,9 +55,12 @@ export const InventoryView: React.FC = () => {
       return matchesSearch && matchesType;
     })
     .sort((a, b) => {
-      const timeA = new Date(a.createdAt).getTime();
-      const timeB = new Date(b.createdAt).getTime();
-      return timeB - timeA;
+      // NaN-safe: legacy/imported records can carry a malformed createdAt; treat
+      // unparseable timestamps as epoch so they sort deterministically at the end
+      // rather than poisoning the comparator with NaN.
+      const timeA = Date.parse(a.createdAt);
+      const timeB = Date.parse(b.createdAt);
+      return (Number.isFinite(timeB) ? timeB : 0) - (Number.isFinite(timeA) ? timeA : 0);
     });
 
   const totalPages = Math.ceil(filteredMovements.length / itemsPerPage) || 1;
@@ -68,8 +72,14 @@ export const InventoryView: React.FC = () => {
     e.preventDefault();
     if (!targetProductId || quantity <= 0) return;
 
-    // Determine sign: Incoming, Opening, Returned, Transfer in are +, Outgoing, Damaged, Lost are -
-    const isNegative = ['Outgoing', 'Damaged', 'Lost'].includes(movementType);
+    // Determine sign. Loss/damage are always negative; Incoming/Returned/Opening
+    // are always positive. 'Adjustment' and 'Transfer' can go either way — a
+    // stocktake can find MORE or LESS than the system, so honour the explicit
+    // direction toggle rather than forcing them positive (which silently hid
+    // stocktake shortfalls behind a mislabelled "Outgoing").
+    const isNegative =
+      ['Outgoing', 'Damaged', 'Lost'].includes(movementType) ||
+      (['Adjustment', 'Transfer'].includes(movementType) && sign === 'remove');
     const qtyChange = isNegative ? -quantity : quantity;
 
     adjustStock(
@@ -82,6 +92,8 @@ export const InventoryView: React.FC = () => {
 
     setShowAdjustModal(false);
     setNotes('');
+    setQuantity(1);
+    setSign('add');
   };
 
   return (
@@ -113,19 +125,19 @@ export const InventoryView: React.FC = () => {
         <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-xs">
           <span className="text-[10px] uppercase font-bold text-slate-400">Total Items in Stock</span>
           <p className="text-xl font-extrabold text-slate-900 dark:text-white mt-1">
-            {products.reduce((sum, p) => sum + p.currentStock, 0)}
+            {products.filter((p) => p.status !== 'Archived').reduce((sum, p) => sum + Math.max(0, p.currentStock || 0), 0)}
           </p>
         </div>
         <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-xs">
           <span className="text-[10px] uppercase font-bold text-slate-400">Low Stock SKUs</span>
           <p className="text-xl font-extrabold text-amber-600 dark:text-amber-400 mt-1">
-            {products.filter((p) => p.currentStock > 0 && p.currentStock <= p.minimumStockLevel).length}
+            {products.filter((p) => p.status !== 'Archived' && p.currentStock > 0 && p.currentStock <= p.minimumStockLevel).length}
           </p>
         </div>
         <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-xs">
           <span className="text-[10px] uppercase font-bold text-slate-400">Out of Stock SKUs</span>
           <p className="text-xl font-extrabold text-rose-600 dark:text-rose-400 mt-1">
-            {products.filter((p) => p.currentStock <= 0).length}
+            {products.filter((p) => p.status !== 'Archived' && p.currentStock <= 0).length}
           </p>
         </div>
         <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-xs">
@@ -219,7 +231,11 @@ export const InventoryView: React.FC = () => {
                 </tr>
               ) : (
                 paginatedMovements.map((mv, idx) => {
-                  const isPositive = ['Opening Stock', 'Incoming', 'Returned'].includes(mv.type);
+                  // Positive (inbound) vs negative (outbound): mirror the sign the
+                  // movement actually applies. 'Adjustment' and 'Transfer' are
+                  // inbound (+stock) in handleAdjustSubmit, so they must render as
+                  // positive, not the rose/negative badge.
+                  const isPositive = ['Opening Stock', 'Incoming', 'Returned', 'Adjustment', 'Transfer'].includes(mv.type);
                   return (
                     <tr key={`${mv.id}-${idx}`} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors">
                       <td className="py-3 px-4 font-mono text-[11px] text-slate-500">
@@ -365,7 +381,9 @@ export const InventoryView: React.FC = () => {
                   onChange={(e) => setTargetProductId(e.target.value)}
                   className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white border border-transparent focus:border-blue-500 font-medium"
                 >
-                  {products.map((p) => (
+                  {/* Exclude archived products: recording a movement on an item
+                      off the shelf silently changes hidden stock. */}
+                  {products.filter((p) => p.status !== 'Archived').map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.name} (Current Stock: {p.currentStock} {p.unit})
                     </option>
@@ -382,6 +400,7 @@ export const InventoryView: React.FC = () => {
                   onChange={(e) => setMovementType(e.target.value as MovementType)}
                   className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white border border-transparent focus:border-blue-500 font-medium"
                 >
+                  <option value="Opening Stock">Opening Stock (Initial balance)</option>
                   <option value="Incoming">Incoming (Supplier Delivery / Restock)</option>
                   <option value="Outgoing">Outgoing (Manual Reduction)</option>
                   <option value="Adjustment">Adjustment (Stocktaking discrepancy)</option>
@@ -391,6 +410,22 @@ export const InventoryView: React.FC = () => {
                   <option value="Transfer">Warehouse Transfer</option>
                 </select>
               </div>
+
+              {['Adjustment', 'Transfer'].includes(movementType) && (
+                <div>
+                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Direction
+                  </label>
+                  <select
+                    value={sign}
+                    onChange={(e) => setSign(e.target.value as 'add' | 'remove')}
+                    className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white border border-transparent focus:border-blue-500 font-medium"
+                  >
+                    <option value="add">Add to stock (+)</option>
+                    <option value="remove">Remove from stock (−)</option>
+                  </select>
+                </div>
+              )}
 
               <div>
                 <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">

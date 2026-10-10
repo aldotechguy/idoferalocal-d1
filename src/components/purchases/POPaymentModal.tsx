@@ -3,6 +3,7 @@ import { X, CreditCard, Receipt, Building, Wallet, Banknote } from 'lucide-react
 import { NairaSign } from '../common/NairaSign';
 import { PurchaseOrder, PaymentMethod, LiquidAccountType } from '../../types';
 import { useApp } from '../../context/AppContext';
+import { useInteractions } from '../../context/InteractionContext';
 
 interface POPaymentModalProps {
   isOpen: boolean;
@@ -18,6 +19,7 @@ export const POPaymentModal: React.FC<POPaymentModalProps> = ({
   currentUserName,
 }) => {
   const { updatePOPayment, settings, treasuryBalances } = useApp();
+  const { notify, confirm } = useInteractions();
 
   const [paymentAmount, setPaymentAmount] = useState<number>(0);
   const [paymentSource, setPaymentSource] = useState<LiquidAccountType>('Biz Account');
@@ -47,10 +49,10 @@ export const POPaymentModal: React.FC<POPaymentModalProps> = ({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (paymentAmount <= 0) {
-      alert('Please enter a valid payment amount greater than zero.');
+      notify('Please enter a valid payment amount greater than zero.', 'Invalid payment amount');
       return;
     }
 
@@ -60,9 +62,7 @@ export const POPaymentModal: React.FC<POPaymentModalProps> = ({
         : treasuryBalances.physicalCashBalance;
 
     if (paymentAmount > available) {
-      const proceed = confirm(
-        `Warning: Payment amount (${settings.currencySymbol}${paymentAmount.toLocaleString()}) exceeds the available balance in ${paymentSource} (${settings.currencySymbol}${available.toLocaleString()}). Do you still want to proceed?`
-      );
+      const proceed = await confirm({ title: 'Available balance exceeded', message: `Payment of ${settings.currencySymbol}${paymentAmount.toLocaleString()} exceeds the ${settings.currencySymbol}${available.toLocaleString()} available in ${paymentSource}.`, confirmText: 'Record payment', variant: 'warning' });
       if (!proceed) return;
     }
 

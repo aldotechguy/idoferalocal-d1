@@ -182,8 +182,8 @@ export const SearchResultsModal: React.FC<SearchResultsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-y-auto animate-in fade-in duration-200">
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl sm:rounded-3xl shadow-2xl max-w-6xl w-full flex flex-col h-[94vh] sm:h-[90vh] max-h-[920px] overflow-hidden my-auto">
+    <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-2 sm:p-4 md:p-6 overflow-y-auto animate-in fade-in duration-200" style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' }}>
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-t-2xl sm:rounded-3xl shadow-2xl max-w-6xl w-full flex flex-col h-[92dvh] sm:h-[90vh] max-h-[920px] overflow-hidden mt-auto sm:my-auto">
         
         {/* Top Header & Search Bar */}
         <div className="p-4 sm:p-6 border-b border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/80 space-y-4">
@@ -212,12 +212,15 @@ export const SearchResultsModal: React.FC<SearchResultsModalProps> = ({
           <div className="relative">
             <Search className="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
-              type="text"
+              type="search"
+              inputMode="search"
+              enterKeyHint="search"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Type product name, SKU, invoice #, customer name, phone, supplier..."
               autoFocus
-              className="w-full pl-12 pr-10 py-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:border-blue-500 dark:focus:border-blue-400 text-slate-900 dark:text-slate-100 text-sm font-medium rounded-2xl shadow-xs focus:outline-none transition-all"
+              aria-label="Search database"
+              className="w-full min-h-[44px] pl-12 pr-10 py-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:border-blue-500 dark:focus:border-blue-400 text-slate-900 dark:text-slate-100 text-base sm:text-sm font-medium rounded-2xl shadow-xs focus:outline-none transition-all"
             />
             {query && (
               <button
@@ -229,8 +232,8 @@ export const SearchResultsModal: React.FC<SearchResultsModalProps> = ({
             )}
           </div>
 
-          {/* Filter Category Tabs */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
+          {/* Filter Category Tabs — momentum scroll with edge fade on mobile */}
+          <div className="-mx-1 px-1 flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none overscroll-x-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
             {[
               { id: 'all', label: 'All Results', count: totalResultsCount, icon: Layers },
               { id: 'products', label: 'Products', count: matchingProducts.length, icon: Package },
@@ -246,7 +249,7 @@ export const SearchResultsModal: React.FC<SearchResultsModalProps> = ({
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id as TabCategory)}
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all ${
+                  className={`flex items-center gap-2 px-3 py-2 min-h-[40px] rounded-xl text-xs font-bold whitespace-nowrap transition-all ${
                     isActive
                       ? 'bg-blue-600 text-white shadow-xs'
                       : 'bg-white dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700/80 border border-slate-200/80 dark:border-slate-700/80'
@@ -598,15 +601,15 @@ export const SearchResultsModal: React.FC<SearchResultsModalProps> = ({
           )}
         </div>
 
-        {/* Footer */}
-        <div className="px-6 py-3 border-t border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/80 flex items-center justify-between text-xs text-slate-500">
-          <div className="flex items-center gap-2">
+        {/* Footer — stacks on phones so Close stays reachable above the safe area */}
+        <div className="px-4 sm:px-6 py-3 border-t border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/80 flex flex-col-reverse sm:flex-row sm:items-center gap-2 sm:justify-between text-xs text-slate-500" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
+          <div className="hidden sm:flex items-center gap-2">
             <Database className="w-3.5 h-3.5 text-blue-600" />
             <span>Scanning live database index</span>
           </div>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 font-bold bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl transition-colors"
+            className="w-full sm:w-auto px-4 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 font-bold bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl transition-colors"
           >
             Close Search
           </button>

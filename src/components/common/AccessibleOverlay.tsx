@@ -1,0 +1,60 @@
+import React from 'react';
+import { createPortal } from 'react-dom';
+import { X } from 'lucide-react';
+
+const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+export type AccessibleOverlayProps = {
+  open: boolean; onClose: () => void; title: string; description?: string;
+  children: React.ReactNode; footer?: React.ReactNode; kind?: 'modal' | 'drawer';
+  className?: string; closeLabel?: string; placement?: 'left' | 'right';
+};
+
+export const AccessibleOverlay: React.FC<AccessibleOverlayProps> = ({
+  open, onClose, title, description, children, footer, kind = 'modal', className = '', closeLabel = 'Close', placement = 'right',
+}) => {
+  const panelRef = React.useRef<HTMLDivElement>(null);
+  const titleId = React.useId();
+  const descriptionId = React.useId();
+  // Keep the latest onClose in a ref so the focus/scroll-lock effect below only
+  // re-runs when `open` changes. Callers pass inline arrow callbacks (e.g.
+  // `onClose={() => setSelected(null)}`), so depending onClose directly made
+  // the effect re-run on every parent re-render — including each keystroke in a
+  // field inside the overlay — which stole focus back to the first control.
+  const onCloseRef = React.useRef(onClose);
+  onCloseRef.current = onClose;
+  React.useEffect(() => {
+    if (!open) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const oldOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    requestAnimationFrame(() => (panelRef.current?.querySelector(FOCUSABLE) as HTMLElement | null)?.focus());
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); onCloseRef.current(); return; }
+      if (event.key !== 'Tab' || !panelRef.current) return;
+      const controls = Array.from(panelRef.current.querySelectorAll(FOCUSABLE)) as HTMLElement[];
+      if (!controls.length) return;
+      const first = controls[0]; const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => { document.removeEventListener('keydown', onKeyDown); document.body.style.overflow = oldOverflow; previous?.focus?.(); };
+  }, [open]);
+  if (!open) return null;
+  const drawer = kind === 'drawer';
+  return createPortal(
+    <div className={`fixed inset-0 z-[9999] ${drawer ? '' : 'flex items-end sm:items-center justify-center p-2 sm:p-4'}`} style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' }}>
+      <button type="button" className="absolute inset-0 bg-slate-950/60 backdrop-blur-xs cursor-default" onClick={onClose} aria-label={closeLabel} tabIndex={-1} />
+      <div ref={panelRef} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined}
+        className={`relative bg-white dark:bg-slate-900 text-slate-900 dark:text-white border border-slate-200 dark:border-slate-800 shadow-2xl ${drawer ? `${placement === 'left' ? 'mr-auto' : 'ml-auto'} h-full w-full max-w-md flex flex-col` : 'w-full max-w-lg max-h-[92dvh] sm:max-h-[92vh] rounded-t-3xl sm:rounded-3xl mt-auto sm:my-auto flex flex-col'} ${className}`}>
+        <header className="flex items-start justify-between gap-4 p-4 border-b border-slate-200 dark:border-slate-800">
+          <div className="min-w-0"><h2 id={titleId} className="text-base font-black leading-tight">{title}</h2>{description && <p id={descriptionId} className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">{description}</p>}</div>
+          <button type="button" onClick={onClose} aria-label={closeLabel} className="min-w-11 min-h-11 inline-flex items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"><X className="w-5 h-5" /></button>
+        </header>
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4" style={{ WebkitOverflowScrolling: 'touch' }}>{children}</div>
+        {footer && <footer className="p-4 border-t border-slate-200 dark:border-slate-800" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>{footer}</footer>}
+      </div>
+    </div>, document.body,
+  );
+};

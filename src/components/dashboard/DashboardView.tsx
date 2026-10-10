@@ -44,6 +44,17 @@ import {
   Pie,
   Cell,
 } from 'recharts';
+import { localIsoDate } from '../../shared/localDate';
+import { useCommittedMallStock } from '../../hooks/useCommittedMallStock';
+
+/** Local calendar month key (YYYY-MM) for a UTC ISO timestamp or date string. */
+const localMonthKey = (timestamp?: string): string => {
+  if (!timestamp) return '';
+  const parsed = new Date(timestamp);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const month = String(parsed.getMonth() + 1).padStart(2, '0');
+  return `${parsed.getFullYear()}-${month}`;
+};
 
 interface DashboardViewProps {
   onNavigate: (page: string) => void;
@@ -52,6 +63,7 @@ interface DashboardViewProps {
 export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const { products, sales, purchases, expenses, settings, treasuryBalances } = useApp();
   const { currentUser, hasPermission, isPrivacyMode } = useAuth();
+  const committedMallStock = useCommittedMallStock(currentUser);
   const isSalesStaff = currentUser?.role === 'Sales Staff';
   const hideFinancials = isSalesStaff || isPrivacyMode;
   const canAccessLiquidCash = hasPermission(['Administrator', 'Store Manager', 'Accountant']);
@@ -60,7 +72,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const [activeModal, setActiveModal] = useState<'product' | 'expense' | 'customer' | 'supplier' | null>(null);
 
   // Metrics Calculations
-  const validSales = sales.filter((s) => s.status !== 'Refunded' && s.status !== 'Held' && s.status !== 'Draft');
+  const validSales = useMemo(
+    () => sales.filter((s) => s.status !== 'Refunded' && s.status !== 'Held' && s.status !== 'Draft'),
+    [sales],
+  );
 
   const now = new Date();
   const currentYear = now.getFullYear();
@@ -74,22 +89,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const priorMonthStr = `${priorMonthDate.getFullYear()}-${String(priorMonthDate.getMonth() + 1).padStart(2, '0')}`;
   const priorMonthShort = priorMonthDate.toLocaleDateString('en-US', { month: 'short' });
 
-  const todayStr = now.toISOString().split('T')[0];
+  // Local calendar day key: createdAt is a UTC ISO timestamp, and Nigeria runs
+  // UTC+1, so a 00:30 WAT sale carries the previous UTC date — toISOString()
+  // would drop it from Today's Sales.
+  const todayStr = localIsoDate(now);
+  const netSaleAmount = (s: any) => Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.totalRefunded) || 0));
   const todaySales = validSales
     .filter((s) => s.createdAt && s.createdAt.startsWith(todayStr))
-    .reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
+    .reduce((acc, s) => acc + netSaleAmount(s), 0);
 
-  // Scoped strictly to current calendar month (resets when month flips)
-  const currentMonthSales = validSales.filter((s) => {
-    return Boolean(s.createdAt && s.createdAt.startsWith(currentMonthStr));
-  });
-  const monthlyRevenue = currentMonthSales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
+  // Scoped strictly to the current LOCAL calendar month (resets when the month
+  // flips). Comparing a UTC timestamp prefix to a local month key dropped sales
+  // taken in the first hour of the 1st.
+  const currentMonthSales = useMemo(
+    () => validSales.filter((s) => localMonthKey(s.createdAt) === currentMonthStr),
+    [validSales, currentMonthStr],
+  );
+  const monthlyRevenue = currentMonthSales.reduce((acc, s) => acc + netSaleAmount(s), 0);
 
   // Prior month sales for comparison
-  const priorMonthSales = validSales.filter((s) => {
-    return Boolean(s.createdAt && s.createdAt.startsWith(priorMonthStr));
-  });
-  const priorMonthRevenue = priorMonthSales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
+  const priorMonthSales = useMemo(
+    () => validSales.filter((s) => localMonthKey(s.createdAt) === priorMonthStr),
+    [validSales, priorMonthStr],
+  );
+  const priorMonthRevenue = priorMonthSales.reduce((acc, s) => acc + netSaleAmount(s), 0);
 
   let monthlyChangeStr = `${currentMonthShort} active`;
   let monthlyChangeType: 'positive' | 'negative' | 'neutral' = 'neutral';
@@ -113,22 +136,39 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   }, 0);
 
   // Monthly Expenses (only expenses logged in the current month)
-  const monthlyExpenses = expenses
-    .filter((e) => {
-      const d = e.date || e.createdAt;
-      return Boolean(d && d.startsWith(currentMonthStr));
-    })
-    .reduce((acc, e) => acc + (Number(e.amount) || 0), 0);
+  const monthlyExpenses = useMemo(
+    () => expenses
+      .filter((e) => localMonthKey(e.date || e.createdAt) === currentMonthStr)
+      .reduce((acc, e) => acc + (Number(e.amount) || 0), 0),
+    [expenses, currentMonthStr],
+  );
 
   const monthlyGrossProfit = Math.max(0, monthlyRevenue - monthlyCostOfGoodsSold);
   const monthlyNetProfit = monthlyGrossProfit - monthlyExpenses;
 
-  const totalInventoryValue = products.reduce(
-    (acc, p) => acc + (Number(p.costPrice) || 0) * (Number(p.currentStock) || 0),
+  const activeProds = products.filter((p) => p.status !== 'Archived');
+
+  // "Key Inventory Levels" should surface the most critical SKUs first (lowest
+  // stock relative to its reorder point), not whichever 4 happen to appear first
+  // in the catalog array. Sorting here also keeps archived items out and keeps
+  // a stable denominator for the ratio bar.
+  const criticalStockLeaders = useMemo(() => {
+    return [...activeProds].sort((a, b) => {
+      const ratioOf = (p: (typeof activeProds)[number]) =>
+        (Number(p.minimumStockLevel) || 1) > 0
+          ? (Number(p.currentStock) || 0) / (Number(p.minimumStockLevel) || 1)
+          : Number.MAX_SAFE_INTEGER;
+      return ratioOf(a) - ratioOf(b);
+    }).slice(0, 4);
+  }, [activeProds]);
+
+  // Inventory valuation must mirror the "active catalog items" figure (archived
+  // products are excluded) and must not credit negative stock (committed mall
+  // escrow can drive `currentStock` below zero before the Sale lands).
+  const totalInventoryValue = activeProds.reduce(
+    (acc, p) => acc + Math.max(0, (Number(p.costPrice) || 0) * (Number(p.currentStock) || 0)),
     0
   );
-
-  const activeProds = products.filter((p) => p.status !== 'Archived');
 
   const lowStockCount = activeProds.filter(
     (p) => (Number(p.currentStock) || 0) > 0 && (Number(p.currentStock) || 0) <= (Number(p.minimumStockLevel) || 5)
@@ -139,10 +179,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   // Realtime Day-over-Day Sales Comparison for StatCard
   const yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayStr = yesterday.toISOString().split('T')[0];
+  const yesterdayStr = localIsoDate(yesterday);
   const yesterdaySales = validSales
     .filter((s) => s.createdAt && s.createdAt.startsWith(yesterdayStr))
-    .reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
+    .reduce((acc, s) => acc + netSaleAmount(s), 0);
 
   let todayChangeStr = 'No sales yesterday';
   let todayChangeType: 'positive' | 'negative' | 'neutral' = 'neutral';
@@ -157,54 +197,69 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
 
   const profitMarginPct = monthlyRevenue > 0 ? ((monthlyNetProfit / monthlyRevenue) * 100).toFixed(1) : '0.0';
 
-  // Dynamic 7-day Real-Time Sales Trend Data
-  const last7Days = Array.from({ length: 7 }, (_, i) => {
+  // Dynamic 7-day Real-Time Sales Trend Data. Memoized on the local day key so
+  // the trend memo below actually caches within a day (it was a fresh array on
+  // every render, which defeated that memo).
+  const last7Days = useMemo(() => Array.from({ length: 7 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - (6 - i));
-    const isoDate = d.toISOString().split('T')[0];
+    const isoDate = localIsoDate(d);
     const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
     return { isoDate, name: dayName };
-  });
+  }), [todayStr]);
 
-  const salesTrendData = last7Days.map(({ isoDate, name }) => {
-    const daySales = validSales.filter((s) => s.createdAt && s.createdAt.startsWith(isoDate));
-    const revenue = daySales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
-    const unitsSold = daySales.reduce(
-      (acc, s) => acc + (s.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 1), 0),
-      0
-    );
-    return {
-      name,
-      sales: unitsSold || daySales.length,
-      revenue,
-    };
-  });
+  // The 7-day trend scanned validSales 7 times on EVERY render (the whole
+  // metrics block was unmemoized); it now recomputes only when sales or the
+  // local day change. A single bucketing pass replaces the 7 scans.
+  const salesTrendData = useMemo(() => {
+    const byDay = new Map<string, { revenue: number; units: number; sales: number }>();
+    for (const { isoDate } of last7Days) byDay.set(isoDate, { revenue: 0, units: 0, sales: 0 });
+    for (const sale of validSales) {
+      const bucket = sale.createdAt ? byDay.get(localIsoDate(new Date(sale.createdAt))) : undefined;
+      if (!bucket) continue;
+      bucket.revenue += netSaleAmount(sale);
+      bucket.sales += 1;
+      bucket.units += (sale.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 1), 0);
+    }
+    return last7Days.map(({ isoDate, name }) => {
+      const bucket = byDay.get(isoDate)!;
+      return { name, sales: bucket.units || bucket.sales, revenue: bucket.revenue };
+    });
+  }, [last7Days, validSales]);
 
-  // Dynamic Category Distribution Data from Real-time Products & Inventory
-  const categoryTotals: Record<string, number> = {};
-  products.forEach((p) => {
-    const cat = p.category || 'General';
-    const val = p.currentStock * p.costPrice;
-    categoryTotals[cat] = (categoryTotals[cat] || 0) + (val > 0 ? val : p.retailPrice);
-  });
+  // Dynamic Category Distribution — inventory VALUE (on-hand stock × cost) by
+  // segment. Previously fell back to `retailPrice` when stock value was 0,
+  // which mixed retail Naira into a cost chart for out-of-stock/negative-stock
+  // items and mislabeled the result as "Revenue contribution".
+  const categoryTotals = useMemo<Record<string, number>>(() => {
+    const totals: Record<string, number> = {};
+    activeProds.forEach((p) => {
+      const cat = p.category || 'General';
+      totals[cat] = (totals[cat] || 0) + Math.max(0, (Number(p.currentStock) || 0) * (Number(p.costPrice) || 0));
+    });
+    return totals;
+  }, [activeProds]);
 
-  const totalCatVal = Object.values(categoryTotals).reduce((a, b) => a + b, 0);
+  const totalCatVal = Object.keys(categoryTotals).reduce((sum, key) => sum + Number(categoryTotals[key] || 0), 0);
   const palette = ['#2563eb', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#6366f1'];
 
   const categoryData =
     Object.keys(categoryTotals).length > 0
-      ? Object.entries(categoryTotals).map(([name, val], index) => ({
+      ? Object.entries(categoryTotals).map(([name, raw], index) => ({
           name,
-          value: totalCatVal > 0 ? Math.round((val / totalCatVal) * 100) : 0,
+          value: totalCatVal > 0 ? Math.round((Number(raw) / totalCatVal) * 100) : 0,
           color: palette[index % palette.length],
         }))
       : [{ name: 'No Categories', value: 100, color: '#94a3b8' }];
 
   const maxRecentSaleTotal = useMemo(() => {
-    const topSlice = sales.slice(0, 4);
+    const topSlice = validSales.slice(0, 4);
     if (topSlice.length === 0) return 1;
-    return Math.max(...topSlice.map((s) => s.totalAmount), 1);
-  }, [sales]);
+    // Number() guard: a legacy record with a string/NaN total used to poison
+    // Math.max into NaN, which blanked the bar chart scaling. Net of refunds so
+    // the bar width matches the amount shown in the table.
+    return topSlice.reduce((max, s) => Math.max(max, Number(netSaleAmount(s)) || 0), 1);
+  }, [validSales]);
 
   return (
     <div className="space-y-6 pb-12">
@@ -303,6 +358,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
             <button
               onClick={() => {
                 localStorage.setItem('idofera_reports_period', 'last_month');
+                localStorage.setItem('idofera_reports_type', 'MonthlyBiz');
                 onNavigate('reports');
               }}
               className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3 py-2 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 font-bold rounded-xl text-xs border border-slate-200 dark:border-slate-700 transition-all shadow-2xs"
@@ -421,7 +477,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
             <StatCard
               title="Inventory Valuation"
               value={`${settings.currencySymbol}${totalInventoryValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-              subtitle={`${products.length} active catalog items`}
+              subtitle={`${activeProds.length} active catalog items`}
               icon={Boxes}
               change="Optimal"
               changeType="neutral"
@@ -433,6 +489,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
               actionLabel="View Valuation Report"
               isPrivate
             />
+            {/* Escrow: inventory that left the shelf at Mall checkout but has not
+                become a Sale yet. Shown so the inventory-valuation figure above is
+                not read as "on-hand stock is missing" - the units are committed,
+                not lost. Hidden for non-management roles (the hook returns null). */}
+            {committedMallStock && committedMallStock.units > 0 && (
+              <StatCard
+                title="Committed Mall Stock"
+                value={`${committedMallStock.units.toLocaleString()} units`}
+                subtitle={`${settings.currencySymbol}${(committedMallStock.costKobo / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} at cost - ${committedMallStock.orders} open order(s)`}
+                icon={Boxes}
+                change="In fulfilment"
+                changeType="neutral"
+                colorScheme="indigo"
+                onClick={() => onNavigate('mall-orders')}
+                actionLabel="Open Mall Orders"
+                isPrivate
+              />
+            )}
           </>
         )}
       </div>
@@ -552,7 +626,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                 />
                 <Area type="monotone" dataKey="sales" name="Orders / Sales Units" stroke="#2563eb" strokeWidth={3} fillOpacity={1} fill="url(#colorSales)" />
                 {!hideFinancials && (
-                  <Area type="monotone" dataKey="revenue" name="Revenue ($)" stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorRev)" />
+                  <Area type="monotone" dataKey="revenue" name={`Revenue (${settings.currencySymbol})`} stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorRev)" />
                 )}
               </AreaChart>
             </ResponsiveContainer>
@@ -681,7 +755,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
               <h3 className="text-base font-bold text-slate-900 dark:text-white">
                 Category Distribution
               </h3>
-              <p className="text-xs text-slate-500">Product breakdown by segment</p>
+              <p className="text-xs text-slate-500">Inventory value by segment</p>
             </div>
 
             <div className="h-48 my-2">
@@ -738,8 +812,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-slate-700 dark:text-slate-300">
-                {sales.slice(0, 4).map((sale, idx) => {
-                  const percent = Math.min(100, Math.max(10, Math.round((sale.totalAmount / maxRecentSaleTotal) * 100)));
+                {validSales.slice(0, 4).map((sale, idx) => {
+                  const percent = Math.min(100, Math.max(10, Math.round((netSaleAmount(sale) / maxRecentSaleTotal) * 100)));
                   return (
                     <tr key={`${sale.id}-${idx}`} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
                       <td className="py-2.5 font-bold text-slate-900 dark:text-white">{sale.invoiceNo}</td>
@@ -747,10 +821,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                       <td className="py-2.5 font-bold text-emerald-600 dark:text-emerald-400">
                         <div>
                           {isSalesStaff
-                            ? `${sale.items.reduce((a, b) => a + b.quantity, 0)} items`
+                            ? `${(sale.items || []).reduce((a, b) => a + (Number(b.quantity) || 0), 0)} items`
                             : isPrivacyMode
                             ? '••••••'
-                            : `${settings.currencySymbol}${sale.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                            : `${settings.currencySymbol}${netSaleAmount(sale).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                         </div>
                         {!hideFinancials && (
                           <div className="w-16 h-1 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden mt-1">
@@ -789,7 +863,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
           </div>
 
           <div className="space-y-3">
-            {products.slice(0, 4).map((p) => {
+            {criticalStockLeaders.map((p) => {
               const maxStockBenchmark = Math.max(p.minimumStockLevel * 2.5, 20);
               const stockRatio = Math.min(100, Math.max(8, Math.round((p.currentStock / maxStockBenchmark) * 100)));
               const isCritical = p.currentStock <= 0;
@@ -849,7 +923,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
               <h3 className="text-base font-bold text-slate-900 dark:text-white">
                 Category Distribution
               </h3>
-              <p className="text-xs text-slate-500">Revenue contribution by segment</p>
+              <p className="text-xs text-slate-500">Stock value by segment</p>
             </div>
 
             <div className="h-44 my-2">

@@ -6,9 +6,15 @@ import { migrateSnapshot } from '../utils/dataMigration';
 export type D1Record = Record<string, any>;
 export type D1Snapshot = Record<string, D1Record[]>;
 
-type SnapshotResponse = {stores: D1Snapshot; hasData: boolean; revision: number};
+type SnapshotResponse = {stores: D1Snapshot; hasData: boolean; revision: number; backend?: string; notModified?: boolean; bounds?: {capped?: string[]}};
 
 const REVISION_KEY = 'idofera_d1_revision';
+/**
+ * Revalidation token for the whole-store snapshot: `<revision>-<backend>` exactly
+ * as the server builds it. Re-sending it lets the server answer `304` instead of
+ * returning ~1,600 documents on every Dashboard boot.
+ */
+const SNAPSHOT_GUARD_KEY = 'idofera_d1_snapshot_guard';
 const DIRTY_KEY = 'idofera_d1_dirty';
 const REMOTE_PENDING_KEY = 'idofera_d1_remote_pending';
 const DELETIONS_KEY = 'idofera_d1_deletions';
@@ -61,7 +67,7 @@ function getUnsyncedKeys(): Set<string> {
   }
 }
 
-export function mergeRemoteWithPendingLocal(local: D1Snapshot, remote: D1Snapshot): D1Snapshot {
+export function mergeRemoteWithPendingLocal(local: D1Snapshot, remote: D1Snapshot, capped?: ReadonlySet<string>): D1Snapshot {
   const unsyncedKeys = getUnsyncedKeys();
   const pendingDeletions = new Set(getDeletions().map(({collection, documentId}) => `${collection}:${documentId}`));
   const merged: D1Snapshot = {};
@@ -96,18 +102,19 @@ export function mergeRemoteWithPendingLocal(local: D1Snapshot, remote: D1Snapsho
 
       const remoteRecord = records.get(id);
 
-      if (!remoteRecord && unsyncedKeys.has(itemKey)) {
+      if (!remoteRecord) {
         // Preserve records explicitly queued by saveDocument. A missing local
         // record must not be inferred as pending after D1 has acknowledged it.
-        records.set(id, record);
-      } else {
-        // D1 is authoritative unless this exact record is explicitly pending.
-        // Timestamp-only inference caused acknowledged records to reappear as
-        // unsynced when clients had incomplete/legacy timestamps.
-        const isLocallyModified = unsyncedKeys.has(itemKey);
-        if (isLocallyModified) {
+        // A capped response is not exhaustive: rows the server cap omitted must
+        // survive locally instead of being inferred as deleted elsewhere.
+        if (unsyncedKeys.has(itemKey) || capped?.has(store)) {
           records.set(id, record);
         }
+      } else if (unsyncedKeys.has(itemKey)) {
+        // An explicitly pending local edit wins over the remote copy.
+        // (Timestamp-only inference caused acknowledged records to reappear as
+        // unsynced when clients had incomplete/legacy timestamps.)
+        records.set(id, record);
       }
     }
 
@@ -141,15 +148,54 @@ async function getAuthHeaders(): Promise<HeadersInit> {
   return headers;
 }
 
+const snapshotGuardValue = (revision: number, backend: string) => `${revision}-${backend}`;
+
+function rememberSnapshotGuard(revision: number, backend: string) {
+  try { localStorage.setItem(SNAPSHOT_GUARD_KEY, snapshotGuardValue(revision, backend)); }
+  catch { /* storage unavailable: the next read is simply a full read */ }
+}
+
+export function forgetSnapshotGuard() {
+  try { localStorage.removeItem(SNAPSHOT_GUARD_KEY); }
+  catch { /* storage unavailable */ }
+}
+
+/**
+ * Bump when the sync engine's contract changes in a way that makes previously
+ * persisted snapshot state unsafe. The old delta-replace engine could leave
+ * wholesale-truncated IndexedDB stores behind; on a version mismatch every
+ * browser forces one clean full relational re-read on its next boot, rebuilding
+ * local stores from D1 (which was never damaged).
+ */
+const SYNC_ENGINE_VERSION = 1;
+const SYNC_ENGINE_VERSION_KEY = 'idofera_sync_engine_version';
+
+export function enforceSyncEngineVersion() {
+  try {
+    const stored = localStorage.getItem(SYNC_ENGINE_VERSION_KEY);
+    if (stored === String(SYNC_ENGINE_VERSION)) return;
+    localStorage.setItem(SYNC_ENGINE_VERSION_KEY, String(SYNC_ENGINE_VERSION));
+    forgetSnapshotGuard();
+    // A legacy delta watermark must never bound a read on the new engine.
+    localStorage.removeItem('idofera_d1_delta_cursor');
+  } catch { /* storage unavailable: nothing persisted to invalidate */ }
+}
+
 async function readCloudSnapshot(fresh = false): Promise<SnapshotResponse> {
   const authHeaders = await getAuthHeaders();
   const url = fresh ? '/api/storage/snapshot?fresh=true' : '/api/storage/snapshot';
-  const response = await fetch(url, {
-    headers: { ...authHeaders, 'cache-control': 'no-cache' },
-    credentials: 'include',
-  });
+  const headers: Record<string, string> = { ...(authHeaders as Record<string, string>), 'cache-control': 'no-cache' };
+  const knownGuard = localStorage.getItem(SNAPSHOT_GUARD_KEY);
+  if (knownGuard) headers['if-none-match'] = `"${knownGuard}"`;
+  const response = await fetch(url, { headers, credentials: 'include' });
+  if (response.status === 304) {
+    // Unchanged since this browser's last read; IndexedDB already holds it.
+    return { stores: {}, hasData: true, revision: Number(localStorage.getItem(REVISION_KEY) || 0), notModified: true };
+  }
   if (!response.ok) throw new Error(`D1 restore failed (${response.status})`);
-  return response.json();
+  const cloud = await response.json() as SnapshotResponse;
+  rememberSnapshotGuard(cloud.revision, cloud.backend || 'documents');
+  return cloud;
 }
 
 async function writeSnapshot(snapshot: D1Snapshot, expectedRevision: number, force = false) {
@@ -162,10 +208,19 @@ async function writeSnapshot(snapshot: D1Snapshot, expectedRevision: number, for
   });
   if (response.status === 409) return null;
   if (!response.ok) throw new Error(`D1 sync failed (${response.status})`);
-  return response.json() as Promise<{revision: number}>;
+  const result = await response.json() as {revision: number; relationalSynced?: boolean};
+  // Keep the revalidation token honest: a relational mirror failure means the
+  // live catalog may not match these documents, so force a full read next boot.
+  if (result.relationalSynced === false) forgetSnapshotGuard();
+  else rememberSnapshotGuard(result.revision, 'relational');
+  return result;
 }
 
 export async function initializeD1Storage(local?: D1Snapshot): Promise<D1Snapshot | null> {
+  // One-time engine self-heal: a version mismatch drops the guard (and any
+  // legacy delta watermark) so this boot forces one clean full re-read and
+  // rebuilds IndexedDB from D1.
+  enforceSyncEngineVersion();
   // Read current local state from IndexedDB to guarantee 100% of offline/unsynced records are included
   let localSnapshot: D1Snapshot = local || {};
   try {
@@ -177,10 +232,16 @@ export async function initializeD1Storage(local?: D1Snapshot): Promise<D1Snapsho
   latestSnapshot = localSnapshot;
 
   const cloud = await readCloudSnapshot(true);
+  // 304: the server store already matches this browser's last read, so there is
+  // nothing to merge and IndexedDB stays authoritative for offline use.
+  if (cloud.notModified) return null;
   localStorage.setItem(REVISION_KEY, String(cloud.revision));
   if (!cloud.hasData) return null;
 
-  const merged = mergeRemoteWithPendingLocal(localSnapshot, cloud.stores);
+  // Capped append-only collections arrive truncated: the merge must union them
+  // by id instead of treating rows the cap omitted as deleted elsewhere.
+  const capped = new Set(cloud.bounds?.capped || []);
+  const merged = mergeRemoteWithPendingLocal(localSnapshot, cloud.stores, capped);
   latestSnapshot = merged;
   // Write merged snapshot back to IndexedDB so all new local records are preserved alongside remote data
   await writeD1SnapshotToIndexedDB(merged);
@@ -188,16 +249,11 @@ export async function initializeD1Storage(local?: D1Snapshot): Promise<D1Snapsho
 }
 
 export async function pullLatestFromD1(): Promise<D1Snapshot | null> {
-  try {
-    await fetch('/api/storage/d1/pull', {
-      method: 'POST',
-      credentials: 'include',
-    });
-  } catch (err) {
-    console.warn('D1 backend pull warning:', err);
-  }
-
+  // Option B: convergence is one guarded full relational read — there is no
+  // backend-side pull to trigger (the old /api/storage/d1/pull route was a
+  // Node-only legacy of the pre-Worker REST bridge and 404s on the Worker).
   const cloud = await readCloudSnapshot(true);
+  if (cloud.notModified) return null;
   if (!cloud.hasData) return null;
 
   // Retrieve current local state from memory and IndexedDB to protect unsynced records
@@ -209,7 +265,8 @@ export async function pullLatestFromD1(): Promise<D1Snapshot | null> {
     console.warn('IndexedDB read during pullLatestFromD1:', err);
   }
 
-  const merged = mergeRemoteWithPendingLocal(localSnapshot, cloud.stores);
+  const capped = new Set(cloud.bounds?.capped || []);
+  const merged = mergeRemoteWithPendingLocal(localSnapshot, cloud.stores, capped);
   latestSnapshot = merged;
   localStorage.setItem(REVISION_KEY, String(cloud.revision));
 
@@ -287,12 +344,15 @@ export function markD1RecordDeleted(collection: string, documentId: string) {
   deletions.push({collection, documentId});
   localStorage.setItem(DELETIONS_KEY, JSON.stringify(deletions));
   localStorage.setItem(DIRTY_KEY, 'true');
+  scheduleAutoSync();
 }
 
 export function markD1RecordChanged(collection: string, documentId: string) {
   const deletions = getDeletions().filter((item) => !(item.collection === collection && item.documentId === documentId));
   localStorage.setItem(DELETIONS_KEY, JSON.stringify(deletions));
   localStorage.setItem(DIRTY_KEY, 'true');
+  // Every explicit record mutation opts into the debounced automatic save.
+  scheduleAutoSync();
 }
 
 export function clearD1PendingSync() {
@@ -307,11 +367,11 @@ export function clearD1PendingSync() {
   }
 }
 
-export async function syncLocalRecordsToD1(snapshot: D1Snapshot) {
+export async function syncLocalRecordsToD1(snapshot: D1Snapshot, requestedDeletions?: D1Deletion[]) {
   const upserts = Object.entries(snapshot).flatMap(([collection, records]) =>
     records.map((document) => ({collection, document})),
   );
-  const deletes = getDeletions();
+  const deletes = requestedDeletions ?? getDeletions();
   const authHeaders = await getAuthHeaders();
   const response = await fetch('/api/storage/records', {
     method: 'PATCH',
@@ -319,9 +379,13 @@ export async function syncLocalRecordsToD1(snapshot: D1Snapshot) {
     credentials: 'include',
     body: JSON.stringify({upserts, deletes}),
   });
-  if (!response.ok) throw new Error(`D1 record sync failed (${response.status})`);
-  const result = await response.json() as {revision: number; upserted: number; deleted: number};
+  if (!response.ok) throw Object.assign(new Error(`D1 record sync failed (${response.status})`), {status: response.status});
+  const result = await response.json() as {revision: number; upserted: number; deleted: number; skippedUnchanged?: number; relationalSynced?: boolean};
+  if (result.relationalSynced === false) {
+    throw new Error('Records reached storage, but the live catalog update failed. Pending changes have been retained. Retry Sync Now; if it fails again, contact support.');
+  }
   localStorage.setItem(REVISION_KEY, String(result.revision));
+  rememberSnapshotGuard(result.revision, 'relational');
   localStorage.removeItem(REMOTE_PENDING_KEY);
   const submittedDeletionKeys = new Set(deletes.map(({collection, documentId}) => `${collection}:${documentId}`));
   const remainingDeletions = getDeletions().filter(
@@ -337,6 +401,140 @@ export async function syncLocalRecordsToD1(snapshot: D1Snapshot) {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Automatic save: coalesced micro-batches
+//
+// A local edit only marks its own key dirty. The flush below sends just those
+// records as one PATCH and skips the ~2,185-row health read that the manual
+// path performs. Cost per edit is a handful of relational rows; convergence on
+// other devices' writes rides the revision-guarded full snapshot (refresh or
+// manual Pull) — there is no delta read anymore (Option B).
+// ---------------------------------------------------------------------------
+export const AUTO_SYNC_DEBOUNCE_MS = 2000;
+
+let autoSyncTimer: ReturnType<typeof setTimeout> | undefined;
+let autoSyncFlush: (() => void) | undefined;
+let autoSyncRunning = false;
+
+/** Register the provider's flush so lifecycle events can force a save. */
+export function registerAutoSyncFlush(flush: (() => void) | undefined) {
+  autoSyncFlush = flush;
+  // Only the currently registered owner may clear the slot; a second provider
+  // that unmounts later must not silently disable automatic saving.
+  return () => { if (autoSyncFlush === flush) autoSyncFlush = undefined; };
+}
+
+/** `pagehide`/`visibilitychange` cannot await, so this is fire-and-forget. */
+export function flushAutoSyncNow() {
+  autoSyncFlush?.();
+}
+
+/** Debounced local edits collapse into a single micro-batch. */
+export function scheduleAutoSync(delayMs = AUTO_SYNC_DEBOUNCE_MS) {
+  if (!autoSyncFlush) return;
+  if (autoSyncTimer) clearTimeout(autoSyncTimer);
+  autoSyncTimer = setTimeout(() => {
+    autoSyncTimer = undefined;
+    autoSyncFlush?.();
+  }, delayMs);
+}
+
+export function cancelAutoSync() {
+  if (autoSyncTimer) {
+    clearTimeout(autoSyncTimer);
+    autoSyncTimer = undefined;
+  }
+}
+
+/** One changed (`updatedAt` is absent/unparseable) record in one collection. */
+export interface ChangedRecord {
+  collection: string;
+  documentId: string;
+  updatedAt?: string;
+}
+
+function asChangedRecords(records: ChangedRecord[]): ChangedRecord[] {
+  const seen = new Set<string>();
+  const unique: ChangedRecord[] = [];
+  for (const record of records) {
+    const key = `${record.collection}:${record.documentId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(record);
+  }
+  return unique;
+}
+
+export interface AutoSyncDeps {
+  /** Read exactly one record; returning null (locally deleted) skips it. */
+  readRecord: (collection: string, documentId: string) => Promise<D1Record | null>;
+  now?: () => string;
+}
+
+export interface AutoSyncResult {
+  changedCount: number;
+  pushed: boolean;
+  skipped?: 'no-changes' | 'not-newer';
+}
+
+/**
+ * Push only the changed documents. A push is rejected with 409 only when the row
+ * exists elsewhere with a newer `updatedAt`, which means this device has nothing
+ * newer to send; convergence on that copy rides the revision-guarded full
+ * snapshot (refresh or manual Pull) — there is no delta pull anymore (Option B).
+ */
+
+export async function autoSyncChangedRecords(
+  records: ChangedRecord[],
+  deps: AutoSyncDeps,
+): Promise<AutoSyncResult> {
+  const unique = asChangedRecords(records);
+  if (!unique.length) return {changedCount: 0, pushed: false, skipped: 'no-changes'};
+
+  if (autoSyncRunning) {
+    // A flush is already in flight; fold this batch into a follow-up run so two
+    // consumers can never write the same records concurrently.
+    scheduleAutoSync();
+    return {changedCount: unique.length, pushed: false, skipped: 'no-changes'};
+  }
+  autoSyncRunning = true;
+  try {
+    return await pushChangedRecords(unique, deps);
+  } finally {
+    autoSyncRunning = false;
+  }
+}
+
+async function pushChangedRecords(
+  unique: ChangedRecord[],
+  deps: AutoSyncDeps,
+): Promise<AutoSyncResult> {
+
+  const upserts: {collection: string; document: D1Record}[] = [];
+  for (const record of unique) {
+    const document = await deps.readRecord(record.collection, record.documentId);
+    if (!document) continue;
+    const stamp = deps.now ? deps.now() : new Date().toISOString();
+    upserts.push({collection: record.collection, document: {...document, updatedAt: stamp}});
+  }
+  if (!upserts.length) return {changedCount: unique.length, pushed: false, skipped: 'no-changes'};
+
+  const grouped: D1Snapshot = {};
+  for (const {collection, document} of upserts) {
+    (grouped[collection] ||= []).push(document);
+  }
+
+  try {
+    await syncLocalRecordsToD1(grouped);
+    return {changedCount: unique.length, pushed: true};
+  } catch (error) {
+    if ((error as {status?: number})?.status !== 409) throw error;
+    // Another device already stored a newer copy; do not overwrite it. Option B
+    // has no delta pull here — the next guarded full read converges this device.
+    return {changedCount: unique.length, pushed: false, skipped: 'not-newer'};
+  }
+}
+
 export async function readD1ForBackup(): Promise<{stores: D1Snapshot; revision: number}> {
   const cloud = await readCloudSnapshot();
   return {stores: cloud.stores || {}, revision: Number(cloud.revision || 0)};
@@ -348,20 +546,69 @@ export interface D1HealthStatus {
   lastChecked: number;
   databaseId: string;
   revision: number;
-  totalDocuments: number;
+  /** Absent unless the probe requested `detail`; counting costs a full scan. */
+  totalDocuments?: number;
+  /**
+   * Live per-table relational counts, `detail` probes only. This is the store
+   * the app reads; `totalDocuments` counts the document mirror, which PATCHes
+   * no longer refresh (option B) and therefore drifts until the next snapshot
+   * PUT, so UIs should prefer these counts.
+   */
+  relational?: {
+    products?: number; sales?: number; customers?: number; suppliers?: number; saleItems?: number;
+    tables?: number; error?: string;
+  };
   endpoint: string;
   error?: string;
   status: 'healthy' | 'degraded' | 'offline' | 'error';
-  remoteSync?: {
-    configured: boolean;
-    authValid: boolean;
-    status: string;
-    message: string;
-  };
 }
 
-export async function checkD1Health(): Promise<D1HealthStatus> {
-  const fallbackDbId = '3e95a550-a091-490b-819d-f0acb7ea8dd8';
+/**
+ * Latency, in milliseconds, at which a healthy probe is reported as `degraded`.
+ *
+ * Exported because THREE places decide this independently and two of them
+ * disagreed: the service graded at 3000 while the badge graded at 2000, so a
+ * 2.5s probe was 'healthy' in the payload but drawn amber in the UI. One
+ * constant, imported by both.
+ *
+ * 2000 rather than 3000: the point of the badge is to turn amber before a staff
+ * member notices the slowness and opens the popover. Widen here only, and both
+ * surfaces move together.
+ */
+export const D1_DEGRADED_LATENCY_MS = 2000;
+
+/**
+ * Human-readable auto-monitoring cadence, for display ONLY.
+ *
+ * This used to be hardcoded as "Every 5 minutes" in three places in the badge
+ * while the hook itself polled every 15 — someone raised the interval to save
+ * resources and the UI kept promising 3x the monitoring. Derived from the
+ * minute count of `AUTO_PING_INTERVAL_MS` so the label can never drift from
+ * the behaviour again. The hook imports the minutes from here instead of
+ * declaring its own, which is what keeps them in lockstep.
+ */
+export const D1_AUTO_PING_MINUTES = 15;
+export const D1_AUTO_PING_INTERVAL_MS = D1_AUTO_PING_MINUTES * 60 * 1000;
+export const D1_AUTO_PING_INTERVAL_LABEL = `Every ${D1_AUTO_PING_MINUTES} minutes`;
+
+/**
+ * Milliseconds the health probe may take before it aborts. Bound on every
+ * attempt: without a signal a fetch hangs on the browser default and leaves
+ * `isCheckingHealth` stuck spinning forever.
+ */
+export const D1_HEALTH_TIMEOUT_MS = 12_000;
+
+export async function checkD1Health(detail = false): Promise<D1HealthStatus> {
+  // Displayed whenever the probe never reached the server. `3e95a550…` used to
+  // live here and was WRONG: that is `idofera-d1`, the archived legacy database
+  // no worker is bound to (wrangler.toml). Pointing an operator at it while
+  // diagnosing a live outage sent them to a database that serves no traffic.
+  // An honest unknown beats a plausible lie, and the successful path overwrites
+  // this with the real env.D1_DATABASE_ID the Worker reports.
+  const fallbackDbId = 'unknown';
+  // Counts are opt-in: the default probe reads one revision row, whereas asking
+  // for counts scans every document plus five relational tables (~2,185 rows).
+  const healthUrl = detail ? '/api/storage/d1/health?detail=1' : '/api/storage/d1/health';
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     return {
       connected: false,
@@ -380,29 +627,37 @@ export async function checkD1Health(): Promise<D1HealthStatus> {
   try {
     const authHeaders = await getAuthHeaders();
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    const timeoutId = setTimeout(() => controller.abort(), D1_HEALTH_TIMEOUT_MS);
 
-    const response = await fetch('/api/storage/d1/health', {
+    const response = await fetch(healthUrl, {
       headers: { ...authHeaders, 'cache-control': 'no-cache' },
       credentials: 'include',
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
 
+    // Round-trip: browser -> Cloudflare edge -> D1 -> browser. This is what the
+    // user actually experiences, so it is what `status` grades on.
     const latencyMs = Math.max(1, Math.round(performance.now() - start));
 
     if (response.ok) {
       const data = (await response.json()) as any;
       return {
         connected: Boolean(data.connected),
-        latencyMs: data.latencyMs || latencyMs,
+        // Prefer SERVER-measured latency for display. `latencyMs` used to fall
+        // back to the round trip unconditionally because the Worker never sent
+        // the field, so a 400ms round trip was graded by getLatencyBadge()'s
+        // 150/350ms bands and the badge sat amber on a healthy connection.
+        // `Math.min` with the round trip keeps a lying/frozen server clock from
+        // reporting a number we know is impossible.
+        latencyMs: Math.min(Number(data.latencyMs) || latencyMs, latencyMs) || latencyMs,
         lastChecked: Date.now(),
         databaseId: data.databaseId || fallbackDbId,
         revision: Number(data.revision || 0),
-        totalDocuments: Number(data.totalDocuments || 0),
+        totalDocuments: data.totalDocuments === undefined ? undefined : Number(data.totalDocuments),
+        relational: data.relational,
         endpoint: data.endpoint || 'Cloudflare D1 Primary Edge',
-        status: latencyMs > 3000 ? 'degraded' : 'healthy',
-        remoteSync: data.remoteSync,
+        status: latencyMs >= D1_DEGRADED_LATENCY_MS ? 'degraded' : 'healthy',
       };
     } else {
       return {
@@ -421,13 +676,23 @@ export async function checkD1Health(): Promise<D1HealthStatus> {
     const latencyMs = Math.round(performance.now() - start);
     const isTimeout = err?.name === 'AbortError';
 
-    // Quick lightweight retry to prevent transient cold-boot timeout false-positives
-    if (isTimeout) {
+    // Retry ONCE to absorb a cold-boot false negative. Capped for a reason:
+    // an actually-degraded endpoint used to turn every probe into two
+    // concurrent 12s requests — doubling the load precisely when the system
+    // can least afford it, with no backoff and no bound. Retrying only when
+    // the first attempt died FAST (well before its own 12s budget) means a
+    // genuinely slow/timing-out endpoint degrades to 'offline' immediately
+    // instead of being asked twice, concurrently.
+    const diedFast = latencyMs < D1_HEALTH_TIMEOUT_MS / 2;
+    if (isTimeout && diedFast) {
       try {
         const retryStart = performance.now();
-        const retryRes = await fetch('/api/storage/d1/health', {
+        // Same bound as the first attempt: without a signal this retry could
+        // hang on the browser default timeout and keep isCheckingHealth stuck.
+        const retryRes = await fetch(healthUrl, {
           headers: { 'cache-control': 'no-cache' },
           credentials: 'include',
+          signal: AbortSignal.timeout(D1_HEALTH_TIMEOUT_MS),
         });
         if (retryRes.ok) {
           const data = (await retryRes.json()) as any;
@@ -438,6 +703,7 @@ export async function checkD1Health(): Promise<D1HealthStatus> {
             databaseId: data.databaseId || fallbackDbId,
             revision: Number(data.revision || 0),
             totalDocuments: Number(data.totalDocuments || 0),
+            relational: data.relational,
             endpoint: data.endpoint || 'Cloudflare D1 Primary Edge',
             status: 'healthy',
           };
@@ -486,42 +752,3 @@ async function flushD1Snapshot() {
   }
 }
 
-export interface D1ConfigInfo {
-  configured: boolean;
-  hasToken: boolean;
-  maskedToken: string;
-  accountId: string;
-  databaseId: string;
-  authStatus?: {
-    valid: boolean;
-    lastChecked: number;
-    errorMessage?: string;
-  };
-}
-
-export async function getD1Config(): Promise<D1ConfigInfo> {
-  const authHeaders = await getAuthHeaders();
-  const res = await fetch('/api/storage/d1/config', {
-    headers: { ...authHeaders, 'cache-control': 'no-cache' },
-  });
-  if (!res.ok) throw new Error('Failed to fetch D1 config');
-  return res.json();
-}
-
-export async function saveD1Config(payload: {
-  apiToken?: string;
-  accountId?: string;
-  databaseId?: string;
-  testOnly?: boolean;
-}): Promise<{ ok: boolean; message: string; error?: string; warning?: string; verified?: boolean }> {
-  const authHeaders = await getAuthHeaders();
-  const res = await fetch('/api/storage/d1/config', {
-    method: 'POST',
-    headers: {
-      ...authHeaders,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-  return res.json();
-}

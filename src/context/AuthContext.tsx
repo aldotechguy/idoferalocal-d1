@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { UserProfile, UserRole } from '../types';
 import { useToast } from './ToastContext';
 import { getAllItems, putItem, putManyItems, replaceStoreItems, deleteItem } from '../db/indexedDB';
@@ -6,30 +6,20 @@ import { saveDocument, removeDocument } from '../firebase/services';
 import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
 import { auth, googleProvider } from '../firebase/config';
 import { setGoogleDriveAccessToken } from '../services/googleDriveService';
-import { subscribeTabSync } from '../firebase/syncManager';
+import { subscribeTabSync } from '../firebase/services';
+import { StepUpModal } from '../components/modals/StepUpModal';
 
 export const isSuperUser = (user: UserProfile | null | undefined): boolean => {
   if (!user) return false;
-  const dn = (user.displayName || '').toLowerCase();
-  // Standard Admin ("Administrator") is explicitly NOT a Super-User
-  if (
-    user.id === 'usr-admin-1' ||
-    user.username === 'admin' ||
-    (user.displayName === 'Administrator' && !dn.includes('idofera') && !dn.includes('michael') && !dn.includes('aidy'))
-  ) {
-    return false;
-  }
-  return Boolean(
-    user.isSuperAdmin ||
-    user.id === 'usr-superadmin-idofera' ||
-    user.username === 'idofera' ||
-    user.username === 'michaelidongesit5' ||
-    user.email === 'michaelidongesit5@gmail.com' ||
-    user.email === 'idofera@idoferapackaging.com' ||
-    dn.includes('idofera') ||
-    dn.includes('michael') ||
-    dn.includes('aidy')
-  );
+  // Server-set flag ONLY. The previous version also matched a hardcoded id,
+  // username and two e-mail literals. Those matched the LOCAL phantom profile
+  // this module used to inject into its own user list (see INITIAL_USERS), so an
+  // unauthenticated browser rendered a full Super-Admin workspace while every
+  // private API call still failed with 401. /api/auth/users on the server was
+  // already corrected to derive this from is_super_admin with no id/username/
+  // e-mail backdoor; this restores the client to the same rule, per
+  // docs/mall-launch-safety.md.
+  return Boolean(user.isSuperAdmin);
 };
 
 interface AuthContextType {
@@ -37,6 +27,25 @@ interface AuthContextType {
   users: UserProfile[];
   loading: boolean;
   isSuperAdmin: boolean;
+  /**
+   * Effective privilege for this session: the `app_users.is_super_admin` column
+   * AND, when the server is configured with an IdP group, that group. The UI
+   * gates on this, never on the raw column.
+   */
+  canSuperAdmin: boolean;
+  /**
+   * Email proven by Cloudflare Access when SSO authenticated the person but no
+   * active roster account matched, so the sign-in screen can explain why.
+   */
+  ssoEmail: string;
+  /**
+   * True when a verified Access identity matched no ACTIVE roster account
+   * (docs/staff-access.md). StaffApp renders the "confirmed but not
+   * provisioned" notice for this state instead of the LoginView.
+   */
+  ssoUnregistered: boolean;
+  /** Re-prove the account password. Privileged changes require it (docs/staff-access.md). */
+  stepUp: (password: string) => Promise<boolean>;
   isPrivacyMode: boolean;
   enablePrivacyMode: () => void;
   disablePrivacyMode: (password: string) => Promise<boolean>;
@@ -52,26 +61,40 @@ interface AuthContextType {
   registerWithEmail: (e: string, p: string, name: string, role: UserRole) => Promise<void>;
   loginWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
+  /**
+   * Lock the workspace without signing out (docs/staff-access.md). A SCREEN lock:
+   * it clears this browser's session state and returns to the Mall, changing
+   * nothing server-side. Both the app session and the Cloudflare Access session
+   * survive, so the same operator returns with no OTP — which also means it does
+   * NOT secure a shared terminal. Use Sign Out for that.
+   */
+  lock: () => Promise<void>;
   hasPermission: (requiredRoles: UserRole[]) => boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-export const SUPER_ADMIN_USER: UserProfile = {
-  id: 'usr-superadmin-idofera',
-  email: 'michaelidongesit5@gmail.com',
-  username: 'idofera',
-  displayName: 'Aidy Mike',
-  role: 'Administrator',
-  avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop',
-  status: 'Active',
-  createdAt: new Date('2026-01-01').toISOString(),
-  lastLogin: new Date().toISOString(),
-  password: 'aidy2800',
-  passwordLastChanged: new Date('2026-01-01').toISOString(),
-  isProtected: true,
-  isSuperAdmin: true,
-};
+/**
+ * Session revalidation cadence for an OPEN staff workspace. Polling only while
+ * the tab is visible keeps a backgrounded Dashboard from hitting `/api/auth/session`
+ * every 30 seconds; focus/visibility changes still revalidate immediately.
+ */
+const SESSION_RECHECK_MS = 120000;
+
+/**
+ * Idle auto-sign-out. Mirrors `CF_SESSION_IDLE_SECONDS` on the server (30 minutes,
+ * `src/server/staffSession.ts`): the server is the authority and stops
+ * authorizing private APIs at this boundary regardless, so this timer exists to
+ * make the expiry EXPLICIT and VISIBLE rather than letting the next API call fail
+ * mysteriously.
+ *
+ * Unlike the manual screen lock, idle ENDS the Access session: nobody announced
+ * they were leaving, so a quiet terminal is treated as an abandoned one. The
+ * warning fires first so nobody loses an in-progress form without notice; any
+ * real activity (pointer, key, focus, scroll) resets both timers.
+ */
+export const IDLE_LOCK_MS = 30 * 60 * 1000;
+export const IDLE_WARNING_MS = 60 * 1000;
 
 export const STANDARD_ADMIN_USER: UserProfile = {
   id: 'usr-admin-1',
@@ -83,15 +106,25 @@ export const STANDARD_ADMIN_USER: UserProfile = {
   status: 'Active',
   createdAt: new Date('2026-01-01').toISOString(),
   lastLogin: new Date().toISOString(),
-  password: 'admin123',
   passwordLastChanged: new Date('2026-01-01').toISOString(),
   isProtected: false,
   isSuperAdmin: false,
 };
 
+/**
+ * Client-side starting list. This must NOT contain an account the server has
+ * never issued: the staff client used to bundle both a Super-Admin and an
+ * Administrator profile, so an empty browser showed a signed-in user and every
+ * request to a private API answered 401.
+ *
+ * Only a plain, non-super, password-less placeholder is kept so local UI
+ * selection still has a role to render before the first server sync. It grants
+ * no privileges (super-user status is `isSuperAdmin === true`, server-set only)
+ * and cannot authenticate. If no account is provisioned server-side, the staff
+ * workspace now shows the sign-in screen instead of a phantom session.
+ */
 export const INITIAL_USERS: UserProfile[] = [
-  SUPER_ADMIN_USER,
-  STANDARD_ADMIN_USER,
+  { ...STANDARD_ADMIN_USER, id: 'usr-placeholder-admin', isProtected: false },
 ];
 
 export const DEMO_USERS: Record<UserRole, UserProfile> = {
@@ -106,35 +139,18 @@ const DUMMY_USER_IDS = new Set(['usr-sales-1', 'usr-accountant-1']);
 const sanitizeUsersList = (rawUsers: UserProfile[]): UserProfile[] => {
   const cleaned = rawUsers.filter((u) => u && !DUMMY_USER_IDS.has(u.id));
   const sanitized = cleaned.map((u) => {
-    const dn = (u.displayName || '').toLowerCase();
-    if (u.id === 'usr-admin-1' || u.username === 'admin' || (u.displayName === 'Administrator' && !dn.includes('idofera') && !dn.includes('michael') && !dn.includes('aidy'))) {
+    if (u.id === 'usr-admin-1' || u.username === 'admin') {
       return {
         ...u,
         isSuperAdmin: false,
         isProtected: false,
       };
     }
-    if (
-      u.id === 'usr-superadmin-idofera' ||
-      u.username === 'idofera' ||
-      u.username === 'michaelidongesit5' ||
-      u.email === 'michaelidongesit5@gmail.com' ||
-      u.email === 'idofera@idoferapackaging.com' ||
-      dn.includes('idofera') ||
-      dn.includes('michael') ||
-      dn.includes('aidy')
-    ) {
-      return {
-        ...SUPER_ADMIN_USER,
-        ...u,
-        id: 'usr-superadmin-idofera',
-        email: 'michaelidongesit5@gmail.com',
-        username: 'idofera',
-        displayName: 'Aidy Mike',
-        isSuperAdmin: true,
-        isProtected: true,
-      };
-    }
+    // The usr-admin-1 normalization that used to live here was dead code: the
+    // force-super branch above matched usr-admin-1 first (nothing excluded it),
+    // so the standard admin profile was promoted to Super-Admin plus
+    // isProtected. Derived flags are now trusted as received; privilege comes
+    // from the server's is_super_admin column and nowhere else.
     return u;
   });
 
@@ -151,12 +167,12 @@ const sanitizeUsersList = (rawUsers: UserProfile[]): UserProfile[] => {
     uniqueUsers.set(user.id, candidateChangedAt > existingChangedAt ? user : existing);
   }
 
-  if (!uniqueUsers.has('usr-superadmin-idofera')) {
-    uniqueUsers.set(SUPER_ADMIN_USER.id, SUPER_ADMIN_USER);
-  }
-  if (!uniqueUsers.has('usr-admin-1')) {
-    uniqueUsers.set(STANDARD_ADMIN_USER.id, STANDARD_ADMIN_USER);
-  }
+  // This function must never INVENT a user. It used to re-add the bundled
+  // super-admin and administrator here whenever a stored list did not contain
+  // them, which is what made the phantom account self-healing: deleting it from
+  // localStorage only brought it back on the next load with a freshly minted
+  // "last login" and `isProtected: true`. Super-user grants are server-set
+  // identity only, so the client cannot be the source of that privilege.
   return [...uniqueUsers.values()];
 };
 
@@ -181,6 +197,200 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
   const { showToast } = useToast();
 
+  // Effective privilege: server-says-so (DB flag + IdP group), never the raw
+  // column. True only while the server keeps confirming it.
+  const [canSuperAdmin, setCanSuperAdmin] = useState(false);
+  // Set when Cloudflare Access authenticated a person with no matching account,
+  // so the staff surface can explain why SSO did not open the workspace.
+  const [ssoEmail, setSsoEmail] = useState(() => {
+    try { return sessionStorage.getItem('idofera_sso_email') || ''; } catch { return ''; }
+  });
+  // Mirrors whether the notice (rather than the sign-in form) owns the screen.
+  // Initialized from the same storage so a reload during the unregistered state
+  // renders consistently instead of flashing the LoginView.
+  const [ssoUnregistered, setSsoUnregistered] = useState(() => {
+    try { return Boolean(sessionStorage.getItem('idofera_sso_email')); } catch { return false; }
+  });
+  const persistSsoEmail = (email: string | null) => {
+    try {
+      if (email) sessionStorage.setItem('idofera_sso_email', email);
+      else sessionStorage.removeItem('idofera_sso_email');
+    } catch { /* storage may be unavailable; the state below still applies */ }
+    setSsoEmail(email || '');
+    setSsoUnregistered(Boolean(email));
+  };
+
+  // ---------------------------------------------------------------------------
+  // Lock / sign-out primitives.
+  //
+  // Declared here, above every effect that calls them, on purpose. Effects only
+  // run after the render body finishes, so a helper defined further down would
+  // still be initialized in time — but the ordering below is what makes the
+  // dependency obvious and keeps these safe to call from a timer as well.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Where the browser must go to end the CLOUDFLARE ACCESS session. The team
+   * domain lives only on the server; `null` means the gate is off (local
+   * development), where there is no Access session to end.
+   */
+  const accessLogoutUrl = async (): Promise<string | null> => {
+    try {
+      const response = await fetch('/api/auth/access-logout-url', { credentials: 'include', cache: 'no-store' });
+      if (!response.ok) return null;
+      const data = await response.json() as { url?: string | null };
+      return data.url || null;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * Clear this device's copy of the session. Deliberately shared by lock, sign-out
+   * and idle expiry: each must leave nothing behind that would let the next person
+   * at the terminal render a signed-in shell before the server has been asked.
+   */
+  const clearLocalSession = () => {
+    localStorage.removeItem('idofera_current_user_id');
+    localStorage.removeItem('idofera_session_token');
+    sessionStorage.removeItem('idofera_session_token');
+    sessionStorage.removeItem('idofera_access_reload_at');
+    setCurrentUser(null);
+    setCanSuperAdmin(false);
+    persistSsoEmail(null);
+  };
+
+  /**
+   * Leave the workspace AND end the Cloudflare Access session, so the Mall's door
+   * asks again. This is the security-boundary exit: after it, the next person at
+   * the terminal cannot reach the workspace without a fresh verification.
+   *
+   * Ending Access is not optional. `authSession` mints an app session from ANY
+   * valid Access identity (the SSO bootstrap), so as long as Access still
+   * considers this browser authenticated, simply navigating away is undone: the
+   * next `/api/auth/session` hands the session straight back.
+   *
+   * Used by sign-out and by BOTH idle paths. Manual Lock deliberately does not
+   * come here — see `lock` below.
+   */
+  const endAccessAndLeave = async () => {
+    const token = localStorage.getItem('idofera_session_token') || sessionStorage.getItem('idofera_session_token');
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers['authorization'] = `Bearer ${token}`;
+      headers['x-session-token'] = token;
+    }
+    // Resolve the logout URL FIRST: it is resolved before the navigation is
+    // committed, so a slow response cannot drop us back into the workspace.
+    const accessUrl = await accessLogoutUrl();
+    try {
+      await fetch('/api/auth/lock', { method: 'POST', credentials: 'include', headers });
+    } catch { /* Best effort: the Access logout below still applies. */ }
+    clearLocalSession();
+    window.location.replace(accessUrl || '/');
+  };
+
+  /**
+   * Lock: a SCREEN lock, deliberately weaker than signing out
+   * (docs/staff-access.md).
+   *
+   * It clears this browser's copy of the session and returns to the Mall, changing
+   * NOTHING server-side: the app session and the Cloudflare Access session both
+   * survive, so the same operator gets straight back into the workspace on the
+   * next 3-second cart hold with no OTP and no password. That is the whole point
+   * — it hides the dashboard from somebody walking past for the price of nothing.
+   *
+   * The trade-off, stated plainly because it matters: this does NOT secure a
+   * shared terminal. The next person at the counter holds the Cart button for
+   * three seconds and is in. Lock is for eyes, not for adversaries — that is
+   * Sign Out's job, and the idle lock escalates to it precisely because nobody
+   * clicked anything before walking away.
+   */
+  const lock = async () => {
+    clearLocalSession();
+    window.location.replace('/');
+  };
+  // The privileged request pauses here while the operator types their password.
+  // The resolver lives in a REF: React may double-invoke state updaters in
+  // StrictMode, and resolving a promise from inside an updater would resolve it
+  // twice (the exact bug that used to double-send profile PUTs).
+  const stepUpResolver = useRef<((password: string | null) => void) | null>(null);
+  const [stepUpOpen, setStepUpOpen] = useState(false);
+  const [stepUpBusy, setStepUpBusy] = useState(false);
+  const [stepUpError, setStepUpError] = useState('');
+
+  /** Ask the operator for their account password. Resolves null when cancelled. */
+  const askForPassword = () =>
+    new Promise<string | null>((resolve) => {
+      stepUpResolver.current = resolve;
+      setStepUpError('');
+      setStepUpOpen(true);
+    });
+
+  const finishStepUp = (password: string | null) => {
+    const resolve = stepUpResolver.current;
+    stepUpResolver.current = null;
+    setStepUpOpen(false);
+    setStepUpError('');
+    resolve?.(password);
+  };
+
+  /**
+   * Mint the short-lived step-up proof the server requires for privileged
+   * changes (docs/staff-access.md). Resolves true only once the server has
+   * hashed and stored it for this account.
+   */
+  const stepUp = async (password: string): Promise<boolean> => {
+    try {
+      const response = await fetch('/api/auth/step-up', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      const data = await response.json() as { ok?: boolean; canSuperAdmin?: boolean; error?: string };
+      if (!response.ok || !data.ok) {
+        setStepUpError(data.error || 'That password could not be confirmed.');
+        return false;
+      }
+      if (typeof data.canSuperAdmin === 'boolean') setCanSuperAdmin(data.canSuperAdmin);
+      return true;
+    } catch {
+      setStepUpError('Could not confirm your password. Check your connection and try again.');
+      return false;
+    }
+  };
+
+  /**
+   * Runs a request that the server may treat as privileged.
+   *  - `STEP_UP_REQUIRED` (403): open the password prompt; once the proof is
+   *    minted, retry the ORIGINAL request transparently.
+   *  - `SUPER_ADMIN_GROUP_REQUIRED` (403): only the identity provider can fix
+   *    this, so it is reported as a toast instead of being retried.
+   */
+  const privilegedRequest = async (url: string, init: RequestInit): Promise<Response> => {
+    const send = () => fetch(url, {
+      ...init,
+      credentials: 'include',
+      headers: { 'content-type': 'application/json', ...(init.headers || {}) },
+    });
+    const first = await send();
+    if (first.status !== 403) return first;
+    const body = await first.clone().json().catch(() => ({})) as { code?: string; error?: string };
+    if (body.code === 'SUPER_ADMIN_GROUP_REQUIRED') {
+      showToast({
+        title: 'Identity Provider Check Required',
+        message: body.error || 'Your identity provider has not confirmed the super-administrator group.',
+        type: 'error',
+      });
+      return first;
+    }
+    if (body.code !== 'STEP_UP_REQUIRED') return first;
+    const password = await askForPassword();
+    if (!password) return first;
+    return await send();
+  };
+
   const refreshServerUsers = async () => {
     const token = localStorage.getItem('idofera_session_token') || sessionStorage.getItem('idofera_session_token');
     const headers: Record<string, string> = {};
@@ -188,9 +398,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       headers['authorization'] = `Bearer ${token}`;
       headers['x-session-token'] = token;
     }
-    const response = await fetch('/api/auth/users', {credentials: 'include', headers});
+    const response = await fetch('/api/auth/users', { credentials: 'include', headers });
     if (!response.ok) return;
-    const data = await response.json() as {users?: UserProfile[]};
+    const data = await response.json() as { users?: UserProfile[] };
     if (data.users?.length) setUsers(sanitizeUsersList(data.users));
   };
 
@@ -202,10 +412,45 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       headers['authorization'] = `Bearer ${token}`;
       headers['x-session-token'] = token;
     }
-    fetch('/api/auth/session', {credentials: 'include', headers, cache: 'no-store'})
-      .then(async (response) => response.ok ? response.json() : {user: null})
-      .then(async ({user}) => {
-        if (!active) return;
+    fetch('/api/auth/session', { credentials: 'include', headers, cache: 'no-store' })
+      .then(async (response) => {
+        // An expired Cloudflare Access cookie sends the request off to the IdP;
+        // the redirected cross-origin answer cannot be read as JSON. One
+        // full-page navigation to /labs lets Access re-authenticate, bounded by
+        // sessionStorage so a dead API cannot trap the tab in a reload loop.
+        if (response.redirected && !response.url.startsWith(window.location.origin)) {
+          const last = Number(sessionStorage.getItem('idofera_access_reload_at') || 0);
+          if (active && Date.now() - last > 60000) {
+            sessionStorage.setItem('idofera_access_reload_at', String(Date.now()));
+            window.location.replace('/labs');
+          }
+          return null;
+        }
+        return response.ok ? response.json() : { user: null };
+      })
+      .then(async (payload) => {
+        if (!active || !payload) return;
+        const { user, entranceAllowed, accessEmail, registered, canSuperAdmin: canAct } = payload as {
+          user: UserProfile | null;
+          entranceAllowed?: boolean;
+          accessEmail?: string;
+          registered?: boolean;
+          canSuperAdmin?: boolean;
+        };
+        if (typeof canAct === 'boolean') setCanSuperAdmin(canAct);
+        if (registered === false && accessEmail) {
+          // Access proved the person, but no ACTIVE roster account matches.
+          // SSO never provisions one (docs/staff-access.md): persist the email
+          // and stay on the staff route — StaffApp renders the "confirmed but
+          // not provisioned" notice instead of the sign-in form.
+          persistSsoEmail(accessEmail);
+          return;
+        }
+        if (!user && !entranceAllowed) {
+          window.location.replace('/');
+          return;
+        }
+        persistSsoEmail(null);
         setCurrentUser(user || null);
         if (user) await refreshServerUsers();
       })
@@ -213,6 +458,91 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       .finally(() => active && setLoading(false));
     return () => { active = false; };
   }, []);
+
+  // Revalidate open workspaces/login screens after expiry or another-tab logout.
+  useEffect(() => {
+    let active = true;
+    const check = async () => {
+      try {
+        const token = localStorage.getItem('idofera_session_token') || sessionStorage.getItem('idofera_session_token');
+        const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
+        const response = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store', headers });
+        if (!response.ok) return;
+        const { user, entranceAllowed, accessEmail } = await response.json();
+        // An Access-confirmed person without a roster account stays on the
+        // staff route (the AccessNotice owns that screen, not the storefront).
+        // A session the server has stopped accepting (idle expiry) is a real
+        // lock, so route it through `lock()` — which also ends the Access
+        // session. Barely navigating to /labs would NOT work: `authSession`
+        // re-mints from the still-valid Access identity and puts the operator
+        // straight back into the workspace. Idle therefore escalates to the FULL
+        // exit (end Access), not the screen lock — a session the server has
+        // stopped accepting must not be recoverable without a fresh verification.
+        if (active && !user && !entranceAllowed && !accessEmail) {
+          await endAccessAndLeave();
+        }
+      } catch { /* A transient network error is not a confirmed expired session. */ }
+    };
+    // A backgrounded tab must not keep reading the session table on a timer;
+    // focus and visibility changes still revalidate as soon as the user returns.
+    const poll = () => { if (!document.hidden) void check(); };
+    const onVisibilityChange = () => { if (!document.hidden) void check(); };
+    const timer = window.setInterval(poll, SESSION_RECHECK_MS);
+    window.addEventListener('focus', check);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', check);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, []);
+
+  /**
+   * Idle auto-sign-out with a one-minute warning (docs/staff-access.md).
+   *
+   * Only runs while a workspace is actually open. The server enforces the same
+   * 30-minute window independently, so this is the *visible* half: it warns, then
+   * leaves.
+   *
+   * It deliberately escalates to `endAccessAndLeave` rather than calling the
+   * screen `lock`. A manual Lock means "I am coming straight back", and it is
+   * cheap. Idle means nobody said anything and the terminal simply went quiet —
+   * which on a shared counter is indistinguishable from being left open. If idle
+   * only wiped the screen, the very next 3-second cart hold would walk the next
+   * person straight in and the window would be decorative.
+   */
+  useEffect(() => {
+    if (!currentUser) return;
+    let warnTimer: number | undefined;
+    let lockTimer: number | undefined;
+    // The warning is a single toast; the exit itself is what changes the screen.
+    const arm = () => {
+      window.clearTimeout(warnTimer);
+      window.clearTimeout(lockTimer);
+      warnTimer = window.setTimeout(() => {
+        showToast({
+          title: 'Still There?',
+          message: 'The workspace will sign you out in one minute. Move the mouse or press any key to stay signed in.',
+          type: 'warning',
+        });
+      }, Math.max(IDLE_LOCK_MS - IDLE_WARNING_MS, 0));
+      lockTimer = window.setTimeout(() => { void endAccessAndLeave(); }, IDLE_LOCK_MS);
+    };
+    // `capture` so a scroll inside a nested panel still counts as activity, and
+    // so the reset happens before any handler can stop propagation.
+    const onActivity = () => arm();
+    const events = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart', 'focus'] as const;
+    for (const event of events) window.addEventListener(event, onActivity, { capture: true, passive: true });
+    arm();
+    return () => {
+      window.clearTimeout(warnTimer);
+      window.clearTimeout(lockTimer);
+      for (const event of events) window.removeEventListener(event, onActivity, { capture: true });
+    };
+    // `lock` is stable for the lifetime of a signed-in session; re-arming only on
+    // the user identity keeps activity from tearing down the timers on every render.
+  }, [currentUser?.id, showToast]);
 
   // Load users from IndexedDB and Central Cloud Firestore on boot
   useEffect(() => {
@@ -233,11 +563,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           await putManyItems('users', INITIAL_USERS);
         }
 
-        const savedId = localStorage.getItem('idofera_current_user_id');
-        if (savedId && !DUMMY_USER_IDS.has(savedId)) {
-          const found = activeUsers.find((u) => u.id === savedId);
-          if (found) setCurrentUser(found);
-        }
+        // Cached profiles are not proof of a valid server session. The real
+        // roster (and the real super-admin flag) arrives from /api/auth/session
+        // and /api/auth/users; nothing here may grant privilege.
+        void activeUsers;
       } catch (err) {
         console.warn('Users load warning:', err);
       }
@@ -248,14 +577,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, []);
 
+  const currentUserRef = useRef(currentUser);
+  useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
+
   useEffect(() => {
     const handleUserSync = (userList: UserProfile[]) => {
       if (userList && userList.length > 0) {
         const sanitized = sanitizeUsersList(userList);
         if (sanitized.length > 0) {
           setUsers(sanitized);
-          if (currentUser) {
-            const match = sanitized.find((u) => u.id === currentUser.id);
+          const liveUser = currentUserRef.current;
+          if (liveUser) {
+            const match = sanitized.find((u) => u.id === liveUser.id);
             if (match) {
               setCurrentUser(match);
             }
@@ -287,13 +620,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       window.removeEventListener('idofera_db_restored', handleDbRestored);
       unsubTab();
     };
-  }, [currentUser]);
+    // Empty deps on purpose: the handlers read currentUserRef, so a login or
+    // switch-user no longer tears down and re-adds the window listener and the
+    // BroadcastChannel subscription (which briefly dropped events).
+  }, []);
 
   // Sync users to localStorage and IndexedDB
   useEffect(() => {
     try {
-      localStorage.setItem('idofera_users', JSON.stringify(users));
-      replaceStoreItems('users', users).catch((e) => console.warn('IndexedDB users sync warning:', e));
+      // Passwords stay in memory for the one request that needs them; they are
+      // never written to localStorage/IndexedDB, where any script could read
+      // them. The server keeps the only credential copy (hashed).
+      const persistable = users.map(({ password, ...profile }) => profile);
+      localStorage.setItem('idofera_users', JSON.stringify(persistable));
+      replaceStoreItems('users', persistable).catch((e) => console.warn('IndexedDB users sync warning:', e));
     } catch (e) {
       console.error('Failed to save users:', e);
     }
@@ -441,9 +781,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       lastLogin: new Date().toISOString(),
     };
     setUsers((prev) => [newUser, ...prev]);
-    fetch('/api/auth/users', {method: 'PUT', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({user: newUser, password: newUser.password})})
+    // Creating the account is privileged: the prompt/retry keeps this local
+    // creation in sync with what the server actually accepts.
+    privilegedRequest('/api/auth/users', { method: 'PUT', body: JSON.stringify({ user: newUser, password: newUser.password }) })
       .then((response) => { if (!response.ok) throw new Error('Server rejected the new user.'); })
-      .catch((error) => showToast({title: 'Server Account Error', message: error.message, type: 'error'}));
+      .catch((error) => showToast({ title: 'Server Account Error', message: error.message, type: 'error' }));
     saveDocument('users', newUser);
     showToast({
       title: 'New User Created',
@@ -477,22 +819,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         throw new Error('The Administrator role of this Super-User account cannot be altered.');
       }
     }
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === id) {
-          targetName = u.displayName;
-          const updated = { ...u, ...updates };
-          fetch('/api/auth/users', {method: 'PUT', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({user: updated, password: updates.password})})
-            .catch((error) => console.warn('Server user update warning:', error));
-          saveDocument('users', updated);
-          if (currentUser?.id === id) {
-            setCurrentUser(updated);
-          }
-          return updated;
-        }
-        return u;
-      })
-    );
+    // Side effects (the server PUT and the IndexedDB save) run OUTSIDE the
+    // updater: StrictMode double-invoked the updater, which sent two PUTs and
+    // two saves for every profile edit.
+    const target = users.find((u) => u.id === id);
+    if (!target) return;
+    targetName = target.displayName;
+    const updated = { ...target, ...updates };
+    privilegedRequest('/api/auth/users', { method: 'PUT', body: JSON.stringify({ user: updated, password: updates.password }) })
+      .catch((error) => console.warn('Server user update warning:', error));
+    saveDocument('users', updated);
+    setUsers((prev) => prev.map((u) => (u.id === id ? updated : u)));
+    if (currentUser?.id === id) {
+      setCurrentUser(updated);
+    }
     showToast({
       title: 'User Profile Updated',
       message: `Account details for "${targetName}" updated.`,
@@ -524,7 +864,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Cannot delete the only remaining Administrator.');
     }
     setUsers((prev) => prev.filter((u) => u.id !== id));
-    fetch(`/api/auth/users/${encodeURIComponent(id)}`, {method: 'DELETE', credentials: 'include'})
+    // Deleting an account is privileged: the server demands a fresh password
+    // confirmation (403 STEP_UP_REQUIRED), which privilegedRequest prompts for.
+    privilegedRequest(`/api/auth/users/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      .then((response) => { if (!response.ok) console.warn('Server user deletion rejected:', response.status); })
       .catch((error) => console.warn('Server user deletion warning:', error));
     removeDocument('users', id);
     showToast({
@@ -542,12 +885,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Password must be at least 8 characters long.');
     }
 
-    const response = await fetch('/api/auth/password', {method: 'POST', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({oldPassword, newPassword})});
-    const result = await response.json() as {error?: string; passwordLastChanged?: string};
+    const response = await fetch('/api/auth/password', { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ oldPassword, newPassword }) });
+    const result = await response.json() as { error?: string; passwordLastChanged?: string };
     if (!response.ok) throw new Error(result.error || 'Password update failed.');
     const now = result.passwordLastChanged || new Date().toISOString();
-    setCurrentUser((user) => user ? {...user, passwordLastChanged: now} : user);
-    setUsers((items) => items.map((user) => user.id === currentUser.id ? {...user, passwordLastChanged: now} : user));
+    setCurrentUser((user) => user ? { ...user, passwordLastChanged: now } : user);
+    setUsers((items) => items.map((user) => user.id === currentUser.id ? { ...user, passwordLastChanged: now } : user));
 
     showToast({
       title: 'Password Updated',
@@ -581,11 +924,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Regular Administrators cannot reset the Super-User password.');
     }
 
-    const response = await fetch('/api/auth/password', {method: 'POST', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({targetUserId, newPassword})});
-    const result = await response.json() as {error?: string; passwordLastChanged?: string};
+    // Resetting ANOTHER account's password is the most sensitive staff action;
+    // the server re-checks privilege and the fresh step-up on this call.
+    const response = await privilegedRequest('/api/auth/password', { method: 'POST', body: JSON.stringify({ targetUserId, newPassword }) });
+    const result = await response.json() as { error?: string; passwordLastChanged?: string };
     if (!response.ok) throw new Error(result.error || 'Password reset failed.');
     const now = result.passwordLastChanged || new Date().toISOString();
-    setUsers((items) => items.map((user) => user.id === targetUserId ? {...user, passwordLastChanged: now} : user));
+    setUsers((items) => items.map((user) => user.id === targetUserId ? { ...user, passwordLastChanged: now } : user));
 
     showToast({
       title: 'Password Reset Successful',
@@ -597,16 +942,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loginWithEmail = async (identifier: string, p: string) => {
     setLoading(true);
     try {
-      const response = await fetch('/api/auth/login', {method: 'POST', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({identifier, password: p})});
-      const data = await response.json() as {user?: UserProfile; sessionToken?: string; token?: string; error?: string};
+      const response = await fetch('/api/auth/login', { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ identifier, password: p }) });
+      const data = await response.json() as { user?: UserProfile; sessionToken?: string; token?: string; error?: string; canSuperAdmin?: boolean };
       if (!response.ok || !data.user) throw new Error(data.error || 'Authentication failed.');
       if (data.sessionToken || data.token) {
         localStorage.setItem('idofera_session_token', data.sessionToken || data.token || '');
       }
+      if (typeof data.canSuperAdmin === 'boolean') setCanSuperAdmin(data.canSuperAdmin);
+      persistSsoEmail(null);
       setCurrentUser(data.user);
       if (isSuperUser(data.user)) {
-        const localUsers = sanitizeUsersList(users);
-        await Promise.all(localUsers.map((user) => fetch('/api/auth/users', {method: 'PUT', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({user, password: user.password})})));
+        // Provision only the profiles this device created and that therefore
+        // carry a password. The old form re-PUT EVERY cached profile on each
+        // super-admin login, which re-sent the bundled demo password for the
+        // former bundled super-admin id and silently reset the real super-admin
+        // password back to that known value.
+        const pendingProvision = sanitizeUsersList(users).filter((user) => user.password);
+        if (pendingProvision.length) {
+          // The password that just signed us in is a valid step-up proof too;
+          // mint it now so provisioning never opens a second prompt.
+          await stepUp(p);
+          await Promise.all(pendingProvision.map((user) => privilegedRequest('/api/auth/users', { method: 'PUT', body: JSON.stringify({ user, password: user.password }) })));
+        }
       }
       await refreshServerUsers();
       showToast({ title: 'Signed In', message: `Welcome back, ${data.user.displayName}!`, type: 'success' });
@@ -654,15 +1011,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       if (!credential?.accessToken) throw new Error('Google did not provide a verifiable access token.');
-      const response = await fetch('/api/auth/google', {method: 'POST', credentials: 'include', headers: {'content-type': 'application/json'}, body: JSON.stringify({accessToken: credential.accessToken})});
-      const data = await response.json() as {user?: UserProfile; sessionToken?: string; token?: string; error?: string};
+      const response = await fetch('/api/auth/google', { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ accessToken: credential.accessToken }) });
+      const data = await response.json() as { user?: UserProfile; sessionToken?: string; token?: string; error?: string; canSuperAdmin?: boolean };
       if (!response.ok || !data.user) throw new Error(data.error || 'Google authentication failed.');
+      if (typeof data.canSuperAdmin === 'boolean') setCanSuperAdmin(data.canSuperAdmin);
+      persistSsoEmail(null);
       if (data.sessionToken || data.token) {
         localStorage.setItem('idofera_session_token', data.sessionToken || data.token || '');
       }
       setCurrentUser(data.user);
       await refreshServerUsers();
-      showToast({title: 'Google Authentication Successful', message: `Welcome back, ${data.user.displayName}!`, type: 'success'});
+      showToast({ title: 'Google Authentication Successful', message: `Welcome back, ${data.user.displayName}!`, type: 'success' });
     } catch (err: any) {
       console.warn('Google Auth Popup process notice:', err);
       if (err?.code === 'auth/popup-closed-by-user') {
@@ -704,16 +1063,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       headers['authorization'] = `Bearer ${token}`;
       headers['x-session-token'] = token;
     }
-    await fetch('/api/auth/logout', {method: 'POST', credentials: 'include', headers}).catch(() => null);
-    localStorage.removeItem('idofera_current_user_id');
-    localStorage.removeItem('idofera_session_token');
-    sessionStorage.removeItem('idofera_session_token');
-    setCurrentUser(null);
+    // Best effort: if the server cannot confirm the sign-out, this device is
+    // still signed out locally (the old code threw and left the session token
+    // and the signed-in UI in place, with no way to retry cleanly).
+    let serverConfirmed = true;
+    try {
+      const response = await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', headers });
+      serverConfirmed = response.ok;
+    } catch {
+      serverConfirmed = false;
+    }
     showToast({
       title: 'Signed Out',
-      message: 'You have been safely signed out of your local workspace.',
-      type: 'info',
+      message: serverConfirmed
+        ? 'You have been safely signed out of your local workspace.'
+        : 'Signed out on this device. The server could not confirm sign-out; it will be revoked when the session expires.',
+      type: serverConfirmed ? 'info' : 'warning',
     });
+    // Then the same full exit the idle paths take: ending the Access session
+    // requires a full-page navigation to the team domain, which also returns the
+    // operator to the Mall. Without a gate (local development) there is nothing
+    // to end, and it falls back to the Mall.
+    await endAccessAndLeave();
   };
 
   const hasPermission = (requiredRoles: UserRole[]) => {
@@ -729,6 +1100,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         users,
         loading,
         isSuperAdmin,
+        canSuperAdmin,
+        ssoEmail,
+        ssoUnregistered,
+        stepUp,
         isPrivacyMode,
         enablePrivacyMode,
         disablePrivacyMode,
@@ -744,10 +1119,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         registerWithEmail,
         loginWithGoogle,
         logout,
+        lock,
         hasPermission,
       }}
     >
       {children}
+      {/* Privileged staff actions pause here for a fresh password proof. */}
+      <StepUpModal
+        isOpen={stepUpOpen}
+        busy={stepUpBusy}
+        error={stepUpError}
+        onConfirm={(password) => {
+          // Mint the proof BEFORE resolving: the caller retries only after the
+          // server has accepted the password, and a wrong password keeps this
+          // prompt OPEN with the server's message instead of failing silently.
+          setStepUpBusy(true);
+          stepUp(password)
+            .then((confirmed) => { if (confirmed) finishStepUp(password); })
+            .finally(() => setStepUpBusy(false));
+        }}
+        onCancel={() => finishStepUp(null)}
+      />
     </AuthContext.Provider>
   );
 };

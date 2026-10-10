@@ -215,7 +215,7 @@ git pull --ff-only origin main
 git branch backup/main-before-sites-parity
 git read-tree --reset -u origin/sites-managed
 git commit -m "Promote Sites-managed application to main"
-npm ci
+bun install --frozen-lockfile
 npm run build
 git diff --exit-code HEAD^{tree} origin/sites-managed^{tree}
 git push origin main
@@ -247,7 +247,10 @@ If deployment remains in the current Sites project, keep `.openai/hosting.json` 
 
 ### Build and hosting
 
-- [ ] `npm ci` completes from the committed lockfile.
+- [ ] `bun install --frozen-lockfile` completes from the committed `bun.lock`.
+      (The repo tracks `bun.lock`, NOT `package-lock.json`, so `npm ci` aborts with
+      EUSAGE. Use bun, or generate a `package-lock.json` first and switch the
+      whole pipeline to npm — do not mix the two lockfiles.)
 - [ ] `npm run build` produces `dist/server/index.js` and static assets.
 - [ ] Direct navigation to a nested SPA route returns the app.
 - [ ] JavaScript assets return JavaScript MIME types, never `text/html`.

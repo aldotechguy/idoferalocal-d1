@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { Package, Boxes, Archive } from 'lucide-react';
+import { Package, Boxes, Archive, Store } from 'lucide-react';
 import { ProductsView } from './ProductsView';
 import { InventoryView } from '../inventory/InventoryView';
 import { PricingView } from '../pricing/PricingView';
 import { ArchiveView } from './ArchiveView';
+import { MallListingsView } from './MallListingsView';
 import { NairaSign } from '../common/NairaSign';
 import { useApp } from '../../context/AppContext';
 
-export type ProductsStockTab = 'products' | 'inventory' | 'pricing' | 'archive';
+export type ProductsStockTab = 'products' | 'inventory' | 'pricing' | 'mall' | 'archive';
 
 interface ProductsStockHubViewProps {
   initialTab?: ProductsStockTab;
@@ -101,6 +102,18 @@ export const ProductsStockHubView: React.FC<ProductsStockHubViewProps> = ({
           </button>
 
           <button
+            onClick={() => setActiveTab('mall')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
+              activeTab === 'mall'
+                ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
+                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+          >
+            <Store className="w-3.5 h-3.5" />
+            <span>Mall Listings</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('archive')}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
               activeTab === 'archive'
@@ -124,6 +137,7 @@ export const ProductsStockHubView: React.FC<ProductsStockHubViewProps> = ({
         {activeTab === 'products' && <ProductsView onNavigate={onNavigate} />}
         {activeTab === 'inventory' && <InventoryView />}
         {activeTab === 'pricing' && <PricingView />}
+        {activeTab === 'mall' && <MallListingsView />}
         {activeTab === 'archive' && <ArchiveView onNavigate={onNavigate} />}
       </div>
     </div>

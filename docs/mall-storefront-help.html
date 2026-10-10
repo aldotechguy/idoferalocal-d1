@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>IdoferaMall - Storefront Help Guide</title>
+<style>
+  @page { size: A4; margin: 16mm 14mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #1e293b; font-size: 11.5px; line-height: 1.55; margin: 0;
+  }
+  h1 { font-size: 24px; font-weight: 800; color: #0f172a; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h2 {
+    font-size: 16px; font-weight: 800; color: #0f172a;
+    margin: 22px 0 8px; padding-bottom: 4px; border-bottom: 2px solid #e2e8f0;
+    page-break-after: avoid;
+  }
+  h3 { font-size: 13px; font-weight: 800; color: #1e293b; margin: 16px 0 6px; page-break-after: avoid; }
+  p { margin: 0 0 8px; }
+  ul, ol { margin: 0 0 10px; padding-left: 20px; }
+  li { margin: 0 0 4px; }
+  li > ul { margin-top: 4px; }
+  a { color: #2563eb; text-decoration: none; word-break: break-word; }
+  strong { color: #0f172a; }
+  code {
+    background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 4px;
+    padding: 0 4px; font-family: "Cascadia Code", Consolas, monospace; font: 10.5px;
+  }
+  hr { border: 0; border-top: 1px solid #e2e8f0; margin: 16px 0; }
+  blockquote {
+    margin: 0 0 12px; padding: 10px 14px; background: #fffbeb;
+    border-left: 4px solid #f59e0b; border-radius: 0 6px 6px 0; color: #78350f;
+  }
+  blockquote p { margin: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 4px 0 14px; page-break-inside: avoid; }
+  th, td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #f8fafc; font-weight: 700; color: #0f172a; }
+  figure { margin: 10px 0 16px; page-break-inside: avoid; text-align: center; }
+  figure img {
+    max-width: 62%; max-height: 300px; height: auto; border: 1px solid #e2e8f0;
+    border-radius: 10px; box-shadow: 0 1px 4px rgba(15,23,42,0.08);
+  }
+  figcaption { font-size: 10px; color: #64748b; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>IdoferaMall — Storefront Help Guide</h1>
+<p>This guide is for <strong>customers shopping on the IdoferaMall storefront</strong>. It explains how to browse, add items to your cart, check out, pay, and track your order. You can hand it to a customer as-is.</p>
+<p>Staff running the shop should read <a href="./user-help.md"><code>docs/user-help.md</code></a> instead.</p>
+<blockquote><p>Screenshots below are from a demo storefront; product names and prices are examples.</p></blockquote>
+<hr>
+<h2>1. Finding your way around</h2>
+<p>The storefront is a shop you can browse like any online store. Every product you can buy is <strong>Active and in stock</strong> — out-of-stock items may still be shown, but they cannot be purchased.</p>
+<figure><img src="screenshots/mall-home.png" alt="The IdoferaMall home page on a phone"><figcaption>The IdoferaMall home page on a phone</figcaption></figure>
+<p>The main areas:</p>
+<ul><li><strong>Home</strong> — featured items, categories, and rails such as flash sales.</li><li><strong>Categories</strong> — the category bar on desktop, or the menu on a phone.</li><li><strong>Search</strong> — top of every page; type to see matches.</li><li><strong>Cart</strong> — the basket icon; opens your cart drawer.</li><li><strong>Account</strong> — takes you to order tracking.</li></ul>
+<p>On a phone, the bottom bar gives you <strong>Home</strong>, <strong>Categories</strong>, <strong>Cart</strong>, and <strong>Account</strong>.</p>
+<h3>Browsing and searching</h3>
+<figure><img src="screenshots/mall-search.png" alt="Search results with a wholesale tier"><figcaption>Search results with a wholesale tier</figcaption></figure>
+<ul><li>Type in the search box to see results update as you go. Search matches products, brands and categories, and is forgiving of minor spacing and typos.</li><li>Sort results with the <strong>Sort</strong> control (for example, by relevance or price).</li><li>Some products advertise a <strong>wholesale tier</strong>, shown as a chip like "₦130 each at 25+". Buying that quantity automatically charges the lower per-unit price.</li><li>Open any product to see its full description, price, availability, and any tier, then <strong>Add to cart</strong>.</li></ul>
+<hr>
+<h2>2. Your cart</h2>
+<p>Open the <strong>cart</strong> to review your items and totals, then continue to checkout, where the <strong>Order Summary</strong> shows the full breakdown.</p>
+<figure><img src="screenshots/mall-checkout.png" alt="Checkout with the order summary"><figcaption>Checkout with the order summary</figcaption></figure>
+<p>The order summary may offer ways to reach a better price:</p>
+<ul><li>A per-item prompt such as "Add N more → pay X each", with the amount you would save.</li><li>A whole-cart banner such as "Add ₦X more → wholesale" with a one-tap <strong>Unlock</strong> that jumps the line up to the threshold.</li></ul>
+<p>Lines that have earned a discount are tagged with a <strong>Wholesale</strong> badge. These offers only appear when there is enough stock to actually reach the tier — you are never promised a price the shop cannot fulfil.</p>
+<p>When you are ready, continue to checkout.</p>
+<hr>
+<h2>3. Checkout</h2>
+<p>The checkout page collects your details and delivery choice. This is also where the <strong>Order Summary</strong> totals your basket and any wholesale savings.</p>
+<figure><img src="screenshots/mall-checkout.png" alt="Checkout"><figcaption>Checkout</figcaption></figure>
+<ol><li><strong>Review</strong> your items and totals.</li><li>Enter your <strong>Full name</strong>, <strong>Phone number</strong>, and <strong>Email</strong>. Your email is used for order confirmation and status updates.</li><li>Choose a <strong>Delivery zone</strong>:<ul><li><strong>Pickup</strong> — no delivery fee; you collect from the shop.</li><li><strong>Uyo central</strong> and <strong>Uyo outer areas</strong> — fixed fees shown at checkout.</li><li><strong>Other locations</strong> — a staff member confirms the fee before you pay.</li></ul></li><li>Enter the <strong>delivery address</strong>. For pickup this becomes an optional pickup note.</li><li>Choose how you will pay:<ul><li><strong>Pay on pickup</strong>, or</li><li><strong>Bank transfer</strong> — your order instructions show the bank details.</li></ul></li><li>Optionally tick <strong>Remember my details on this device</strong> so you do not retype them next time.</li><li>Press <strong>Place Order</strong>.</li></ol>
+<p>After ordering you land on a confirmation screen showing your <strong>order number</strong> with a <strong>Copy order number</strong> button — keep that number to track your order.</p>
+<hr>
+<h2>4. Tracking your order</h2>
+<p>Open <strong>Track My Orders</strong> (from the confirmation screen, the <strong>Track Order</strong> link in the footer, or the <strong>Account</strong> tab on a phone).</p>
+<figure><img src="screenshots/mall-track-orders.png" alt="Track My Orders"><figcaption>Track My Orders</figcaption></figure>
+<p>Enter:</p>
+<ul><li>your <strong>Order number</strong>, and</li><li>the <strong>phone number you used at checkout</strong>.</li></ul>
+<p>You must provide <strong>both</strong> — this is a privacy control, not a full login, so nobody else can look up your order with just one detail. The results show your order's current status and, where available, when it was last updated.</p>
+<p><strong>What the statuses mean</strong></p>
+<table><thead><tr><th>Status</th><th>What it means</th></tr></thead><tbody><tr><td>Pending review</td><td>We have your order and are checking it</td></tr><tr><td>Confirmed</td><td>Accepted; preparation will start</td></tr><tr><td>Processing</td><td>Being prepared</td></tr><tr><td>Packed</td><td>Packed and ready</td></tr><tr><td>Ready for pickup</td><td>Waiting for you at the shop (pickup orders)</td></tr><tr><td>Out for delivery</td><td>On the way to you (delivery orders)</td></tr><tr><td>Completed</td><td>Finished — collected or delivered</td></tr><tr><td>Cancelled</td><td>Cancelled; if you paid, a refund is arranged</td></tr><tr><td>Refunded</td><td>Money returned</td></tr></tbody></table>
+<hr>
+<h2>5. Paying</h2>
+<h3>Pay on pickup</h3>
+<p>Choose this if you would rather pay when you collect. Bring your order number.</p>
+<h3>Bank transfer</h3>
+<ol><li>Your order shows the bank details to use.</li><li>Transfer the <strong>exact total</strong> and use a <strong>unique reference</strong>.</li><li>Tell the shop if you have not received a confirmation — staff match your transfer by reference and phone number.</li></ol>
+<blockquote><p><strong>Do not pay again if you are unsure.</strong> A cancelled order must never be paid a second time. Contact the shop first and let them confirm what happened.</p></blockquote>
+<hr>
+<h2>6. Delivery and pickup</h2>
+<ul><li><strong>Pickup</strong> collects from the shop address and hours shown on the site.</li><li><strong>Uyo central</strong> and <strong>Uyo outer areas</strong> have fixed delivery fees shown at checkout.</li><li><strong>Other locations</strong> are quoted by staff before you pay, because the fee depends on where you are.</li></ul>
+<p>If an address cannot be served, the shop will contact you — delivery orders are only confirmed once staff have verified the address is serviceable.</p>
+<hr>
+<h2>7. Questions customers often ask</h2>
+<p><strong>"How do I know my order went through?"</strong> You get a confirmation screen with an order number. If you gave an email, you also receive order updates there.</p>
+<p><strong>"Where is my order?"</strong> Use <strong>Track My Orders</strong> with your order number and checkout phone number. Staff can also look it up for you.</p>
+<p><strong>"Can I buy wholesale / in bulk?"</strong> Yes — many products have a wholesale tier. Add enough of the item and the lower per-unit price applies automatically; the cart will prompt you when you are close.</p>
+<p><strong>"Why is an item showing but I cannot buy it?"</strong> It is out of stock or has no price set. The storefront keeps such products visible, but purchasing is only possible when there is stock and a valid price.</p>
+<p><strong>"The page looks empty."</strong> Refresh once. If it still does not load, check your connection and try again.</p>
+<hr>
+<h2>8. Where to get help</h2>
+<ul><li><strong>Track Order</strong> in the footer, or the <strong>Account</strong> tab on a phone, for order status.</li><li>The contact phone and shop details shown in the site footer.</li><li>If you are the shop operator, see <a href="./user-help.md"><code>docs/user-help.md</code></a> and <a href="./mall-operations.md"><code>docs/mall-operations.md</code></a>.</li></ul>
+</body>
+</html>

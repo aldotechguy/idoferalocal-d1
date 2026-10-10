@@ -3,6 +3,8 @@ import {
   Bell,
   Search,
   Menu,
+  Sun,
+  Moon,
   ShieldAlert,
   Check,
   UserPlus,
@@ -20,9 +22,9 @@ import {
   EyeOff,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useTheme } from '../../context/ThemeContext';
 import { useApp } from '../../context/AppContext';
 import { useCloudSync } from '../../hooks/useCloudSync';
-import { ConflictResolutionModal } from '../modals/ConflictResolutionModal';
 import { UserRole, Sale, UserProfile } from '../../types';
 import { NairaSign } from './NairaSign';
 import { UserModal } from '../modals/UserModal';
@@ -41,16 +43,8 @@ export const Header: React.FC<HeaderProps> = ({
   onMobileMenuToggle,
   onNavigate,
 }) => {
-  const {
-    currentUser,
-    users,
-    isSuperAdmin,
-    isPrivacyMode,
-    switchUser,
-    switchDemoRole,
-    logout,
-    hasPermission,
-  } = useAuth();
+  const { currentUser, users, isSuperAdmin, isPrivacyMode, switchUser, switchDemoRole, logout, lock, hasPermission } = useAuth();
+  const { mode, toggleTheme } = useTheme();
   const { notifications, markNotificationRead, clearNotifications, settings, products, sales, customers, suppliers, expenses } = useApp();
   const {
     isOnline,
@@ -58,26 +52,17 @@ export const Header: React.FC<HeaderProps> = ({
     d1Health,
     isCheckingHealth,
     pingD1Health,
-    stats,
-    conflicts,
-    isConflictModalOpen,
-    setIsConflictModalOpen,
-    resolveConflict,
-    resolveAllConflicts,
-    isLiveSyncActive,
-    isQuotaExceeded,
-    syncMode,
     triggerSync,
     hasDriveUnsynced,
-    isHeaderSyncActive,
     unsyncedRecordsCount,
-    requiredRecordsForHeaderSync,
-    toggleSyncMode,
   } = useCloudSync();
   const [showNotifPopover, setShowNotifPopover] = useState(false);
   const [showUserDropdown, setShowUserDropdown] = useState(false);
   const [isUserModalOpen, setIsUserModalOpen] = useState(false);
   const [showConfirmClearNotifs, setShowConfirmClearNotifs] = useState(false);
+  // Sign Out ends the Cloudflare Access session too, so it gets a confirmation;
+  // Lock stays one-tap because that is the whole point of it.
+  const [showConfirmSignOut, setShowConfirmSignOut] = useState(false);
   
   // Search States
   const [searchQuery, setSearchQuery] = useState('');
@@ -151,11 +136,38 @@ export const Header: React.FC<HeaderProps> = ({
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, []);
 
+  // Mobile placeholder swap: short prompt on phones so it never truncates mid-word.
+  // data-* attributes above are the source of truth; this only swaps the live attribute.
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 639px)');
+    const apply = () => {
+      const el = searchInputRef.current;
+      if (!el) return;
+      el.placeholder = mq.matches
+        ? (el.dataset.mobilePlaceholder || 'Search…')
+        : (el.dataset.desktopPlaceholder || el.placeholder);
+    };
+    apply();
+    mq.addEventListener('change', apply);
+    return () => mq.removeEventListener('change', apply);
+  }, []);
+
   const cleanQuery = searchQuery.trim().toLowerCase();
 
   // Generate real-time prediction items for auto-complete
   const predictions = useMemo(() => {
     if (!cleanQuery) return [];
+
+    // Null-safe dashboard search. These fields are typed as required, but
+    // imported/legacy rows routinely carry null, and one bad record used to
+    // throw inside this memo — crashing the whole header (Cmd+K included) on
+    // every keystroke. String(undefined) would match 'undefined', so an absent
+    // value is treated as an empty string.
+    const matches = (value: unknown) => {
+      if (value === null || value === undefined) return false;
+      return String(value).toLowerCase().includes(cleanQuery);
+    };
+    const matchesAll = (values: unknown[]) => values.some(matches);
 
     const list: {
       id: string;
@@ -170,14 +182,7 @@ export const Header: React.FC<HeaderProps> = ({
 
     // 1. Products (up to 4)
     products
-      .filter(
-        (p) =>
-          p.name.toLowerCase().includes(cleanQuery) ||
-          p.sku.toLowerCase().includes(cleanQuery) ||
-          p.barcode.toLowerCase().includes(cleanQuery) ||
-          p.category.toLowerCase().includes(cleanQuery) ||
-          p.brand.toLowerCase().includes(cleanQuery)
-      )
+      .filter((p) => matchesAll([p.name, p.sku, p.barcode, p.category, p.brand]))
       .slice(0, 4)
       .forEach((p) => {
         list.push({
@@ -200,12 +205,9 @@ export const Header: React.FC<HeaderProps> = ({
 
     // 2. Sales & Invoices (up to 3)
     sales
-      .filter(
-        (s) =>
-          s.invoiceNo.toLowerCase().includes(cleanQuery) ||
-          s.customerName.toLowerCase().includes(cleanQuery) ||
-          s.items.some((i) => i.productName.toLowerCase().includes(cleanQuery))
-      )
+      .filter((s) =>
+        matches(s.invoiceNo) || matches(s.customerName) ||
+        (Array.isArray(s.items) && s.items.some((i) => matches(i.productName))))
       .slice(0, 3)
       .forEach((s) => {
         list.push({
@@ -228,12 +230,7 @@ export const Header: React.FC<HeaderProps> = ({
 
     // 3. Customers (up to 2)
     customers
-      .filter(
-        (c) =>
-          c.name.toLowerCase().includes(cleanQuery) ||
-          (!isPrivacyMode && c.phone.toLowerCase().includes(cleanQuery)) ||
-          (!isPrivacyMode && c.email.toLowerCase().includes(cleanQuery))
-      )
+      .filter((c) => matchesAll([c.name, c.phone, c.email]))
       .slice(0, 2)
       .forEach((c) => {
         list.push({
@@ -259,54 +256,41 @@ export const Header: React.FC<HeaderProps> = ({
         });
       });
 
-    // 4. Suppliers (up to 2) - Hidden in Privacy Mode
-    if (!isPrivacyMode) {
-      suppliers
-        .filter(
-          (sup) =>
-            sup.name.toLowerCase().includes(cleanQuery) ||
-            sup.contactPerson.toLowerCase().includes(cleanQuery) ||
-            sup.phone.toLowerCase().includes(cleanQuery)
-        )
-        .slice(0, 2)
-        .forEach((sup) => {
-          list.push({
-            id: `sup-${sup.id}`,
-            typeLabel: 'Supplier',
-            title: sup.name,
-            subtitle: `Contact: ${sup.contactPerson} • ${sup.phone}`,
-            icon: Building2,
-            onSelect: () => {
-              onNavigate('suppliers');
-              setIsSearchFocused(false);
-            },
-          });
+    // 4. Suppliers (up to 2) - Contact masked in Privacy Mode
+    suppliers
+      .filter((sup) => matchesAll([sup.name, sup.contactPerson, sup.phone]))
+      .slice(0, 2)
+      .forEach((sup) => {
+        list.push({
+          id: `sup-${sup.id}`,
+          typeLabel: 'Supplier',
+          title: sup.name,
+          subtitle: isPrivacyMode ? 'Contact • Privacy Mode' : `Contact: ${sup.contactPerson} • ${sup.phone}`,
+          icon: Building2,
+          onSelect: () => {
+            onNavigate('suppliers');
+            setIsSearchFocused(false);
+          },
         });
-    }
+      });
 
-    // 5. Expenses (up to 2) - Hidden in Privacy Mode
-    if (!isPrivacyMode) {
-      expenses
-        .filter(
-          (e) =>
-            e.title.toLowerCase().includes(cleanQuery) ||
-            e.category.toLowerCase().includes(cleanQuery)
-        )
-        .slice(0, 2)
-        .forEach((e) => {
-          list.push({
-            id: `exp-${e.id}`,
-            typeLabel: 'Expense',
-            title: e.title,
-            subtitle: `${e.category} • ${settings.currencySymbol}${e.amount}`,
-            icon: NairaSign,
-            onSelect: () => {
-              onNavigate('expenses');
-              setIsSearchFocused(false);
-            },
-          });
+    // 5. Expenses (up to 2) - Amount masked in Privacy Mode
+    expenses
+      .filter((e) => matchesAll([e.title, e.category]))
+      .slice(0, 2)
+      .forEach((e) => {
+        list.push({
+          id: `exp-${e.id}`,
+          typeLabel: 'Expense',
+          title: e.title,
+          subtitle: isPrivacyMode ? `${e.category} • •••` : `${e.category} • ${settings.currencySymbol}${e.amount}`,
+          icon: NairaSign,
+          onSelect: () => {
+            onNavigate('expenses');
+            setIsSearchFocused(false);
+          },
         });
-    }
+      });
 
     return list;
   }, [cleanQuery, products, sales, customers, suppliers, expenses, settings, onNavigate, isPrivacyMode]);
@@ -317,21 +301,23 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   return (
-    <header className="app-header sticky top-0 z-30 px-4 lg:px-8 py-3 transition-all duration-200">
-      <div className="app-header-layout flex items-center justify-between gap-4">
+    <header className="app-header sticky top-0 z-30 px-3 sm:px-4 lg:px-8 pt-3 pb-2 sm:py-3 transition-all duration-200" style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))' }}>
+      <div className="app-header-layout flex flex-wrap items-center gap-x-3 gap-y-2 sm:gap-4 sm:flex-nowrap">
+        {/* Row 1 — hamburger + compact status cluster (mobile); spacer keeps search full-width below */}
         {/* Left Section (Mobile Hamburger only on non-desktop to maximize search bar real estate) */}
         <div className="flex items-center lg:hidden shrink-0">
           <button
             onClick={onMobileMenuToggle}
             className="p-2 text-slate-600 dark:text-slate-300 liquid-glass-pill rounded-xl transition-all cursor-pointer"
             title="Toggle Menu"
+              aria-label="Open navigation menu"
           >
             <Menu className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Global Interactive Search Bar with Auto-complete Predictions - Maximized Real Estate Across All Devices */}
-        <div className="flex flex-1 min-w-0 max-w-3xl mx-1.5 sm:mx-3 lg:mx-0 relative">
+        {/* Global search — own full-width row on mobile (order-3 basis-full), inline on sm+ */}
+        <div className="order-3 basis-full sm:order-none sm:basis-auto flex flex-1 min-w-0 sm:min-w-[220px] max-w-3xl sm:mx-3 lg:mx-0 relative">
           <div className="relative w-full">
             <Search className="w-4 h-4 absolute left-3 sm:left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
             <input
@@ -342,7 +328,7 @@ export const Header: React.FC<HeaderProps> = ({
               autoComplete="off"
               autoCorrect="off"
               spellCheck={false}
-              placeholder="Search products, invoices, customers... (Cmd + K)"
+              placeholder="Search products, invoices, customers…" data-desktop-placeholder="Search products, invoices, customers… (Ctrl/⌘ K)" data-mobile-placeholder="Search products, invoices…"
               value={searchQuery}
               onChange={(e) => {
                 setSearchQuery(e.target.value);
@@ -350,7 +336,14 @@ export const Header: React.FC<HeaderProps> = ({
                 setIsSearchFocused(true);
               }}
               onFocus={() => setIsSearchFocused(true)}
+              role="combobox"
+              aria-label="Search products, invoices, customers and suppliers"
+              aria-expanded={isSearchFocused && cleanQuery.length > 0}
+              aria-controls="staff-search-results"
+              aria-autocomplete="list"
+              aria-activedescendant={selectedIndex >= 0 ? `staff-search-option-${selectedIndex}` : undefined}
               onKeyDown={(e) => {
+                if (e.key === 'Escape') { setIsSearchFocused(false); return; }
                 if (e.key === 'ArrowDown') {
                   e.preventDefault();
                   setSelectedIndex((prev) => (prev < predictions.length - 1 ? prev + 1 : 0));
@@ -368,7 +361,7 @@ export const Header: React.FC<HeaderProps> = ({
                   setIsSearchFocused(false);
                 }
               }}
-              className="w-full pl-9 sm:pl-10 pr-10 sm:pr-16 py-2 bg-white/65 dark:bg-slate-900/65 backdrop-blur-md border border-white/60 dark:border-white/10 focus:border-amber-500 text-slate-900 dark:text-slate-100 text-xs sm:text-sm rounded-xl focus:outline-none transition-all shadow-xs"
+              className="w-full min-h-[44px] pl-9 sm:pl-10 pr-10 sm:pr-16 py-2 sm:py-2 bg-white/65 dark:bg-slate-900/65 backdrop-blur-md border border-white/60 dark:border-white/10 focus:border-amber-500 text-slate-900 dark:text-slate-100 text-base sm:text-sm rounded-xl focus:outline-none transition-all shadow-xs"
             />
 
             {/* Right Action Icons in Input */}
@@ -386,7 +379,7 @@ export const Header: React.FC<HeaderProps> = ({
                 </button>
               )}
               <kbd className="hidden lg:inline-block px-1.5 py-0.5 text-[10px] font-mono text-slate-400 bg-white/50 dark:bg-slate-800/60 rounded-md border border-slate-200/50 dark:border-slate-700/50">
-                ⌘K
+                Ctrl/⌘ K
               </kbd>
             </div>
           </div>
@@ -395,10 +388,10 @@ export const Header: React.FC<HeaderProps> = ({
           {isSearchFocused && cleanQuery.length > 0 && (
             <>
               <div
-                className="fixed inset-0 z-40"
+                className="fixed inset-0 z-40 bg-slate-950/20 sm:bg-transparent"
                 onClick={() => setIsSearchFocused(false)}
               />
-              <div className="absolute left-0 right-0 top-full mt-2 liquid-glass-elevated rounded-2xl z-50 overflow-hidden divide-y divide-slate-100/60 dark:divide-slate-800/60 animate-in fade-in duration-150">
+              <div id="staff-search-results" role="listbox" className="liquid-glass-elevated rounded-2xl z-50 overflow-hidden divide-y divide-slate-100/60 dark:divide-slate-800/60 animate-in fade-in duration-150 fixed left-3 right-3 mt-2 max-h-[60dvh] overflow-y-auto overscroll-contain sm:absolute sm:left-0 sm:right-0 sm:top-full sm:max-h-72">
                 {predictions.length === 0 ? (
                   <div className="p-4 text-center text-xs text-slate-500 space-y-1">
                     <p className="font-bold">No quick predictions for "{searchQuery}"</p>
@@ -423,6 +416,9 @@ export const Header: React.FC<HeaderProps> = ({
                         return (
                           <div
                             key={p.id}
+                            id={`staff-search-option-${idx}`}
+                            role="option"
+                            aria-selected={isSelected}
                             onClick={() => p.onSelect()}
                             onMouseEnter={() => setSelectedIndex(idx)}
                             className={`p-3 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
@@ -484,8 +480,8 @@ export const Header: React.FC<HeaderProps> = ({
           )}
         </div>
 
-        {/* Right Action Icons & Profile Menu Trigger */}
-        <div className="app-header-actions flex items-center gap-2.5">
+        {/* Right Action Icons - row 1 right cluster on mobile, inline on sm+ */}
+        <div className="app-header-actions ml-auto sm:ml-0 flex items-center gap-1 sm:gap-2 sm:gap-2.5 shrink-0">
           {/* Cloudflare D1 Network Health Indicator */}
           <D1NetworkHealthBadge
             health={d1Health}
@@ -496,24 +492,32 @@ export const Header: React.FC<HeaderProps> = ({
             onSync={triggerSync}
           />
 
-          {/* Sync Conflicts Badge Button (if conflicts exist) */}
-          {conflicts.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setIsConflictModalOpen(true)}
-              className="px-3 py-1.5 text-xs font-extrabold rounded-xl bg-amber-500/20 text-amber-600 dark:text-amber-300 border border-amber-500/50 hover:bg-amber-500/30 transition-all flex items-center gap-1.5 animate-pulse shadow-md shadow-amber-500/20 cursor-pointer"
-              title={`${conflicts.length} Sync Conflict(s) Pending — Click to resolve manually`}
-            >
-              <ShieldAlert className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400" />
-              <span>{conflicts.length} Conflict{conflicts.length > 1 ? 's' : ''}</span>
-            </button>
-          )}
+          {/* Theme Toggle Button (hidden on narrow phones — the same switch lives in the profile sheet) */}
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className="hidden min-[420px]:flex p-2 text-slate-600 dark:text-slate-300 liquid-glass-pill rounded-xl transition-all items-center gap-1.5 cursor-pointer"
+            title={`Current theme: ${mode.toUpperCase()}. Click to switch to ${mode === 'dark' ? 'Light' : 'Dark'} mode`}
+            aria-label="Toggle color theme"
+          >
+            {mode === 'dark' ? (
+              <>
+                <Sun className="w-4 h-4 text-amber-400 fill-amber-400/20" />
+                <span className="hidden md:inline text-xs font-extrabold text-amber-400">Light</span>
+              </>
+            ) : (
+              <>
+                <Moon className="w-4 h-4 text-slate-700 dark:text-slate-200" />
+                <span className="hidden md:inline text-xs font-extrabold text-slate-700 dark:text-slate-300">Dark</span>
+              </>
+            )}
+          </button>
 
           {/* Notifications Dropdown */}
           <div className="relative">
             <button
               onClick={() => setShowNotifPopover(!showNotifPopover)}
-              className="relative p-2 text-slate-600 dark:text-slate-300 liquid-glass-pill rounded-xl transition-all cursor-pointer"
+              className="relative p-2 sm:p-2 text-slate-600 dark:text-slate-300 liquid-glass-pill rounded-xl transition-all cursor-pointer header-icon-btn"
               title="Notifications"
             >
               <Bell className="w-4 h-4" />
@@ -526,8 +530,8 @@ export const Header: React.FC<HeaderProps> = ({
 
             {showNotifPopover && (
               <>
-                <div className="fixed inset-0 z-40" onClick={() => setShowNotifPopover(false)} />
-                <div className="absolute right-0 mt-2 w-80 sm:w-96 liquid-glass-elevated rounded-2xl z-50 p-4">
+                <div className="fixed inset-0 z-40 bg-slate-950/40 sm:bg-transparent" onClick={() => setShowNotifPopover(false)} onTouchStart={() => setShowNotifPopover(false)} />
+                <div className="liquid-glass-elevated rounded-t-2xl sm:rounded-2xl z-50 p-4 fixed left-2 right-2 bottom-2 top-auto max-h-[78dvh] overflow-y-auto overscroll-contain sm:absolute sm:left-auto sm:right-0 sm:bottom-auto sm:mt-2 sm:top-full sm:max-h-[80vh] w-auto sm:w-96 max-w-[calc(100vw-1rem)]" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
                   <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
                     <div className="flex items-center gap-2">
                       <ShieldAlert className="w-4 h-4 text-blue-600" />
@@ -567,7 +571,7 @@ export const Header: React.FC<HeaderProps> = ({
                               {n.title}
                             </p>
                             <span className="text-[10px] text-slate-400 whitespace-nowrap">
-                              {new Date(n.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              {new Date(n.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}
                             </span>
                           </div>
                           <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
@@ -606,8 +610,8 @@ export const Header: React.FC<HeaderProps> = ({
 
             {showUserDropdown && (
               <>
-                <div className="fixed inset-0 z-40" onClick={() => setShowUserDropdown(false)} />
-                <div className="absolute right-0 mt-2 w-72 liquid-glass-elevated rounded-2xl z-50 p-3 space-y-3 text-slate-900 dark:text-white animate-in fade-in zoom-in-95 duration-150">
+                <div className="fixed inset-0 z-40 bg-slate-950/40 sm:bg-transparent" onClick={() => setShowUserDropdown(false)} onTouchStart={() => setShowUserDropdown(false)} />
+                <div className="liquid-glass-elevated rounded-t-2xl sm:rounded-2xl z-50 p-3 space-y-3 fixed left-2 right-2 bottom-2 top-auto max-h-[78dvh] overflow-y-auto overscroll-contain sm:absolute sm:left-auto sm:right-0 sm:bottom-auto sm:mt-2 sm:top-full w-auto sm:w-72 max-w-[calc(100vw-1rem)] text-slate-900 dark:text-white animate-in fade-in zoom-in-95 duration-150" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
                   {/* Current Active Account Header */}
                   <div className="p-2.5 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-100 dark:border-slate-800 flex items-center gap-3">
                     {currentUser?.avatarUrl ? (
@@ -707,11 +711,20 @@ export const Header: React.FC<HeaderProps> = ({
                   {/* Manage Staff & Sign Out Buttons */}
                   <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-1.5">
                     <button
+                      onClick={toggleTheme}
+                      className="w-full flex items-center justify-center gap-2 py-2 min-h-[44px] bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 dark:hover:bg-amber-900/60 text-amber-700 dark:text-amber-300 font-bold rounded-xl text-xs transition-colors border border-amber-200/60 dark:border-amber-900/50 min-[420px]:hidden"
+                      title="Toggle color theme"
+                    >
+                      {mode === 'dark' ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+                      <span>Switch to {mode === 'dark' ? 'Light' : 'Dark'} mode</span>
+                    </button>
+
+                    <button
                       onClick={() => {
                         setShowUserDropdown(false);
                         onNavigate('settings');
                       }}
-                      className="w-full flex items-center justify-center gap-2 py-2 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/80 text-indigo-600 dark:text-indigo-400 font-bold rounded-xl text-xs transition-colors"
+                      className="w-full flex items-center justify-center gap-2 py-2 min-h-[44px] bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/80 text-indigo-600 dark:text-indigo-400 font-bold rounded-xl text-xs transition-colors"
                     >
                       <KeyRound className="w-3.5 h-3.5" />
                       <span>Change / Reset My Password</span>
@@ -746,15 +759,34 @@ export const Header: React.FC<HeaderProps> = ({
                       </div>
                     )}
 
+                    {/* Lock and Sign Out are DIFFERENT actions and used to be one
+                        button labelled "Sign Out / Lock Workspace" that only ever
+                        signed out. Lock is a SCREEN lock: it hides the workspace for
+                        a passer-by at zero cost, and the same operator returns with
+                        no OTP. Sign Out ends the Access session too, so the terminal
+                        is actually secured. */}
                     <button
                       onClick={() => {
                         setShowUserDropdown(false);
-                        logout();
+                        void lock();
+                      }}
+                      className="w-full flex items-center justify-center gap-2 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold rounded-xl text-xs transition-colors border border-slate-200/70 dark:border-slate-700"
+                      title="Hide the workspace and return to the Mall. You stay signed in, so you can reopen it instantly. Does NOT protect the terminal from the next person — use Sign Out for that."
+                    >
+                      <Lock className="w-3.5 h-3.5" />
+                      <span>Lock Workspace</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        setShowUserDropdown(false);
+                        setShowConfirmSignOut(true);
                       }}
                       className="w-full flex items-center justify-center gap-2 py-2 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-600 dark:text-rose-400 font-bold rounded-xl text-xs transition-colors border border-rose-200/50 dark:border-rose-900/50"
+                      title="End this session and require a fresh login (including Cloudflare Access)"
                     >
                       <LogOut className="w-3.5 h-3.5" />
-                      <span>Sign Out / Lock Workspace</span>
+                      <span>Sign Out</span>
                     </button>
                   </div>
                 </div>
@@ -784,6 +816,23 @@ export const Header: React.FC<HeaderProps> = ({
       <ReceiptModal
         sale={selectedSaleForReceipt}
         onClose={() => setSelectedSaleForReceipt(null)}
+      />
+
+      {/* Sign Out Confirmation. Both actions end the Access session and return to
+          the Mall; Sign Out is confirmed because it is the one that also destroys
+          the app session, so returning afterwards is a clean start rather than a
+          resume. Lock stays one-tap. */}
+      <ConfirmModal
+        isOpen={showConfirmSignOut}
+        title="Sign Out of the Workspace"
+        message="This ends your session AND your Cloudflare Access login, so nobody else can open the workspace from this device without a fresh verification. To open it again you will need to hold the Mall's Cart button for 3 seconds and verify once more. To simply hide the workspace while you stay signed in, use Lock Workspace instead."
+        confirmText="Sign Out"
+        variant="warning"
+        onClose={() => setShowConfirmSignOut(false)}
+        onConfirm={() => {
+          setShowConfirmSignOut(false);
+          void logout();
+        }}
       />
 
       {/* Clear Notifications Confirmation Modal */}
@@ -910,15 +959,6 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
       )}
-
-      {/* Sync Conflict Resolution Dialog */}
-      <ConflictResolutionModal
-        isOpen={isConflictModalOpen}
-        onClose={() => setIsConflictModalOpen(false)}
-        conflicts={conflicts}
-        onResolve={resolveConflict}
-        onResolveAll={resolveAllConflicts}
-      />
     </header>
   );
 };

@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { X, UserMinus, UserCheck, Building, Banknote, HelpCircle, ArrowDownRight, ArrowUpRight } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { LiquidAccountType, OwnerWithdrawalSubtype } from '../../types';
+import { useInteractions } from '../../context/InteractionContext';
 
 interface OwnerWithdrawalModalProps {
   isOpen: boolean;
@@ -16,7 +17,8 @@ export const OwnerWithdrawalModal: React.FC<OwnerWithdrawalModalProps> = ({
   currentUserName,
   initialMode = 'withdrawal',
 }) => {
-  const { treasuryBalances, recordOwnerWithdrawal, recordOwnerRepayment, settings } = useApp();
+  const { treasuryBalances, recordOwnerWithdrawal, recordOwnerRepayment, settings, moneyMovements } = useApp();
+  const { notify, confirm } = useInteractions();
 
   const [mode, setMode] = useState<'withdrawal' | 'repayment'>(initialMode);
   const [account, setAccount] = useState<LiquidAccountType>('Biz Account');
@@ -25,6 +27,25 @@ export const OwnerWithdrawalModal: React.FC<OwnerWithdrawalModalProps> = ({
   const [notes, setNotes] = useState<string>('');
   const [referenceNo, setReferenceNo] = useState<string>('');
   const [date, setDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [loanReferenceId, setLoanReferenceId] = useState<string>('');
+
+  // Outstanding Owner Loan drawings, each reduced by repayments that link back
+  // to it — so a repayment can target the specific loan it is settling.
+  const outstandingLoans = useMemo(() => {
+    const loans: { id: string; referenceNo?: string; date: string; outstanding: number }[] = [];
+    moneyMovements.forEach((m) => {
+      if (m.type === 'Owner Drawing' && m.subtype === 'Owner Loan') {
+        loans.push({ id: m.id, referenceNo: m.referenceNo, date: m.date, outstanding: Number(m.amount) || 0 });
+      }
+    });
+    moneyMovements.forEach((m) => {
+      if (m.type === 'Owner Repayment' && m.loanReferenceId) {
+        const loan = loans.find((l) => l.id === m.loanReferenceId);
+        if (loan) loan.outstanding = Math.max(0, loan.outstanding - (Number(m.amount) || 0));
+      }
+    });
+    return loans.filter((l) => l.outstanding > 0.009);
+  }, [moneyMovements]);
 
   useEffect(() => {
     if (isOpen) {
@@ -35,6 +56,7 @@ export const OwnerWithdrawalModal: React.FC<OwnerWithdrawalModalProps> = ({
       setNotes('');
       setReferenceNo('');
       setDate(new Date().toISOString().split('T')[0]);
+      setLoanReferenceId('');
     }
   }, [isOpen, initialMode]);
 
@@ -48,17 +70,15 @@ export const OwnerWithdrawalModal: React.FC<OwnerWithdrawalModalProps> = ({
   const numAmount = parseFloat(amount) || 0;
   const isOverdraft = mode === 'withdrawal' && numAmount > currentAccountBalance;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (numAmount <= 0) {
-      alert('Please enter a valid amount greater than zero.');
+      notify('Please enter a valid amount greater than zero.', 'Invalid amount');
       return;
     }
 
     if (isOverdraft) {
-      const proceed = confirm(
-        `Warning: Withdrawal amount (${settings.currencySymbol}${numAmount.toLocaleString()}) is greater than the available balance in ${account} (${settings.currencySymbol}${currentAccountBalance.toLocaleString()}). Do you still wish to proceed?`
-      );
+      const proceed = await confirm({ title: 'Available balance exceeded', message: `Withdrawal of ${settings.currencySymbol}${numAmount.toLocaleString()} exceeds the ${settings.currencySymbol}${currentAccountBalance.toLocaleString()} available in ${account}.`, confirmText: 'Record withdrawal', variant: 'warning' });
       if (!proceed) return;
     }
 
@@ -79,6 +99,7 @@ export const OwnerWithdrawalModal: React.FC<OwnerWithdrawalModalProps> = ({
         amount: numAmount,
         notes: notes.trim() || undefined,
         referenceNo: referenceNo.trim() || undefined,
+        loanReferenceId: loanReferenceId || undefined,
         performedBy: currentUserName || 'Owner',
         date: date ? new Date(date).toISOString() : new Date().toISOString(),
       });
@@ -222,6 +243,30 @@ export const OwnerWithdrawalModal: React.FC<OwnerWithdrawalModalProps> = ({
               </button>
             </div>
           </div>
+
+          {/* Loan picker (repayment mode) */}
+          {mode === 'repayment' && outstandingLoans.length > 0 && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="font-bold text-slate-700 dark:text-slate-300">
+                  Settle Against Loan (optional)
+                </label>
+                <span className="text-[10px] text-slate-400">Links this repayment to the loan it pays back</span>
+              </div>
+              <select
+                value={loanReferenceId}
+                onChange={(e) => setLoanReferenceId(e.target.value)}
+                className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
+              >
+                <option value="">— General repayment (not tied to a specific loan) —</option>
+                {outstandingLoans.map((loan) => (
+                  <option key={loan.id} value={loan.id}>
+                    {loan.referenceNo || loan.id.slice(-6).toUpperCase()} · {new Date(loan.date).toLocaleDateString()} · {settings.currencySymbol}{loan.outstanding.toLocaleString(undefined, { maximumFractionDigits: 2 })} outstanding
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {/* Amount input */}
           <div>

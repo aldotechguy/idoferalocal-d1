@@ -11,6 +11,7 @@ import {
 import { PurchaseOrder, LiquidAccountType } from '../../types';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 
 interface ConfirmPlaceOrderModalProps {
   isOpen: boolean;
@@ -34,9 +35,9 @@ export const ConfirmPlaceOrderModal: React.FC<ConfirmPlaceOrderModalProps> = ({
     updateProduct,
     changeProductPrice,
     addNotification,
-    showToast,
   } = useApp();
   const { currentUser } = useAuth();
+  const { showToast } = useToast();
 
   const [paymentStatus, setPaymentStatus] = useState<'Unpaid' | 'Paid'>('Unpaid');
   const [paymentSource, setPaymentSource] = useState<LiquidAccountType>('Biz Account');

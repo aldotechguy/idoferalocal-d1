@@ -19,7 +19,7 @@ import {
   CheckCircle,
   Check,
   X,
-  MessageCircle,
+  Store,
   Edit3,
   History,
   Calendar,
@@ -35,11 +35,14 @@ import {
   UserPlus,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { Product, SaleItem, PaymentMethod, Customer, WhatsAppPreOrder, Sale } from '../../types';
+import { Product, SaleItem, PaymentMethod, Customer, Sale } from '../../types';
 import { ReceiptModal } from '../common/ReceiptModal';
 import { EditSaleModal } from '../sales/EditSaleModal';
 import { AddProductModal } from '../modals/AddProductModal';
 import { useAuth } from '../../context/AuthContext';
+import { useInteractions } from '../../context/InteractionContext';
+import { navigateStaff } from '../../hooks/useRoute';
+import { localIsoDate } from '../../shared/localDate';
 import { useToast } from '../../context/ToastContext';
 
 export const PosView: React.FC = () => {
@@ -55,13 +58,12 @@ export const PosView: React.FC = () => {
     deleteHeldOrder,
     deleteHeldOrderItem,
     clearAllHeldOrders,
-    whatsAppPreOrders,
-    convertPreOrderToSale,
     settings,
     pendingRepeatSale,
     clearPendingRepeatSale,
   } = useApp();
   const { currentUser, isPrivacyMode } = useAuth();
+  const { notify, confirm } = useInteractions();
   const { showToast } = useToast();
 
   const [showAddProductModal, setShowAddProductModal] = useState(false);
@@ -91,24 +93,29 @@ export const PosView: React.FC = () => {
     Cash: number;
     Card: number;
     'Mobile Transfer': number;
+    'Bank Transfer': number;
+    'Store Credit': number;
   }>({
     Cash: 0,
     Card: 0,
     'Mobile Transfer': 0,
+    'Bank Transfer': 0,
+    'Store Credit': 0,
   });
   const [activeReceiptSale, setActiveReceiptSale] = useState<any | null>(null);
   const [editingCompletedSale, setEditingCompletedSale] = useState<Sale | null>(null);
   const [showHeldModal, setShowHeldModal] = useState(false);
   const [expandedHeldOrderId, setExpandedHeldOrderId] = useState<string | null>(null);
-  const [showWhatsAppModal, setShowWhatsAppModal] = useState(false);
-  const [activePreOrderToFulfill, setActivePreOrderToFulfill] = useState<WhatsAppPreOrder | null>(null);
+  const [showHoldNameModal, setShowHoldNameModal] = useState(false);
   const [holdOrderName, setHoldOrderName] = useState('');
   const [qtyModalProduct, setQtyModalProduct] = useState<{ product: Product; currentQty: number } | null>(null);
   const [qtyInputVal, setQtyInputVal] = useState<string>('1');
   const [isBackdateMode, setIsBackdateMode] = useState(false);
   const [backdateDate, setBackdateDate] = useState(() => {
+    // datetime-local values are LOCAL; seeding from toISOString() (UTC) recorded
+    // the wrong instant by the UTC offset for users who left the field alone.
     const now = new Date();
-    return now.toISOString().slice(0, 16);
+    return localIsoDate(now) + 'T' + now.toTimeString().slice(0, 5);
   });
   const [hasDeliveryFee, setHasDeliveryFee] = useState<boolean>(false);
   const [deliveryFeeInput, setDeliveryFeeInput] = useState<string>('');
@@ -210,7 +217,6 @@ export const PosView: React.FC = () => {
     setActiveReceiptSale(null);
     setEditingCompletedSale(null);
     setResumedOrderMeta(null);
-    setActivePreOrderToFulfill(null);
 
     clearPendingRepeatSale();
   }, [pendingRepeatSale, products, customers, clearPendingRepeatSale]);
@@ -219,12 +225,12 @@ export const PosView: React.FC = () => {
     if (e) e.preventDefault();
     const price = parseFloat(clearanceAmount);
     if (isNaN(price) || price <= 0) {
-      alert('Please enter a valid clearance sale amount greater than 0.');
+      notify('Please enter a valid clearance sale amount greater than 0.', 'Invalid amount');
       return;
     }
     const qty = parseInt(clearanceQty, 10) || 1;
     if (qty <= 0) {
-      alert('Please enter a valid quantity of at least 1.');
+      notify('Please enter a valid quantity of at least 1.', 'Invalid quantity');
       return;
     }
     const cost = parseFloat(clearanceCostPrice) || 0;
@@ -254,18 +260,26 @@ export const PosView: React.FC = () => {
     setIsClearanceSaleOpen(false);
   };
 
-  const categories = ['All', ...Array.from(new Set(products.map((p) => p.category)))];
+  const categories = useMemo(
+    () => ['All', ...Array.from(new Set(products.map((p) => p.category)))],
+    [products],
+  );
 
   const productSalesFrequency = useMemo(() => {
     const frequency = new Map<string, number>();
     sales.forEach((sale) => {
-      if (sale.status === 'Cancelled') return;
-      sale.items.forEach((item) => frequency.set(item.productId, (frequency.get(item.productId) || 0) + item.quantity));
+      // Refunded / partially-refunded / draft / held sales must not inflate a
+      // product's realised sales velocity. (There is no 'Cancelled' status in
+      // the SaleStatus union; that guard was dead code.)
+      if (sale.status === 'Refunded' || sale.status === 'Partially Refunded' || sale.status === 'Draft' || sale.status === 'Held') return;
+      (sale.items || []).forEach((item) => frequency.set(item.productId, (frequency.get(item.productId) || 0) + (Number(item.quantity) || 0)));
     });
     return frequency;
   }, [sales]);
 
-  const filteredProducts = products.filter((p) => {
+  // Full catalog filter + ranking, memoized: this used to run on every render
+  // of a screen whose state changes on every keystroke and cart edit.
+  const filteredProducts = useMemo(() => products.filter((p) => {
     if (!p) return false;
     const q = (searchQuery || '').toLowerCase();
     const matchesSearch =
@@ -274,7 +288,8 @@ export const PosView: React.FC = () => {
       (p.barcode || '').toLowerCase().includes(q);
     const matchesCategory = selectedCategory === 'All' || p.category === selectedCategory;
     return matchesSearch && matchesCategory && p.status !== 'Archived';
-  }).sort((a, b) => (productSalesFrequency.get(b.id) || 0) - (productSalesFrequency.get(a.id) || 0));
+  }).sort((a, b) => (productSalesFrequency.get(b.id) || 0) - (productSalesFrequency.get(a.id) || 0)),
+  [products, searchQuery, selectedCategory, productSalesFrequency]);
 
   const toggleUseRetailPrice = (productId: string) => {
     const product = products.find((p) => p.id === productId);
@@ -300,7 +315,7 @@ export const PosView: React.FC = () => {
 
   const addToCart = (product: Product) => {
     if (!isBackdateMode && product.currentStock <= 0) {
-      alert(`${product.name} is out of stock!`);
+      notify(`${product.name} is out of stock.`, 'Product unavailable', 'warning');
       return;
     }
 
@@ -309,7 +324,7 @@ export const PosView: React.FC = () => {
       if (existing) {
         const newQty = existing.quantity + 1;
         if (!isBackdateMode && newQty > product.currentStock) {
-          alert(`Cannot add more. Current stock limit is ${product.currentStock}.`);
+          notify(`Current stock limit is ${product.currentStock}.`, 'Stock limit reached', 'warning');
           return prevCart;
         }
         // Auto wholesale check
@@ -479,7 +494,7 @@ export const PosView: React.FC = () => {
           const newQty = item.quantity + delta;
           if (newQty <= 0) return null;
           if (!isClearanceItem && product && !isBackdateMode && newQty > product.currentStock) {
-            alert(`Stock limit reached (${product.currentStock} ${product.unit}).`);
+            notify(`Maximum available stock is ${product.currentStock} ${product.unit}.`, 'Stock limit reached', 'warning');
             return item;
           }
           if (isClearanceItem) {
@@ -535,7 +550,7 @@ export const PosView: React.FC = () => {
 
     let finalQty = targetQty;
     if (!isClearanceItem && product && !isBackdateMode && finalQty > product.currentStock) {
-      alert(`Stock limit reached. Maximum available stock is ${product.currentStock} ${product.unit}.`);
+      notify(`Maximum available stock is ${product.currentStock} ${product.unit}.`, 'Stock limit reached', 'warning');
       finalQty = product.currentStock;
     }
 
@@ -625,12 +640,17 @@ export const PosView: React.FC = () => {
   const tax = noTax ? 0 : Math.round(((subtotal - discountAmount) * (settings.taxRatePct / 100)) * 100) / 100;
   const deliveryFee = hasDeliveryFee ? (parseFloat(deliveryFeeInput) || 0) : 0;
   const baseGrandTotal = Math.max(0, Math.round((subtotal - discountAmount + tax + deliveryFee) * 100) / 100);
+  // Store credit applied toward the total. This value is passed unchanged to
+  // processSale, which re-derives `totalAmount = baseTotal - validOverageApplied`.
+  // Both clamp to the customer's live overage balance, so the till's displayed
+  // `grandTotal` and the recorded sale total stay in lockstep.
   const overageApplied = applyOverage && customerOverage > 0
     ? Math.min(customerOverage, baseGrandTotal)
     : 0;
   const grandTotal = Math.max(0, Math.round((baseGrandTotal - overageApplied) * 100) / 100);
 
   const totalSplitPaid: number = (Object.values(splitAmounts) as number[]).reduce((a: number, b: number) => a + b, 0);
+  const isSplitShort = paymentMethod === 'Split' && totalSplitPaid + 0.005 < grandTotal;
   const remainingToSplit: number = Math.max(0, Math.round((grandTotal - totalSplitPaid) * 100) / 100);
   const splitChange: number = Math.max(0, Math.round((totalSplitPaid - grandTotal) * 100) / 100);
 
@@ -643,60 +663,12 @@ export const PosView: React.FC = () => {
           Cash: half,
           Card: Math.max(0, Math.round((grandTotal - half) * 100) / 100),
           'Mobile Transfer': 0,
+          'Bank Transfer': 0,
+          'Store Credit': 0,
         });
       }
       setShowSplitModal(true);
     }
-  };
-
-  const handleImportWhatsAppOrderToCart = (preOrder: WhatsAppPreOrder) => {
-    const mappedItems: SaleItem[] = preOrder.items.map((item) => {
-      const match = products.find(
-        (p) =>
-          (item.productId && p.id === item.productId) ||
-          (item.sku && p.sku === item.sku) ||
-          (item.productName && p.name && p.name.toLowerCase() === item.productName.toLowerCase())
-      );
-
-      const meetsWholesale = match ? item.quantity >= match.minWholesaleQty : Boolean(item.isWholesale);
-      const useRP = Boolean(item.useRetailPrice);
-      const unitPrice = useRP ? (match ? match.retailPrice : item.unitPrice) : item.unitPrice;
-
-      return {
-        productId: match ? match.id : 'prod-gen-' + Date.now(),
-        productName: match ? match.name : item.productName,
-        sku: match ? match.sku : item.sku || 'N/A',
-        quantity: item.quantity,
-        unitPrice,
-        costPrice: match ? match.costPrice : item.unitPrice * 0.6,
-        total: item.quantity * unitPrice,
-        isWholesale: meetsWholesale && !useRP,
-        useRetailPrice: useRP,
-      };
-    });
-
-    setCart(mappedItems);
-    setDiscountAmount(preOrder.discount || 0);
-    setNoTax(true); // WhatsApp Pre-Orders are tax exempt
-    if (preOrder.deliveryFee && preOrder.deliveryFee > 0) {
-      setHasDeliveryFee(true);
-      setDeliveryFeeInput(preOrder.deliveryFee.toString());
-    } else {
-      setHasDeliveryFee(false);
-      setDeliveryFeeInput('0');
-    }
-
-    const matchCust = customers.find(
-      (c) =>
-        (preOrder.customerPhone && c.phone && c.phone.replace(/\D/g, '') === preOrder.customerPhone.replace(/\D/g, '')) ||
-        (preOrder.customerName && c.name && c.name.toLowerCase() === preOrder.customerName.toLowerCase())
-    );
-    if (matchCust) {
-      setSelectedCustomer(matchCust);
-    }
-
-    setActivePreOrderToFulfill(preOrder);
-    setShowWhatsAppModal(false);
   };
 
   const handleCheckout = (customPaid?: number, customNotes?: string) => {
@@ -715,7 +687,36 @@ export const PosView: React.FC = () => {
       paid = totalSplitPaid;
     }
 
+    // A split that does not cover the total silently recorded the shortfall as
+    // customer debt (paid < total) with no warning at the till. Hold the sale
+    // and send the cashier back to the split amounts unless the difference is
+    // meant to be credit, which the explicit credit-sale path already covers.
+    if (
+      paymentMethod === 'Split' &&
+      customPaid === undefined &&
+      !customNotes &&
+      totalSplitPaid + 0.005 < grandTotal
+    ) {
+      notify(
+        `Split payments total ${settings.currencySymbol}${totalSplitPaid.toFixed(2)} but the sale total is ${settings.currencySymbol}${grandTotal.toFixed(2)}. Add the missing amount, or use the credit sale option to record the balance as debt.`,
+        'Split payment incomplete',
+        'error',
+      );
+      setShowSplitModal(true);
+      return;
+    }
+
     const isWholesaleOrder = cart.some((i) => i.isWholesale);
+
+    // Credit Sale: the customer is to be charged to their account, not paid at
+    // the till. Recording `paid = grandTotal` here (the previous behaviour)
+    // silently booked the sale as fully paid and never touched the customer's
+    // outstanding ledger — so the in-app "credit/debt" feature never posted debt.
+    // Force zero paid so `processSale` posts the full total as an outstanding
+    // balance. Credit mode already requires a selected customer.
+    if (isCreditSaleMode && activeCustomer) {
+      paid = 0;
+    }
 
     let customCreatedAt: string | undefined = undefined;
     let isHistoricalSale: boolean | undefined = undefined;
@@ -739,22 +740,7 @@ export const PosView: React.FC = () => {
         : `Resumed from Held Order "${resumedOrderMeta.name}" (Held at ${formattedDT})`;
     }
 
-    let completedSale;
-    if (activePreOrderToFulfill) {
-      try {
-        completedSale = convertPreOrderToSale(
-          activePreOrderToFulfill.id,
-          paymentMethod,
-          currentUser?.displayName || 'Sales Clerk',
-          notesToSave || 'Fulfill via POS Checkout',
-          undefined,
-          paymentMethod === 'Split' ? { ...splitAmounts } : undefined
-        );
-      } catch (err) {
-        return;
-      }
-    } else {
-      completedSale = processSale(
+    const completedSale = processSale(
         cart,
         activeCustomer,
         discountAmount,
@@ -773,7 +759,6 @@ export const PosView: React.FC = () => {
         isHistoricalSale,
         overageApplied
       );
-    }
 
     if (!completedSale?.isHistorical && !isBackdateMode) {
       setActiveReceiptSale(completedSale);
@@ -792,15 +777,25 @@ export const PosView: React.FC = () => {
       Cash: 0,
       Card: 0,
       'Mobile Transfer': 0,
+      'Bank Transfer': 0,
+      'Store Credit': 0,
     });
     setShowSplitModal(false);
-    setActivePreOrderToFulfill(null);
   };
 
   const handleHoldCurrentCart = () => {
     if (cart.length === 0) return;
-    const name = prompt('Enter a label to identify this held order:', `Hold #${heldOrders.length + 1}`) || `Hold #${heldOrders.length + 1}`;
+    // window.prompt is blocked/unreliable in some installed PWA contexts and
+    // breaks the app's modal interaction pattern; use an in-app dialog instead.
+    setHoldOrderName(`Hold #${heldOrders.length + 1}`);
+    setShowHoldNameModal(true);
+  };
+
+  const confirmHoldOrder = () => {
+    const name = holdOrderName.trim() || `Hold #${heldOrders.length + 1}`;
     holdOrder(name, cart, selectedCustomer?.id);
+    setShowHoldNameModal(false);
+    setHoldOrderName('');
     setCart([]);
     setSelectedCustomer(null);
     setResumedOrderMeta(null);
@@ -836,15 +831,13 @@ export const PosView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          {whatsAppPreOrders.filter((o) => o.status !== 'Completed' && o.status !== 'Cancelled').length > 0 && (
-            <button
-              onClick={() => setShowWhatsAppModal(true)}
-              className="flex items-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs shadow-xs transition-colors"
-            >
-              <MessageCircle className="w-4 h-4" />
-              <span>WhatsApp Orders ({whatsAppPreOrders.filter((o) => o.status !== 'Completed' && o.status !== 'Cancelled').length})</span>
-            </button>
-          )}
+          <button
+            onClick={() => navigateStaff('mall-orders')}
+            className="flex items-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs shadow-xs transition-colors"
+          >
+            <Store className="w-4 h-4" />
+            <span>Mall Orders</span>
+          </button>
 
           {heldOrders.length > 0 && (
             <button
@@ -1403,7 +1396,7 @@ export const PosView: React.FC = () => {
                     <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-0.5">
                       Originally held at:{' '}
                       <strong className="font-extrabold text-amber-900 dark:text-amber-200">
-                        {new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        {new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}
                       </strong>{' '}
                       <span className="text-[10px] text-amber-600 dark:text-amber-500">
                         ({new Date(resumedOrderMeta.date).toLocaleDateString([], { month: 'short', day: 'numeric' })})
@@ -1437,7 +1430,7 @@ export const PosView: React.FC = () => {
                     }`}
                   >
                     <Check className={`w-3 h-3 ${resumedOrderMeta.useHeldTime ? 'opacity-100' : 'opacity-0'}`} />
-                    <span>Held Time ({new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})</span>
+                    <span>Held Time ({new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })})</span>
                   </button>
 
                   <button
@@ -1592,7 +1585,7 @@ export const PosView: React.FC = () => {
                   </div>
 
                   {/* Credit Sales Mode Custom Unit Price Controls (Admin / Manager) */}
-                  {isCreditSaleMode && (currentUser?.role === 'Administrator' || currentUser?.role === 'Manager') && (
+                  {isCreditSaleMode && (currentUser?.role === 'Administrator' || currentUser?.role === 'Store Manager') && (
                     <div className="p-2.5 bg-blue-50/90 dark:bg-blue-950/50 border border-blue-200/90 dark:border-blue-800/80 rounded-2xl space-y-1.5 animate-in fade-in duration-200">
                       <div className="flex items-center justify-between text-[10px] font-bold text-blue-950 dark:text-blue-200">
                         <span className="flex items-center gap-1 font-extrabold">
@@ -1924,15 +1917,15 @@ export const PosView: React.FC = () => {
                         <input
                           type="checkbox"
                           checked={isCreditSaleMode}
-                          disabled={currentUser?.role !== 'Administrator' && currentUser?.role !== 'Manager'}
+                          disabled={currentUser?.role !== 'Administrator' && currentUser?.role !== 'Store Manager'}
                           onChange={(e) => {
                             if (e.target.checked) {
-                              if (currentUser?.role !== 'Administrator' && currentUser?.role !== 'Manager') {
-                                alert('Credit Sales custom pricing is restricted to Administrators and Managers only.');
+                              if (currentUser?.role !== 'Administrator' && currentUser?.role !== 'Store Manager') {
+                                notify('Credit Sales custom pricing is restricted to Administrators and Store Managers.', 'Permission required', 'warning');
                                 return;
                               }
                               if (!selectedCustomer) {
-                                alert('Please select a Customer first before enabling Credit Sales mode.');
+                                notify('Select a customer before enabling Credit Sales mode.', 'Customer required', 'warning');
                                 return;
                               }
                               setIsCreditSaleMode(true);
@@ -1945,7 +1938,7 @@ export const PosView: React.FC = () => {
                         <CreditCard className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                         <span>Credit Sales</span>
                       </label>
-                      {currentUser?.role !== 'Administrator' && currentUser?.role !== 'Manager' ? (
+                      {currentUser?.role !== 'Administrator' && currentUser?.role !== 'Store Manager' ? (
                         <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400">
                           Admin/Manager Only
                         </span>
@@ -2220,7 +2213,7 @@ export const PosView: React.FC = () => {
                 </span>
                 <span className="font-extrabold">
                   {resumedOrderMeta.useHeldTime
-                    ? `Held Time (${new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
+                    ? `Held Time (${new Date(resumedOrderMeta.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })})`
                     : 'Current Checkout Time'}
                 </span>
               </div>
@@ -2234,9 +2227,11 @@ export const PosView: React.FC = () => {
             >
               <CheckCircle className="w-5 h-5" />
               <span>
-                Complete Sale ({settings.currencySymbol}{
-                  paymentMethod === 'Split' ? totalSplitPaid.toFixed(2) : grandTotal.toFixed(2)
-                })
+                {isSplitShort
+                  ? `Complete Sale (${settings.currencySymbol}${grandTotal.toFixed(2)})`
+                  : `Complete Sale (${settings.currencySymbol}${
+                      paymentMethod === 'Split' ? totalSplitPaid.toFixed(2) : grandTotal.toFixed(2)
+                    })`}
               </span>
             </button>
           </div>
@@ -2257,10 +2252,8 @@ export const PosView: React.FC = () => {
               <div className="flex items-center gap-2">
                 {heldOrders.length > 0 && (
                   <button
-                    onClick={() => {
-                      if (window.confirm('Are you sure you want to clear all held orders?')) {
-                        clearAllHeldOrders();
-                      }
+                    onClick={async () => {
+                      if (await confirm({ title: 'Clear held orders', message: 'Remove every held order from the queue? This cannot be undone.', confirmText: 'Clear all', variant: 'danger' })) clearAllHeldOrders();
                     }}
                     className="text-xs font-bold text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300 px-2 py-1 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-colors flex items-center gap-1"
                   >
@@ -2309,7 +2302,7 @@ export const PosView: React.FC = () => {
                               <Clock className="w-3 h-3 text-amber-500" />
                               <span>
                                 {new Date(h.date).toLocaleDateString([], { month: 'short', day: 'numeric' })},{' '}
-                                {new Date(h.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                {new Date(h.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}
                               </span>
                             </span>
                             {cust && (
@@ -2343,10 +2336,8 @@ export const PosView: React.FC = () => {
                           </button>
 
                           <button
-                            onClick={() => {
-                              if (window.confirm(`Delete held order "${h.name}"?`)) {
-                                deleteHeldOrder(h.id);
-                              }
+                            onClick={async () => {
+                              if (await confirm({ title: 'Delete held order', message: `Delete held order “${h.name}”?`, confirmText: 'Delete', variant: 'danger' })) deleteHeldOrder(h.id);
                             }}
                             className="p-1.5 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 rounded-xl text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition-colors"
                             title="Delete held order"
@@ -2387,75 +2378,6 @@ export const PosView: React.FC = () => {
                     </div>
                   );
                 })
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* WhatsApp Pre-Orders Import Modal for POS */}
-      {showWhatsAppModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl max-w-lg w-full p-6 space-y-4 my-auto max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-800 pb-3">
-              <div className="flex items-center gap-2">
-                <MessageCircle className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
-                <h3 className="font-bold text-slate-900 dark:text-white text-base">
-                  Active WhatsApp Pre-Orders
-                </h3>
-              </div>
-              <button
-                onClick={() => setShowWhatsAppModal(false)}
-                className="p-1 rounded-xl text-slate-400 hover:text-slate-600"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
-              {whatsAppPreOrders.filter((o) => o.status !== 'Completed' && o.status !== 'Cancelled').length === 0 ? (
-                <div className="p-6 text-center text-xs text-slate-400">
-                  No active WhatsApp pre-orders ready for checkout.
-                </div>
-              ) : (
-                whatsAppPreOrders
-                  .filter((o) => o.status !== 'Completed' && o.status !== 'Cancelled')
-                  .map((order) => (
-                    <div
-                      key={order.id}
-                      className="p-3.5 bg-slate-50 dark:bg-slate-800/80 rounded-2xl border border-slate-200/80 dark:border-slate-700 flex flex-col gap-2"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <span className="font-mono font-bold text-xs text-slate-900 dark:text-white">
-                            {order.preOrderNo}
-                          </span>
-                          <span className="ml-2 text-xs font-semibold text-slate-700 dark:text-slate-300">
-                            {order.customerName} ({order.customerPhone})
-                          </span>
-                        </div>
-                        <span className="text-xs font-black text-emerald-600 dark:text-emerald-400 font-mono">
-                          {settings.currencySymbol}{order.totalAmount.toFixed(2)}
-                        </span>
-                      </div>
-
-                      <div className="text-[11px] text-slate-500">
-                        {order.items.map((i) => `${i.quantity}x ${i.productName}`).join(', ')}
-                      </div>
-
-                      <div className="flex items-center justify-between pt-1">
-                        <span className="text-[10px] font-bold text-slate-400">
-                          Status: {order.status}
-                        </span>
-                        <button
-                          onClick={() => handleImportWhatsAppOrderToCart(order)}
-                          className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition-all"
-                        >
-                          Load into POS Cart
-                        </button>
-                      </div>
-                    </div>
-                  ))
               )}
             </div>
           </div>
@@ -2837,6 +2759,64 @@ export const PosView: React.FC = () => {
               >
                 <CheckCircle className="w-4 h-4" />
                 <span>Confirm Quantity</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hold Order Label Modal (replaces window.prompt) */}
+      {showHoldNameModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-150">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl max-w-md w-full p-6 space-y-4 my-auto max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-amber-100 dark:bg-amber-950/70 text-amber-600 dark:text-amber-400 rounded-2xl">
+                  <Pause className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-slate-900 dark:text-white text-base">Hold Current Order</h3>
+                  <p className="text-[11px] text-slate-500 font-medium">Label this order so you can find it in the held queue.</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowHoldNameModal(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="hold-order-label" className="text-xs font-bold text-slate-600 dark:text-slate-300">Label</label>
+              <input
+                id="hold-order-label"
+                type="text"
+                autoFocus
+                value={holdOrderName}
+                onChange={(e) => setHoldOrderName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') confirmHoldOrder(); }}
+                placeholder={`Hold #${heldOrders.length + 1}`}
+                className="w-full px-3 py-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium text-slate-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:outline-none"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => setShowHoldNameModal(false)}
+                className="px-4 py-2 text-xs font-bold text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded-xl"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmHoldOrder}
+                className="px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white font-extrabold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5"
+              >
+                <Pause className="w-4 h-4" />
+                <span>Hold Order</span>
               </button>
             </div>
           </div>

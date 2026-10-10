@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useMemo } from 'react';
 import { useAuth } from './AuthContext';
+import { catalogStatus } from '../shared/productStatus';
+import { syncMallOrderFromPos } from '../shared/posMallSync';
 import {
   Product,
   Customer,
@@ -51,11 +53,18 @@ import {
   INITIAL_MONEY_MOVEMENTS,
 } from '../data/initialData';
 import { saveDocument, removeDocument } from '../firebase/services';
-import { subscribeTabSync, markIdDeleted } from '../firebase/syncManager';
+import { subscribeTabSync } from '../firebase/services';
 import { useToast } from './ToastContext';
-import { getAllItems, putManyItems, replaceStoreItems, putItem, clearStore, deleteItem, writeD1SnapshotToIndexedDB } from '../db/indexedDB';
+import { getAllItems, putManyItems, replaceStoreItems, putItem, clearStore, deleteItem, writeD1SnapshotToIndexedDB, type StoreName } from '../db/indexedDB';
 import { initializeD1Storage, queueD1Snapshot, pullLatestFromD1, type D1Snapshot } from '../services/d1StorageService';
 import { removeLegacyBusinessStorage, safeSetLocalStorage } from '../utils/localStorage';
+import {
+  customerDeleteGuard,
+  settleCustomerBalance,
+  loyaltyPointsForAmount,
+  refundCustomerMetrics,
+  type LedgerSale,
+} from '../shared/customerLedger';
 
 const isAutoSyncLog = (log: any): boolean => {
   if (!log) return false;
@@ -163,7 +172,7 @@ interface AppContextType {
   heldOrders: { id: string; name: string; items: SaleItem[]; customerId?: string; date: string }[];
 
   // Product actions
-  addProduct: (p: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>) => Product;
+  addProduct: (p: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>) => Product | null;
   updateProduct: (id: string, p: Partial<Product>, reason?: string) => void;
   deleteProduct: (id: string) => void;
   archiveProduct: (id: string) => void;
@@ -237,7 +246,7 @@ interface AppContextType {
     },
     performedBy?: string,
     isSuperAdminOverride?: boolean
-  ) => void;
+  ) => boolean;
   deleteSale: (saleId: string, performedBy?: string) => void;
   reconcileHistoricalDeliveryExpenses: (salesList?: Sale[], expensesList?: Expense[]) => { fixedCount: number };
   purgeHistoricalMoneyMovements: () => { purgedCount: number };
@@ -300,7 +309,7 @@ interface AppContextType {
   deletePurchaseOrder: (poId: string, performedBy: string) => void;
 
   // Expense actions
-  addExpense: (exp: Omit<Expense, 'id' | 'createdAt'> & { createdAt?: string }) => void;
+  addExpense: (exp: Omit<Expense, 'id' | 'createdAt'> & { createdAt?: string }, silent?: boolean) => string;
   deleteExpense: (id: string) => void;
 
   // WhatsApp Pre-Orders actions
@@ -354,7 +363,7 @@ interface AppContextType {
     subtype?: OwnerWithdrawalSubtype,
     notes?: string,
     performedBy?: string
-  ) => void;
+  ) => string;
   recordOwnerRepayment: (
     paramsOrDestination: RecordOwnerRepaymentParams | LiquidAccountType,
     amount?: number,
@@ -438,75 +447,86 @@ const sortRecordsLifo = <T extends { id?: unknown; createdAt?: string; date?: st
     return String(b.id || '').localeCompare(String(a.id || ''), undefined, { numeric: true });
   });
 
+/**
+ * Legacy localStorage boot read. These keys are duplicated into IndexedDB and
+ * deleted after the first successful boot, but they are still read during the
+ * very first render — where an unparsable value used to throw inside the
+ * useState initializer and take the whole app shell down before the
+ * ErrorBoundary could recover. A corrupt key now degrades to the fallback.
+ */
+const readLegacyCollection = <T,>(key: string, fallback: T[]): T[] => {
+  if (typeof localStorage === 'undefined') return fallback;
+  try {
+    const saved = localStorage.getItem(key);
+    if (!saved) return fallback;
+    const parsed = JSON.parse(saved);
+    return Array.isArray(parsed) ? (parsed as T[]) : fallback;
+  } catch (e) {
+    console.warn(`Ignoring unreadable legacy storage for ${key}:`, e);
+    return fallback;
+  }
+};
+
+
+/**
+ * Debounce for the IndexedDB business-collection mirror. Coalesces the burst of
+ * state changes a single POS action produces into one write per collection.
+ */
+const MIRROR_DEBOUNCE_MS = 300;
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { currentUser } = useAuth();
+  const { currentUser, loading: authLoading } = useAuth();
   const isClearedBoot = typeof window !== 'undefined' && localStorage.getItem('idofera_cleared_empty') === 'true';
   const isInitialBootRef = useRef(false);
   const [isStorageReady, setIsStorageReady] = useState(false);
   const [isD1Ready, setIsD1Ready] = useState(false);
   const d1InitializedForUserRef = useRef<string | null>(null);
   const isApplyingD1Ref = useRef(false);
+  /**
+   * IndexedDB mirror gate. Every business collection has an effect that rewrites
+   * the WHOLE store whenever the collection changes. On launch the collections
+   * are read back OUT of IndexedDB (and a D1 restore already wrote them through
+   * writeD1SnapshotToIndexedDB), so those effects rewrote every store with the
+   * data that was just read — pure write amplification on every start. The gate
+   * arms only after the boot commit lands and lets a D1 apply through untouched;
+   * ordinary edits still mirror, and they also write their own record via
+   * saveDocument/putItem.
+   */
+  const mirrorArmedRef = useRef(false);
+  const mirrorReady = () => isStorageReady && mirrorArmedRef.current && !isApplyingD1Ref.current;
+  /** store -> latest value still owed a debounced IndexedDB write. */
+  const pendingMirrors = useRef(new Map<StoreName, { id: string }[]>());
 
-  const [products, setProducts] = useState<Product[]>(() => {
-    const saved = localStorage.getItem('idofera_products');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_PRODUCTS);
-    return sanitizeUniqueIds(items, 'prod');
-  });
+  const [products, setProducts] = useState<Product[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<Product>('idofera_products', isClearedBoot ? [] : INITIAL_PRODUCTS), 'prod'));
 
-  const [customers, setCustomers] = useState<Customer[]>(() => {
-    const saved = localStorage.getItem('idofera_customers');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_CUSTOMERS);
-    return sanitizeUniqueIds(items, 'cust');
-  });
+  const [customers, setCustomers] = useState<Customer[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<Customer>('idofera_customers', isClearedBoot ? [] : INITIAL_CUSTOMERS), 'cust'));
 
-  const [suppliers, setSuppliers] = useState<Supplier[]>(() => {
-    const saved = localStorage.getItem('idofera_suppliers');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_SUPPLIERS);
-    return sanitizeUniqueIds(items, 'sup');
-  });
+  const [suppliers, setSuppliers] = useState<Supplier[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<Supplier>('idofera_suppliers', isClearedBoot ? [] : INITIAL_SUPPLIERS), 'sup'));
 
-  const [sales, setSales] = useState<Sale[]>(() => {
-    const saved = localStorage.getItem('idofera_sales');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_SALES);
-    return sanitizeUniqueIds(items, 'sale');
-  });
+  const [sales, setSales] = useState<Sale[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<Sale>('idofera_sales', isClearedBoot ? [] : INITIAL_SALES), 'sale'));
 
-  const [purchases, setPurchases] = useState<PurchaseOrder[]>(() => {
-    const saved = localStorage.getItem('idofera_purchases');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_PURCHASES);
-    return sanitizeUniqueIds(items, 'po');
-  });
+  const [purchases, setPurchases] = useState<PurchaseOrder[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<PurchaseOrder>('idofera_purchases', isClearedBoot ? [] : INITIAL_PURCHASES), 'po'));
 
-  const [expenses, setExpenses] = useState<Expense[]>(() => {
-    const saved = localStorage.getItem('idofera_expenses');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_EXPENSES);
-    return sanitizeUniqueIds(items, 'exp');
-  });
+  const [expenses, setExpenses] = useState<Expense[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<Expense>('idofera_expenses', isClearedBoot ? [] : INITIAL_EXPENSES), 'exp'));
 
-  const [notifications, setNotifications] = useState<NotificationItem[]>(() => {
-    const saved = localStorage.getItem('idofera_notifications');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_NOTIFICATIONS);
-    return sanitizeUniqueIds(items, 'notif');
-  });
+  const [notifications, setNotifications] = useState<NotificationItem[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<NotificationItem>('idofera_notifications', isClearedBoot ? [] : INITIAL_NOTIFICATIONS), 'notif'));
 
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => {
-    const saved = localStorage.getItem('idofera_auditLogs');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_AUDIT_LOGS);
-    const sanitized = sanitizeUniqueIds(items, 'audit');
-    return sanitized.filter((log) => !isAutoSyncLog(log));
-  });
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<AuditLog>('idofera_auditLogs', isClearedBoot ? [] : INITIAL_AUDIT_LOGS), 'audit')
+      .filter((log) => !isAutoSyncLog(log)));
 
-  const [stockMovements, setStockMovements] = useState<StockMovement[]>(() => {
-    const saved = localStorage.getItem('idofera_stockMovements');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_STOCK_MOVEMENTS);
-    return sanitizeUniqueIds(items, 'mv');
-  });
+  const [stockMovements, setStockMovements] = useState<StockMovement[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<StockMovement>('idofera_stockMovements', isClearedBoot ? [] : INITIAL_STOCK_MOVEMENTS), 'mv'));
 
-  const [pricingHistory, setPricingHistory] = useState<PricingHistory[]>(() => {
-    const saved = localStorage.getItem('idofera_pricingHistory');
-    const items = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_PRICING_HISTORY);
-    return sanitizeUniqueIds(items, 'ph');
-  });
+  const [pricingHistory, setPricingHistory] = useState<PricingHistory[]>(() =>
+    sanitizeUniqueIds(readLegacyCollection<PricingHistory>('idofera_pricingHistory', isClearedBoot ? [] : INITIAL_PRICING_HISTORY), 'ph'));
 
   const [settings, setSettings] = useState<StoreSettings>(() => {
     const saved = localStorage.getItem('idofera_settings');
@@ -520,32 +540,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return sanitizeStoreSettings(INITIAL_SETTINGS);
   });
 
-  const [heldOrders, setHeldOrders] = useState<{ id: string; name: string; items: SaleItem[]; customerId?: string; date: string }[]>(() => {
-    const saved = localStorage.getItem('idofera_heldOrders');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [heldOrders, setHeldOrders] = useState<{ id: string; name: string; items: SaleItem[]; customerId?: string; date: string }[]>(() =>
+    readLegacyCollection<{ id: string; name: string; items: SaleItem[]; customerId?: string; date: string }>('idofera_heldOrders', []));
 
-  const [whatsAppPreOrders, setWhatsAppPreOrders] = useState<WhatsAppPreOrder[]>(() => {
-    const saved = localStorage.getItem('idofera_whatsAppPreOrders');
-    return saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_WHATSAPP_PREORDERS);
-  });
+  const [whatsAppPreOrders, setWhatsAppPreOrders] = useState<WhatsAppPreOrder[]>(() =>
+    readLegacyCollection<WhatsAppPreOrder>('idofera_whatsAppPreOrders', isClearedBoot ? [] : INITIAL_WHATSAPP_PREORDERS));
 
-  const [deliveryOrders, setDeliveryOrders] = useState<DeliveryOrder[]>(() => {
-    const saved = localStorage.getItem('idofera_deliveryOrders');
-    return saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_DELIVERY_ORDERS);
-  });
+  const [deliveryOrders, setDeliveryOrders] = useState<DeliveryOrder[]>(() =>
+    readLegacyCollection<DeliveryOrder>('idofera_deliveryOrders', isClearedBoot ? [] : INITIAL_DELIVERY_ORDERS));
 
-  const [moneyMovements, setMoneyMovements] = useState<MoneyMovement[]>(() => {
-    const saved = localStorage.getItem('idofera_moneyMovements');
-    const raw = saved ? JSON.parse(saved) : (isClearedBoot ? [] : INITIAL_MONEY_MOVEMENTS);
-    return sanitizeMoneyMovements(raw);
-  });
+  const [moneyMovements, setMoneyMovements] = useState<MoneyMovement[]>(() =>
+    sanitizeMoneyMovements(readLegacyCollection<MoneyMovement>('idofera_moneyMovements', isClearedBoot ? [] : INITIAL_MONEY_MOVEMENTS)));
 
   const treasuryBalances = useMemo<TreasuryBalances>(() => {
     let biz = 0;
     let cash = 0;
-    let ownerDrawings = 0;
-    let ownerLoans = 0;
+    let grossOwnerDrawings = 0;
+    let grossOwnerLoans = 0;
+    let ownerRepayments = 0;
 
     moneyMovements.forEach((mv) => {
       const amt = Number(mv.amount) || 0;
@@ -562,21 +574,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       if (mv.type === 'Owner Drawing') {
-        ownerDrawings += amt;
+        grossOwnerDrawings += amt;
         if (mv.subtype === 'Owner Loan') {
-          ownerLoans += amt;
+          grossOwnerLoans += amt;
         }
       } else if (mv.type === 'Owner Repayment') {
-        ownerLoans = Math.max(0, ownerLoans - amt);
+        // Loan repayments reverse the drawings/loans position. Sum-then-net
+        // keeps the KPI order-independent: a repayment recorded before its
+        // originating loan (a prepay toward a loan, or movements reordered by
+        // a sync pull) can no longer floor to zero mid-walk and lose the loan.
+        ownerRepayments += amt;
       }
     });
+
+    const netOwnerDrawings = Math.max(0, grossOwnerDrawings - ownerRepayments);
+    const netOwnerLoans = Math.max(0, grossOwnerLoans - ownerRepayments);
 
     return {
       bizAccountBalance: Number(biz.toFixed(2)),
       physicalCashBalance: Number(cash.toFixed(2)),
       totalLiquidCash: Number((biz + cash).toFixed(2)),
-      totalOwnerDrawings: Number(ownerDrawings.toFixed(2)),
-      totalOwnerLoans: Number(ownerLoans.toFixed(2)),
+      totalOwnerDrawings: Number(netOwnerDrawings.toFixed(2)),
+      totalOwnerLoans: Number(netOwnerLoans.toFixed(2)),
     };
   }, [moneyMovements]);
 
@@ -751,7 +770,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         else if (isCleared) setWhatsAppPreOrders([]);
         else await putManyItems('whatsAppPreOrders', whatsAppPreOrders);
 
-        if (idbDeliveries && idbDeliveries.length > 0) setDeliveryOrders(idbDeliveries);
+        if (idbDeliveries && idbDeliveries.length > 0) {
+          // Self-heal: strip auto-created orphan deliveries. A bug (now fixed) minted
+          // a Pending-Pickup, zero-fee, contact-less delivery on every invoice edit.
+          // Such shells are indistinguishable from noise and are removed on load.
+          const orphans = idbDeliveries.filter((d) =>
+            (d.status === 'Pending Pickup' || !d.status) &&
+            !d.isPickupConfirmed &&
+            (Number(d.deliveryFee) || 0) === 0 &&
+            !d.deliveryAddress &&
+            !d.customerPhone &&
+            !d.courierNotes
+          );
+          const cleanedDeliveries = idbDeliveries.filter((d) => !orphans.includes(d));
+          if (orphans.length > 0) {
+            orphans.forEach((o) => { deleteItem('deliveryOrders', o.id).catch(() => {}); });
+          }
+          setDeliveryOrders(cleanedDeliveries);
+        }
         else if (isCleared) setDeliveryOrders([]);
         else await putManyItems('deliveryOrders', deliveryOrders);
 
@@ -798,59 +834,56 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [applyCloudData]);
 
   // Keep business collections in IndexedDB instead of duplicating them in the
-  // much smaller localStorage quota.
+  // much smaller localStorage quota. Debounced to avoid write amplification and
+  // main-thread I/O thrashing during rapid state mutations.
+  //
+  // Each mirrored store registers its latest value in `pendingMirrors` for the
+  // duration of the debounce. That registry is what makes the unmount flush
+  // below possible: a bare `return () => clearTimeout(timer)` would CANCEL the
+  // pending write, so a logout or a route change inside the 300ms window would
+  // silently drop the last change from the offline mirror -- the one store whose
+  // entire job is to survive losing the connection.
+  // `T` is constrained to the record shape replaceStoreItems requires, so the
+  // helper stays type-safe for every collection it mirrors.
+  const useMirroredStore = <T extends { id: string }>(store: StoreName, value: T[], ready: boolean) => {
+    useEffect(() => {
+      if (!ready) return;
+      pendingMirrors.current.set(store, value);
+      const timer = setTimeout(() => {
+        pendingMirrors.current.delete(store);
+        replaceStoreItems(store, value).catch((e) => console.warn(`IndexedDB ${store} sync error:`, e));
+      }, MIRROR_DEBOUNCE_MS);
+      return () => clearTimeout(timer);
+    }, [store, ready, value]);
+  };
+
+  useMirroredStore('products', products, mirrorReady());
+  useMirroredStore('customers', customers, mirrorReady());
+  useMirroredStore('suppliers', suppliers, mirrorReady());
+  useMirroredStore('sales', sales, mirrorReady());
+  useMirroredStore('purchases', purchases, mirrorReady());
+  useMirroredStore('expenses', expenses, mirrorReady());
+  useMirroredStore('notifications', notifications, mirrorReady());
+  useMirroredStore('auditLogs', auditLogs, mirrorReady());
+  useMirroredStore('stockMovements', stockMovements, mirrorReady());
+  useMirroredStore('pricingHistory', pricingHistory, mirrorReady());
+  useMirroredStore('heldOrders', heldOrders, mirrorReady());
+  useMirroredStore('deliveryOrders', deliveryOrders, mirrorReady());
+
+  // Unmount flush. Empty deps: this runs ONLY when the provider goes away, not
+  // on every state change, so the debounce above is preserved.
   useEffect(() => {
-    if (!isStorageReady) return;
-    replaceStoreItems('products', products).catch((e) => console.warn('IndexedDB products sync error:', e));
-  }, [isStorageReady, products]);
+    const pending = pendingMirrors.current;
+    return () => {
+      for (const [store, value] of pending) {
+        replaceStoreItems(store, value).catch((e) => console.warn(`IndexedDB ${store} unmount flush error:`, e));
+      }
+      pending.clear();
+    };
+  }, []);
 
   useEffect(() => {
-    if (!isStorageReady) return;
-    replaceStoreItems('customers', customers).catch((e) => console.warn('IndexedDB customers sync error:', e));
-  }, [isStorageReady, customers]);
-
-  useEffect(() => {
-    if (!isStorageReady) return;
-    replaceStoreItems('suppliers', suppliers).catch((e) => console.warn('IndexedDB suppliers sync error:', e));
-  }, [isStorageReady, suppliers]);
-
-  useEffect(() => {
-    if (!isStorageReady) return;
-    replaceStoreItems('sales', sales).catch((e) => console.warn('IndexedDB sales sync error:', e));
-  }, [isStorageReady, sales]);
-
-  useEffect(() => {
-    if (!isStorageReady) return;
-    replaceStoreItems('purchases', purchases).catch((e) => console.warn('IndexedDB purchases sync error:', e));
-  }, [isStorageReady, purchases]);
-
-  useEffect(() => {
-    if (!isStorageReady) return;
-    replaceStoreItems('expenses', expenses).catch((e) => console.warn('IndexedDB expenses sync error:', e));
-  }, [isStorageReady, expenses]);
-
-  useEffect(() => {
-    if (!isStorageReady) return;
-    replaceStoreItems('notifications', notifications).catch((e) => console.warn('IndexedDB notifications sync error:', e));
-  }, [isStorageReady, notifications]);
-
-  useEffect(() => {
-    if (!isStorageReady) return;
-    replaceStoreItems('auditLogs', auditLogs).catch((e) => console.warn('IndexedDB auditLogs sync error:', e));
-  }, [isStorageReady, auditLogs]);
-
-  useEffect(() => {
-    if (!isStorageReady) return;
-    replaceStoreItems('stockMovements', stockMovements).catch((e) => console.warn('IndexedDB stockMovements sync error:', e));
-  }, [isStorageReady, stockMovements]);
-
-  useEffect(() => {
-    if (!isStorageReady) return;
-    replaceStoreItems('pricingHistory', pricingHistory).catch((e) => console.warn('IndexedDB pricingHistory sync error:', e));
-  }, [isStorageReady, pricingHistory]);
-
-  useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     safeSetLocalStorage('idofera_settings', JSON.stringify(settings));
     putItem('settings', { ...settings, id: 'store_settings' }).catch((e) => console.warn('IndexedDB settings sync error:', e));
     if (isInitialBootRef.current && !isApplyingD1Ref.current) {
@@ -858,18 +891,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [isStorageReady, settings]);
 
+  // Auto deduplicate any existing duplicate SKUs once, on the real catalog.
+  // The old empty-deps effect ran at mount against the useState initializer
+  // (legacy localStorage or seed rows) and never again, so duplicates that
+  // arrived with the IndexedDB/D1 data were never cleaned at all.
+  const hasDedupedSkusRef = useRef(false);
   useEffect(() => {
-    if (!isStorageReady) return;
-    replaceStoreItems('heldOrders', heldOrders).catch((e) => console.warn('IndexedDB heldOrders sync error:', e));
-  }, [isStorageReady, heldOrders]);
-
-  useEffect(() => {
-    if (!isStorageReady) return;
-    replaceStoreItems('deliveryOrders', deliveryOrders).catch((e) => console.warn('IndexedDB deliveryOrders sync error:', e));
-  }, [isStorageReady, deliveryOrders]);
-
-  // Auto deduplicate any existing duplicate SKUs on initial app load
-  useEffect(() => {
+    if (!isStorageReady || hasDedupedSkusRef.current) return;
     const skuCounts = new Map<string, number>();
     let hasDupes = false;
     products.forEach((p) => {
@@ -883,20 +911,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
+    hasDedupedSkusRef.current = true;
     if (hasDupes) {
       deduplicateProductsBySku();
     }
-  }, []);
+  }, [isStorageReady, products]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('whatsAppPreOrders', whatsAppPreOrders).catch((e) => console.warn('IndexedDB preorders sync error:', e));
   }, [isStorageReady, whatsAppPreOrders]);
 
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (!mirrorReady()) return;
     replaceStoreItems('moneyMovements', moneyMovements).catch((e) => console.warn('IndexedDB moneyMovements sync error:', e));
   }, [isStorageReady, moneyMovements]);
+
+  // Declared AFTER the mirror effects so it runs after them in the commit that
+  // flips isStorageReady: that commit's mirror pass is skipped, and every later
+  // collection change mirrors normally.
+  useEffect(() => {
+    if (isStorageReady) mirrorArmedRef.current = true;
+  }, [isStorageReady]);
+
+  /** Product writes collected by updateProduct and flushed once per commit. */
+  const pendingProductWritesRef = useRef<Map<string, Product>>(new Map());
+  useEffect(() => {
+    if (pendingProductWritesRef.current.size === 0) return;
+    const records = [...pendingProductWritesRef.current.values()];
+    pendingProductWritesRef.current.clear();
+    for (const record of records) saveDocument('products', record);
+  });
 
   const currentD1Snapshot = (): D1Snapshot => ({
     products,
@@ -926,9 +971,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Immediate sync from D1 on browser refresh / initial load
+  // Private business data must only load after server authentication completes.
   useEffect(() => {
-    if (!isStorageReady) return;
+    if (authLoading || !currentUser || !isStorageReady) return;
     if (d1BootSyncedRef.current) return;
     d1BootSyncedRef.current = true;
 
@@ -945,43 +990,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }, 250);
         }
       })
-      .catch((error) => console.warn('D1 startup read warning:', error))
-      .finally(() => setIsD1Ready(true));
-  }, [isStorageReady, applyCloudData]);
-
-  // If user logs in after boot and D1 hasn't synced yet, ensure initialization
-  useEffect(() => {
-    if (!currentUser) return;
-    if (!isStorageReady || d1BootSyncedRef.current) return;
-    d1BootSyncedRef.current = true;
-    initializeD1Storage(currentD1Snapshot())
-      .then(async (restored) => {
-        if (restored) {
-          isApplyingD1Ref.current = true;
-          applyCloudData(restored);
-          await writeD1SnapshotToIndexedDB(restored);
-          window.setTimeout(() => {
-            isApplyingD1Ref.current = false;
-          }, 250);
-        }
-      })
-      .catch((error) => console.warn('D1 user login sync warning:', error))
-      .finally(() => setIsD1Ready(true));
-  }, [currentUser, isStorageReady, applyCloudData]);
+      .then(() => setIsD1Ready(true))
+      .catch((error) => {
+        d1BootSyncedRef.current = false;
+        console.warn('D1 startup read warning:', error);
+      });
+  }, [authLoading, currentUser, isStorageReady, applyCloudData]);
 
   // D1 is the durable business-data source. IndexedDB remains the offline cache;
   // Firebase remains temporarily only for Google authentication.
   useEffect(() => {
-    if (!isD1Ready || isApplyingD1Ref.current) return;
+    if (authLoading || !currentUser || !isD1Ready || isApplyingD1Ref.current) return;
     queueD1Snapshot(currentD1Snapshot(), applyCloudData);
-  }, [isD1Ready, products, customers, suppliers, sales, purchases, expenses, notifications, auditLogs, stockMovements, pricingHistory, settings, heldOrders, whatsAppPreOrders, deliveryOrders, moneyMovements, applyCloudData]);
+  }, [authLoading, currentUser, isD1Ready, products, customers, suppliers, sales, purchases, expenses, notifications, auditLogs, stockMovements, pricingHistory, settings, heldOrders, whatsAppPreOrders, deliveryOrders, moneyMovements, applyCloudData]);
 
   const { showToast } = useToast();
   const [pendingRepeatSale, setPendingRepeatSale] = useState<Sale | null>(null);
 
   const repeatSaleInPos = React.useCallback((saleToRepeat: Sale) => {
     setPendingRepeatSale(saleToRepeat);
-    showToast('Transaction items and customer loaded into POS', 'success');
+    showToast({ title: 'Loaded into POS', message: 'Transaction items and customer loaded into POS.', type: 'success' });
   }, [showToast]);
 
   const clearPendingRepeatSale = React.useCallback(() => {
@@ -1048,19 +1076,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const clearAuditLogs = () => {
     setAuditLogs([]);
     clearStore('auditLogs').catch((e) => console.warn('IndexedDB clear auditLogs error:', e));
-    localStorage.removeItem('idofera_auditLogs');
   };
 
   // Product CRUD
   const addProduct = (p: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>) => {
-    const id = 'prod-' + Date.now();
+    // Reject a brand-new SKU that already exists — the storefront, the till and
+    // the dedupe key all treat SKU as the identity; letting a duplicate in at
+    // source is what forced the post-hoc "deduplicate" banner to exist.
+    const skuKey = p.sku ? String(p.sku).trim().toUpperCase() : '';
+    if (skuKey && products.some((x) => x.sku && String(x.sku).trim().toUpperCase() === skuKey)) {
+      showToast({ title: 'Duplicate SKU', message: `SKU "${p.sku}" already exists. Choose a unique SKU.`, type: 'error' });
+      return null;
+    }
+    // `'prod-' + Date.now()` collides when two products are created in the same
+    // millisecond (batch import / fast double-submit), silently overwriting one
+    // record in D1/IndexedDB. Use the same unique generator as sales/customers.
+    const id = generateUniqueId('prod');
     const now = new Date().toISOString();
     const newProd: Product = {
       ...p,
       id,
       createdAt: now,
       updatedAt: now,
-      status: p.currentStock <= 0 ? 'Out of Stock' : p.currentStock <= p.minimumStockLevel ? 'Low Stock' : 'Active',
+      status: catalogStatus(p.status),
     };
     setProducts((prev) => [newProd, ...prev]);
     saveDocument('products', newProd);
@@ -1070,27 +1108,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateProduct = (id: string, updates: Partial<Product>, reason?: string) => {
-    let targetName = 'Product';
+    const targetName = products.find((p) => p.id === id)?.name || 'Product';
     setProducts((prev) =>
       prev.map((prod) => {
         if (prod.id !== id) return prod;
-        targetName = prod.name;
         const updated = { ...prod, ...updates, updatedAt: new Date().toISOString() };
-
-        // Always enforce correct status based on stock level unless explicitly setting Archived
-        if (prod.status === 'Archived' && updates.status === undefined) {
-          updated.status = 'Archived';
-        } else if (updates.status === 'Archived') {
-          updated.status = 'Archived';
-        } else if (updated.currentStock <= 0) {
-          updated.status = 'Out of Stock';
-        } else if (updated.currentStock <= updated.minimumStockLevel) {
-          updated.status = 'Low Stock';
-        } else {
-          updated.status = 'Active';
-        }
-
-        saveDocument('products', updated);
+        updated.status = catalogStatus(updates.status ?? prod.status);
+        // Persisting straight from the updater doubled every write under
+        // StrictMode; computing the record from component state outside the
+        // updater drops a second update to the SAME product in one tick (the
+        // PO-receiving path updates cost price and then retail price). The
+        // composed record is collected here and flushed once per commit below.
+        pendingProductWritesRef.current.set(updated.id, updated);
         return updated;
       })
     );
@@ -1103,15 +1132,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setProducts((prev) => prev.filter((p) => p.id !== id));
     removeDocument('products', id);
     deleteItem('products', id).catch((e) => console.warn('IndexedDB product delete error:', e));
-    markIdDeleted('products', id);
 
-    // Clean up low stock notifications for this product
+    // Clean up low stock notifications for this product. Removals run outside
+    // the updater so a StrictMode double-invoke cannot delete twice.
     if (target) {
-      setNotifications((prev) => {
-        const removed = prev.filter((n) => n.message.includes(target.name));
-        removed.forEach((n) => removeDocument('notifications', n.id));
-        return prev.filter((n) => !n.message.includes(target.name));
-      });
+      const removed = notifications.filter((n) => n.message.includes(target.name));
+      removed.forEach((n) => removeDocument('notifications', n.id));
+      setNotifications((prev) => prev.filter((n) => !n.message.includes(target.name)));
     }
 
     logAudit('DELETE_PRODUCT', 'Product', id, 'User', target ? `Deleted product "${target.name}" (SKU: ${target.sku}).` : `Deleted product ${id}.`);
@@ -1120,21 +1147,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const archiveProduct = (id: string) => {
     const target = products.find((p) => p.id === id);
-    updateProduct(id, { status: 'Archived' }, 'Archived product from active catalog.');
+    // Archiving must also unlist the product from the storefront: `status` alone
+    // doesn't hide it unless the Mall read path filters archived, so clear the
+    // listing flag explicitly to guarantee it stops being browsable/purchasable.
+    updateProduct(id, { status: 'Archived', isMallListed: false }, 'Archived product from active catalog.');
     showToast({ title: 'Product Archived', message: target ? `"${target.name}" moved to archive repository.` : 'Product archived.', type: 'warning' });
   };
 
   const unarchiveProduct = (id: string) => {
     const target = products.find((p) => p.id === id);
     if (!target) return;
-    const restoredStatus = target.currentStock <= 0 ? 'Out of Stock' : target.currentStock <= target.minimumStockLevel ? 'Low Stock' : 'Active';
-    updateProduct(id, { status: restoredStatus }, 'Unarchived product and restored to active catalog.');
+    updateProduct(id, { status: 'Active' }, 'Unarchived product and restored to active catalog.');
     showToast({ title: 'Product Unarchived', message: `"${target.name}" restored to active inventory.`, type: 'success' });
   };
 
   const deduplicateProductsBySku = (): number => {
     const skuMap = new Map<string, Product>();
     const duplicatesToRemove: string[] = [];
+    // Survivors that need their stock/price reconciled back before we commit.
+    const mergedSurvivors = new Map<string, Product>();
+
+    const mergeInto = (keep: Product, remove: Product) => {
+      // Never let a duplicate's stock be silently dropped: fold it into the
+      // survivor (clamped ≥ 0 so a negative committed-escrow line can't double
+      // into the wrong direction). Prefer the record with the newer updatedAt
+      // for the price fields, since batch re-imports often carry updated costs.
+      const newerRemove =
+        (remove.updatedAt && (!keep.updatedAt || remove.updatedAt > keep.updatedAt));
+      return {
+        ...keep,
+        currentStock: Math.max(0, Number(keep.currentStock) || 0) + Math.max(0, Number(remove.currentStock) || 0),
+        costPrice: newerRemove && remove.costPrice != null ? remove.costPrice : keep.costPrice,
+        retailPrice: newerRemove && remove.retailPrice != null ? remove.retailPrice : keep.retailPrice,
+        wholesalePrice: newerRemove && remove.wholesalePrice != null ? remove.wholesalePrice : keep.wholesalePrice,
+        minimumStockLevel: Math.max(0, Number(keep.minimumStockLevel) || 0, newerRemove ? Number(remove.minimumStockLevel) || 0 : 0),
+      };
+    };
 
     products.forEach((prod) => {
       const skuKey = prod.sku ? prod.sku.trim().toUpperCase() : '';
@@ -1148,8 +1196,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (existing.id.startsWith('prod-imp-') && !prod.id.startsWith('prod-imp-')) {
           keep = prod;
           remove = existing;
-          skuMap.set(skuKey, keep);
         }
+        // Fold the dropped row's stock/prices into the survivor (best-effort).
+        const merged = mergeInto(keep, remove);
+        skuMap.set(skuKey, merged);
+        mergedSurvivors.set(merged.id, merged);
         duplicatesToRemove.push(remove.id);
       } else {
         skuMap.set(skuKey, prod);
@@ -1166,7 +1217,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       removeDocument('products', id);
     });
 
-    setProducts((prev) => prev.filter((p) => !duplicatesToRemove.includes(p.id)));
+    setProducts((prev) =>
+      prev
+        .filter((p) => !duplicatesToRemove.includes(p.id))
+        .map((p) => mergedSurvivors.get(p.id) || p)
+    );
+
+    // Persist reconciled survivors so their merged stock/price reaches D1. The
+    // pending-writes ref is flushed (saveDocument) once per commit by the
+    // effect above — same path updateProduct uses.
+    mergedSurvivors.forEach((survivor, id) => {
+      pendingProductWritesRef.current.set(id, { ...survivor, updatedAt: new Date().toISOString() });
+    });
 
     logAudit('DEDUPLICATE_PRODUCTS', 'Product', undefined, 'User', `Cleaned up ${removedCount} duplicate product record(s) using SKU key.`);
     showToast({
@@ -1206,7 +1268,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const existing = workingList[existingIdx];
           const newStock = item.currentStock !== undefined ? Number(item.currentStock) : existing.currentStock;
           const minStock = item.minimumStockLevel !== undefined ? Number(item.minimumStockLevel) : existing.minimumStockLevel;
-          const newStatus = newStock <= 0 ? 'Out of Stock' : newStock <= minStock ? 'Low Stock' : 'Active';
+          const newStatus = catalogStatus(item.status ?? existing.status);
 
           const updatedProduct: Product = {
             ...existing,
@@ -1256,7 +1318,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             currentStock: stockVal,
             minimumStockLevel: minStock,
             unit: item.unit || 'pcs',
-            status: stockVal <= 0 ? 'Out of Stock' : stockVal <= minStock ? 'Low Stock' : 'Active',
+            status: catalogStatus(item.status),
             createdAt: now,
             updatedAt: now,
           };
@@ -1469,7 +1531,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updates.promotionalPrice = newPrice;
     }
 
-    updateProduct(productId, updates, `Price change: ${priceType} updated to $${newPrice}`);
+    updateProduct(productId, updates, `Price change: ${priceType} updated to ${settings.currencySymbol}${newPrice}`);
 
     const ph: PricingHistory = {
       id: generateUniqueId('ph'),
@@ -1485,7 +1547,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setPricingHistory((prev) => [ph, ...prev]);
     saveDocument('pricingHistory', ph);
-    logAudit('PRICE_CHANGE', 'Product', productId, performedBy, `Changed ${priceType} price for ${prod.name} from $${oldPrice} to $${newPrice}. Reason: ${reason}`);
+    logAudit('PRICE_CHANGE', 'Product', productId, performedBy, `Changed ${priceType} price for ${prod.name} from ${settings.currencySymbol}${oldPrice} to ${settings.currencySymbol}${newPrice}. Reason: ${reason}`);
     showToast({ title: 'Price Updated', message: `Updated ${priceType} price for "${prod.name}" to ${settings.currencySymbol}${newPrice}.`, type: 'info' });
   };
 
@@ -1501,8 +1563,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const prod = products.find((p) => p.id === productId);
     if (!prod) return;
 
-    const previousStock = prod.currentStock;
+    const previousStock = Math.max(0, prod.currentStock);
     const newStock = Math.max(0, previousStock + qtyChange);
+    // Record the DELTA actually applied (clamped), not the attempted change:
+    // a "Damaged 10" on a 3-unit product must log -3, so the movement history
+    // still sums to the real stock change and stays truthful in the audit trail.
+    const appliedQty = newStock - previousStock;
 
     updateProduct(productId, { currentStock: newStock }, `Stock movement: ${type} (${qtyChange >= 0 ? '+' : ''}${qtyChange})`);
 
@@ -1511,7 +1577,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       productId,
       productName: prod.name,
       type,
-      quantity: Math.abs(qtyChange),
+      quantity: Math.abs(appliedQty),
       previousStock,
       newStock,
       referenceNo: `REF-${Math.floor(Math.random() * 89999 + 10000)}`,
@@ -1523,8 +1589,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setStockMovements((prev) => [mv, ...prev]);
     saveDocument('stockMovements', mv);
 
-    // Check low stock trigger notification
-    if (newStock <= prod.minimumStockLevel) {
+    // Low-stock trigger: only alert on a genuine TRANSITION into low/out — not on
+    // every subsequent reduction of an already-low item (which flooded the feed
+    // with a new "Low Stock Alert" per sale/loss).
+    const wasAboveThreshold = previousStock > prod.minimumStockLevel;
+    if (wasAboveThreshold && newStock <= prod.minimumStockLevel) {
       const notif: NotificationItem = {
         id: generateUniqueId('notif-stock'),
         title: newStock === 0 ? 'Out of Stock Alert' : 'Low Stock Alert',
@@ -1663,7 +1732,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (targetCustomer) {
       const outstanding = Math.max(0, Math.round((totalAmount - paidAmount) * 100) / 100);
-      const pointsEarned = Math.floor(totalAmount * (settings.pointsPerDollar || 0.01));
+      const pointsEarned = loyaltyPointsForAmount(totalAmount, settings.pointsPerDollar);
 
       setCustomers((prev) =>
         prev.map((c) => {
@@ -1904,7 +1973,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (found) {
       removeDocument('heldOrders', id);
       deleteItem('heldOrders', id).catch(() => {});
-      markIdDeleted('heldOrders', id);
       showToast({ title: 'Held Order Restored', message: `Restored order "${found.name}" to active checkout cart.`, type: 'info' });
     }
   };
@@ -1914,7 +1982,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setHeldOrders((prev) => prev.filter((h) => h.id !== id));
     removeDocument('heldOrders', id);
     deleteItem('heldOrders', id).catch(() => {});
-    markIdDeleted('heldOrders', id);
     showToast({ title: 'Held Order Deleted', message: found ? `Removed held order "${found.name}".` : 'Order deleted.', type: 'error' });
   };
 
@@ -1943,10 +2010,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     heldOrders.forEach((h) => {
       removeDocument('heldOrders', h.id).catch(() => {});
       deleteItem('heldOrders', h.id).catch(() => {});
-      markIdDeleted('heldOrders', h.id);
     });
     setHeldOrders([]);
-    localStorage.removeItem('idofera_heldOrders');
     clearStore('heldOrders').catch((e) => console.warn('IndexedDB clear heldOrders error:', e));
     showToast({ title: 'Held Queue Cleared', message: 'All held orders deleted.', type: 'error' });
   };
@@ -2156,49 +2221,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     if (targetCust) {
-      const pointsDeducted = Math.floor(
-        netRefundAmount * (settings.pointsPerDollar || 0.01)
-      );
-      let newBal = Number(targetCust.outstandingBalance) || 0;
-      let newOverage = Number(targetCust.overageBalance) || 0;
+      const originalPaid =
+        sale.paidAmount !== undefined ? sale.paidAmount : (sale.totalAmount || 0);
+      const unpaidOnSale = Math.max(0, (sale.totalAmount || 0) - originalPaid);
+      // The share of this refund that was still owed: refund value scaled by the
+      // invoice's unpaid ratio. This is what a returned-but-unpaid item must
+      // remove from the customer's balance (audit H1) - the old code only did it
+      // for a FULL refund and left phantom debt on partial returns.
+      const unpaidRatio = sale.totalAmount > 0 ? Math.min(1, unpaidOnSale / sale.totalAmount) : 0;
+      const refundedUnpaidPortion =
+        isFullyRefunded ? unpaidOnSale : Math.round(netRefundAmount * unpaidRatio * 100) / 100;
 
-      if (settlementMethod === 'Debt Reduction') {
-        const debtRelief = Math.min(newBal, netRefundAmount);
-        newBal = Math.max(0, newBal - debtRelief);
-      } else if (settlementMethod === 'Store Credit') {
-        newOverage = Math.round((newOverage + netRefundAmount) * 100) / 100;
-      }
-
-      // If customer had unpaid balance on this sale and settlement wasn't debt reduction,
-      // check if this refund offsets the remaining unpaid invoice portion
-      if (settlementMethod !== 'Debt Reduction') {
-        const originalPaid =
-          sale.paidAmount !== undefined ? sale.paidAmount : (sale.totalAmount || 0);
-        const unpaidOnSale = Math.max(0, (sale.totalAmount || 0) - originalPaid);
-        if (unpaidOnSale > 0 && isFullyRefunded) {
-          newBal = Math.max(0, newBal - unpaidOnSale);
-        }
-      }
-
-      const newCount = isFullyRefunded
-        ? Math.max(0, (Number(targetCust.purchaseHistoryCount) || 0) - 1)
-        : Number(targetCust.purchaseHistoryCount) || 0;
-      const newPoints = Math.max(
-        0,
-        (Number(targetCust.loyaltyPoints) || 0) - pointsDeducted
-      );
-      const newLtv = Math.max(
-        0,
-        Math.round(((Number(targetCust.lifetimeValue) || 0) - netRefundAmount) * 100) / 100
-      );
+      const result = refundCustomerMetrics({
+        customer: {
+          id: targetCust.id,
+          name: targetCust.name,
+          outstandingBalance: Number(targetCust.outstandingBalance) || 0,
+          overageBalance: Number(targetCust.overageBalance) || 0,
+          loyaltyPoints: Number(targetCust.loyaltyPoints) || 0,
+          lifetimeValue: Number(targetCust.lifetimeValue) || 0,
+          purchaseHistoryCount: Number(targetCust.purchaseHistoryCount) || 0,
+        },
+        refundAmount: netRefundAmount,
+        isFullyRefunded,
+        unpaidOnSale,
+        refundedUnpaidPortion,
+        overageAppliedOnSale: Math.max(0, Number(sale.overageApplied) || 0),
+        pointsRate: settings.pointsPerDollar,
+        settlementMethod: settlementMethod as 'Refund to Customer' | 'Debt Reduction' | 'Store Credit',
+      });
 
       const updatedCust: Customer = {
         ...targetCust,
-        outstandingBalance: newBal,
-        overageBalance: newOverage,
-        purchaseHistoryCount: newCount,
-        loyaltyPoints: newPoints,
-        lifetimeValue: newLtv,
+        outstandingBalance: result.outstandingBalance,
+        overageBalance: result.overageBalance,
+        purchaseHistoryCount: result.purchaseHistoryCount,
+        loyaltyPoints: result.loyaltyPoints,
+        lifetimeValue: result.lifetimeValue,
       };
       setCustomers((prev) =>
         prev.map((c) => (c.id === updatedCust.id ? updatedCust : c))
@@ -2277,7 +2336,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (isFullyRefunded) {
             const updatedPo: WhatsAppPreOrder = {
               ...po,
-              status: 'Approved',
+              status: 'Pending Review',
               convertedSaleId: undefined,
               convertedInvoiceNo: undefined,
               notes: po.notes
@@ -2341,6 +2400,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `${isFullyRefunded ? 'Full' : 'Partial'} refund ${refundNo} for sale ${sale.invoiceNo} (${settings.currencySymbol}${netRefundAmount.toFixed(2)}). Items returned: ${returnedItemsList.reduce((acc, it) => acc + it.quantity, 0)} units across ${returnedItemsList.length} products. Settlement: ${settlementMethod}. Reason: ${reason}`
     );
 
+    // Bridge: mirror the refund onto the Mall order so the buyer's tracking page
+    // flips to the refunded state and reflects the refunded total.
+    syncMallOrderFromPos(updatedSale, {
+      orderStatus: isFullyRefunded ? 'refunded' : 'processing',
+      paymentStatus: isFullyRefunded ? 'refunded' : 'paid',
+      paidAmount: Math.max(0, (Number(updatedSale.totalAmount) || 0) - (Number(updatedSale.totalRefunded) || 0)),
+    });
+
     showToast({
       title: isFullyRefunded ? 'Sale Fully Refunded' : 'Partial Return Processed',
       message: `${refundNo} processed (${settings.currencySymbol}${netRefundAmount.toFixed(2)} settled via ${settlementMethod}). Stock & customer ledger updated.`,
@@ -2382,7 +2449,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       matchingDeliveries.forEach((d) => {
         removeDocument('deliveryOrders', d.id);
         deleteItem('deliveryOrders', d.id).catch((e) => console.warn('IndexedDB del delete error:', e));
-        markIdDeleted('deliveryOrders', d.id);
       });
     }
 
@@ -2422,7 +2488,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       linkedExpenseIds.forEach((expId) => {
         removeDocument('expenses', expId);
         deleteItem('expenses', expId).catch((e) => console.warn('IndexedDB exp delete error:', e));
-        markIdDeleted('expenses', expId);
       });
     }
 
@@ -2434,7 +2499,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       targetCust = customers.find((c) => c.name && c.name.trim().toLowerCase() === sale.customerName.trim().toLowerCase());
     }
     if (targetCust) {
-      const pointsEarned = Math.floor((sale.totalAmount || 0) * (settings.pointsPerDollar || 0.01));
+      const pointsEarned = loyaltyPointsForAmount(sale.totalAmount || 0, settings.pointsPerDollar);
       const overpaidOnSale = sale.overageCreated !== undefined
         ? Number(sale.overageCreated) || 0
         : Math.max(0, existingPaid - (sale.totalAmount || 0));
@@ -2475,7 +2540,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
           const reverted: WhatsAppPreOrder = {
             ...po,
-            status: 'Approved',
+            status: 'Pending Review',
             convertedSaleId: undefined,
             convertedInvoiceNo: undefined,
             updatedAt: now,
@@ -2500,7 +2565,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSales((prev) => prev.filter((s) => s.id !== saleId));
     removeDocument('sales', saleId);
     deleteItem('sales', saleId).catch((e) => console.warn('IndexedDB sales delete error:', e));
-    markIdDeleted('sales', saleId);
 
     // 8. Cascade to Money Movements
     setMoneyMovements((prev) => {
@@ -2508,7 +2572,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       removed.forEach((m) => {
         removeDocument('moneyMovements', m.id);
         deleteItem('moneyMovements', m.id).catch(() => {});
-        markIdDeleted('moneyMovements', m.id);
       });
       return prev.filter((m) => m.referenceId !== saleId);
     });
@@ -2538,9 +2601,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     performedBy = 'Administrator',
     isSuperAdminOverride = false
-  ) => {
+  ): boolean => {
     const existing = sales.find((s) => s.id === saleId);
-    if (!existing) return;
+    // False = nothing was written. Callers use this to keep the editor open
+    // instead of closing it over a refused edit.
+    if (!existing) return false;
 
     const isHistorical =
       existing.isHistorical ||
@@ -2553,11 +2618,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         message: 'Real-time sales records cannot be edited by standard users. Super-Admin permissions are required to edit real-time records.',
         type: 'error',
       });
-      return;
+      return false;
+    }
+
+    // Gap A — the refund pipeline owns stock restore, refunds[], customer
+    // settlement and treasury. Flipping `status` here wrote a bare string that
+    // hid the invoice from revenue without any of that, so refund statuses
+    // can only arrive via refundSale (ProcessSaleRefundModal).
+    if (
+      updates.status !== undefined &&
+      (updates.status === 'Refunded' || updates.status === 'Partially Refunded') &&
+      updates.status !== existing.status
+    ) {
+      showToast({
+        title: 'Use the Refund Flow',
+        message: `Status cannot be changed to "${updates.status}" from Edit Invoice — process a refund instead so stock, customer ledger and treasury stay in sync.`,
+        type: 'error',
+      });
+      return false;
     }
 
     const now = new Date().toISOString();
-    const itemsList = updates.items || existing.items || [];
+    // Gap F — flipping Retail<->Wholesale only saved the flag while line
+    // prices stayed put, so totals were wrong until every line was manually
+    // repriced. Reprice catalogue lines from the price book on a type change;
+    // clearance / non-catalogue lines keep their custom amounts.
+    let itemsList = updates.items || existing.items || [];
+    if (updates.type !== undefined && updates.type !== existing.type) {
+      const nextType = updates.type;
+      itemsList = itemsList.map((line) => {
+        if (!line.productId || line.isClearance || line.productId.startsWith('clearance-')) return line;
+        const catalogue = products.find((p) => p.id === line.productId);
+        if (!catalogue) return line;
+        const unitPrice = nextType === 'Wholesale' ? catalogue.wholesalePrice : catalogue.retailPrice;
+        return {
+          ...line,
+          unitPrice,
+          total: unitPrice * (Number(line.quantity) || 0),
+          isWholesale: nextType === 'Wholesale',
+        };
+      });
+      updates = { ...updates, items: itemsList };
+    }
     const subtotal = itemsList.reduce(
       (acc, item) => acc + (item.total ?? (item.unitPrice || 0) * (item.quantity || 1)),
       0
@@ -2589,10 +2691,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const finalCustomerName = updates.customerName !== undefined ? updates.customerName : existing.customerName;
 
+    // Gap E — paymentMethod is a plain select with no breakdown editor, so a
+    // stale breakdown survived `Split -> Cash` (day KPIs trusted it over the
+    // method) and `Cash -> Split` left no breakdown at all (KPIs fell back to
+    // notes-regex parsing). Keep the record honest: clear it off Split, and
+    // never invent one when entering Split without editor data.
+    const finalPaymentMethod = updates.paymentMethod !== undefined ? updates.paymentMethod : existing.paymentMethod;
+    const finalPaymentBreakdown = finalPaymentMethod === 'Split'
+      ? (updates.paymentBreakdown !== undefined ? updates.paymentBreakdown : existing.paymentBreakdown)
+      : undefined;
+
+    // Gap B — deliveryAddress/Phone/courierNotes/deliveryStatus/
+    // isPickupConfirmed are DeliveryOrder fields (updateSale's extended param
+    // type), not Sale fields. `...updates` spread them onto the saved sale
+    // blob/IndexedDB while saleToRows() has no columns for them, so the
+    // relational copy silently dropped them and a sync round-trip lost them.
+    // Strip them before building the sale; the §3 delivery cascade below is
+    // the only writer of those fields.
+    const {
+      deliveryAddress: deliveryOnlyAddress,
+      deliveryPhone: deliveryOnlyPhone,
+      courierNotes: deliveryOnlyCourierNotes,
+      deliveryStatus: deliveryOnlyStatus,
+      isPickupConfirmed: deliveryOnlyPickup,
+      ...saleUpdates
+    } = updates;
     const updatedSale: Sale = {
       ...existing,
-      ...updates,
+      ...saleUpdates,
       customerName: finalCustomerName,
+      paymentMethod: finalPaymentMethod,
+      paymentBreakdown: finalPaymentBreakdown,
       items: itemsList,
       subtotal,
       discount: disc,
@@ -2601,6 +2730,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       totalAmount: calculatedTotal,
       paidAmount: finalPaidAmount,
       overageCreated: newOverageCreated,
+      // The sync merge ranks copies by `updatedAt || _lastSyncedAt || createdAt`.
+      // Without this stamp an edit falls back to createdAt — which is deliberately
+      // preserved as the original transaction time — so the edited sale looks
+      // unedited and a D1 pull silently overwrites it. Siblings in this same
+      // cascade (delivery order, pre-order) already stamp their own updatedAt.
+      updatedAt: now,
     };
 
     // 1. Cascade to Inventory Stock: adjust quantity differences if items were modified (skip non-inventory clearance items)
@@ -2636,10 +2771,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    // 2. Save Sale to State & Persistence
+    // 2. Save Sale to State & Persistence.
+    // saveDocument owns this write: it stamps _lastSyncedAt (the sync merge's
+    // fallback clock) and marks the record dirty. A second bare putItem on the
+    // same key would commit after it without that stamp and win the race.
     setSales((prev) => prev.map((s) => (s.id === saleId ? updatedSale : s)));
     saveDocument('sales', updatedSale);
-    putItem('sales', updatedSale).catch((e) => console.warn('IndexedDB sales put error:', e));
 
     // 3. Cascade down to Delivery Order (deliveryOrders)
     let matchingDeliveryOrder = deliveryOrders.find(
@@ -2647,26 +2784,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
 
     let linkedExpenseId = matchingDeliveryOrder?.expenseId;
+    let deletedDeliveryOrderId: string | null = null;
 
     if (matchingDeliveryOrder) {
-      const updatedDelivery: DeliveryOrder = {
-        ...matchingDeliveryOrder,
-        deliveryFee: newFee,
-        customerName: finalCustomerName || matchingDeliveryOrder.customerName,
-        customerPhone: updates.deliveryPhone !== undefined ? updates.deliveryPhone : matchingDeliveryOrder.customerPhone,
-        deliveryAddress: updates.deliveryAddress !== undefined ? updates.deliveryAddress : matchingDeliveryOrder.deliveryAddress,
-        courierNotes: updates.courierNotes !== undefined ? updates.courierNotes : matchingDeliveryOrder.courierNotes,
-        status: updates.deliveryStatus !== undefined ? updates.deliveryStatus : matchingDeliveryOrder.status,
-        isPickupConfirmed: updates.isPickupConfirmed !== undefined ? updates.isPickupConfirmed : matchingDeliveryOrder.isPickupConfirmed,
-        items: itemsList.length > 0 ? itemsList : matchingDeliveryOrder.items,
-        updatedAt: now,
-      };
+      // Gap C — a fee edited to 0 kept a ₦0 orphan delivery order forever.
+      // Delete it and fall through so the expense branch below cleans up too.
+      if (newFee <= 0 && !deliveryOnlyStatus && !deliveryOnlyAddress && !deliveryOnlyPhone && !deliveryOnlyCourierNotes && !deliveryOnlyPickup) {
+        deletedDeliveryOrderId = matchingDeliveryOrder.id;
+        setDeliveryOrders((prev) => prev.filter((d) => d.id !== deletedDeliveryOrderId));
+        removeDocument('deliveryOrders', deletedDeliveryOrderId);
+        deleteItem('deliveryOrders', deletedDeliveryOrderId).catch((e) => console.warn('IndexedDB deliveryOrder delete error:', e));
+        linkedExpenseId = undefined;
+        matchingDeliveryOrder = undefined as unknown as DeliveryOrder;
+      } else {
+        const finalDeliveryCustomerId = updates.customerId !== undefined ? updates.customerId : matchingDeliveryOrder.customerId;
+        const finalPickupConfirmed = deliveryOnlyPickup !== undefined ? deliveryOnlyPickup : matchingDeliveryOrder.isPickupConfirmed;
+        const updatedDelivery: DeliveryOrder = {
+          ...matchingDeliveryOrder,
+          deliveryFee: newFee,
+          customerId: finalDeliveryCustomerId,
+          customerName: finalCustomerName || matchingDeliveryOrder.customerName,
+          customerPhone: deliveryOnlyPhone !== undefined ? deliveryOnlyPhone : matchingDeliveryOrder.customerPhone,
+          deliveryAddress: deliveryOnlyAddress !== undefined ? deliveryOnlyAddress : matchingDeliveryOrder.deliveryAddress,
+          courierNotes: deliveryOnlyCourierNotes !== undefined ? deliveryOnlyCourierNotes : matchingDeliveryOrder.courierNotes,
+          status: deliveryOnlyStatus !== undefined ? deliveryOnlyStatus : matchingDeliveryOrder.status,
+          isPickupConfirmed: finalPickupConfirmed,
+          // Gap C — pickup attribution was dropped: toggling confirm from the
+          // invoice editor never stamped/cleared by+at, so Deliveries showed
+          // "Confirmed" with no staff or timestamp.
+          pickupConfirmedBy: finalPickupConfirmed ? (matchingDeliveryOrder.pickupConfirmedBy || performedBy) : undefined,
+          pickupConfirmedAt: finalPickupConfirmed ? (matchingDeliveryOrder.pickupConfirmedAt || now) : undefined,
+          items: itemsList.length > 0 ? itemsList : matchingDeliveryOrder.items,
+          updatedAt: now,
+        };
 
-      setDeliveryOrders((prev) => prev.map((d) => (d.id === updatedDelivery.id ? updatedDelivery : d)));
-      saveDocument('deliveryOrders', updatedDelivery);
-      putItem('deliveryOrders', updatedDelivery).catch((e) => console.warn('IndexedDB deliveryOrder put error:', e));
-    } else if (newFee > 0) {
-      // If sale didn't have a delivery order previously, but now has a delivery fee > 0, auto-create one
+        setDeliveryOrders((prev) => prev.map((d) => (d.id === updatedDelivery.id ? updatedDelivery : d)));
+        saveDocument('deliveryOrders', updatedDelivery);
+        putItem('deliveryOrders', updatedDelivery).catch((e) => console.warn('IndexedDB deliveryOrder put error:', e));
+        matchingDeliveryOrder = updatedDelivery;
+      }
+    }
+    const hasMeaningfulDeliveryDetail = newFee > 0 ||
+      !!deliveryOnlyAddress ||
+      !!deliveryOnlyPhone ||
+      !!deliveryOnlyCourierNotes ||
+      (deliveryOnlyStatus !== undefined && deliveryOnlyStatus !== 'Pending Pickup') ||
+      !!deliveryOnlyPickup;
+    if (!matchingDeliveryOrder && !deletedDeliveryOrderId && hasMeaningfulDeliveryDetail) {
+      // If sale didn't have a delivery order previously, but now has dispatch
+      // detail (fee or address/phone/notes/status), auto-create one. Gap C —
+      // address/phone-only dispatch detail previously lived only on the sale
+      // blob (dropped by saleToRows), so it vanished on the next sync.
       const deliveryNo = `DEL-${Date.now().toString().slice(-6)}`;
       const newDel: DeliveryOrder = {
         id: generateUniqueId('del'),
@@ -2675,13 +2843,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         invoiceNo: updatedSale.invoiceNo,
         customerId: updatedSale.customerId,
         customerName: finalCustomerName || 'Customer',
-        customerPhone: updates.deliveryPhone || '',
-        deliveryAddress: updates.deliveryAddress || '',
-        courierNotes: updates.courierNotes || '',
+        customerPhone: deliveryOnlyPhone || '',
+        deliveryAddress: deliveryOnlyAddress || '',
+        courierNotes: deliveryOnlyCourierNotes || '',
         items: itemsList,
         deliveryFee: newFee,
-        status: updates.deliveryStatus || 'Pending Pickup',
-        isPickupConfirmed: updates.isPickupConfirmed || false,
+        status: deliveryOnlyStatus || 'Pending Pickup',
+        isPickupConfirmed: deliveryOnlyPickup || false,
+        pickupConfirmedBy: deliveryOnlyPickup ? performedBy : undefined,
+        pickupConfirmedAt: deliveryOnlyPickup ? now : undefined,
         notes: updatedSale.notes || '',
         createdBy: performedBy,
         createdAt: now,
@@ -2728,14 +2898,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (linkedExpense) {
       if (newFee > 0) {
-        // Update linked Logistics expense
+        // Update linked Logistics expense. Gap D — title/paidBy/method were
+        // frozen at creation and the live description used the pre-update
+        // delivery snapshot, so courier notes lagged one save behind.
+        const freshCourierNotes = deliveryOnlyCourierNotes !== undefined
+          ? deliveryOnlyCourierNotes
+          : matchingDeliveryOrder?.courierNotes;
+        const syncedPaymentMethod = finalPaymentMethod === 'Split' ? 'Cash' : (finalPaymentMethod || linkedExpense.paymentMethod);
+        const syncedExpenseTitle = matchingDeliveryOrder && !isHistorical
+          ? `Logistics Delivery Fee - ${matchingDeliveryOrder.deliveryNo} (${existing.invoiceNo})`
+          : linkedExpense.title;
         const updatedExpense: Expense = {
           ...linkedExpense,
+          title: syncedExpenseTitle,
           amount: newFee,
           date: updatedSale.createdAt ? updatedSale.createdAt.split('T')[0] : linkedExpense.date,
           description: isHistorical
             ? `Historical delivery fee expense for ${finalCustomerName}. Sale ${existing.invoiceNo && existing.invoiceNo !== 'N/A' ? existing.invoiceNo : existing.id}.${updatedSale.notes ? ' Notes: ' + updatedSale.notes : ''}`.trim()
-            : `Delivery fee expense for ${finalCustomerName}. ${matchingDeliveryOrder ? `Order ${matchingDeliveryOrder.deliveryNo}, ` : ''}Invoice ${existing.invoiceNo}.${matchingDeliveryOrder?.courierNotes ? ' Courier/Notes: ' + matchingDeliveryOrder.courierNotes : ''}`.trim(),
+            : `Delivery fee expense for ${finalCustomerName}. ${matchingDeliveryOrder ? `Order ${matchingDeliveryOrder.deliveryNo}, ` : ''}Invoice ${existing.invoiceNo}.${freshCourierNotes ? ' Courier/Notes: ' + freshCourierNotes : ''}`.trim(),
+          paidBy: isHistorical ? (updatedSale.createdBy || performedBy) : performedBy,
+          paymentMethod: syncedPaymentMethod,
           isHistorical: isHistorical || linkedExpense.isHistorical,
           saleId: existing.id,
         };
@@ -2748,7 +2930,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setExpenses((prev) => prev.filter((e) => e.id !== expIdToRemove));
         removeDocument('expenses', expIdToRemove);
         deleteItem('expenses', expIdToRemove).catch((e) => console.warn('IndexedDB expense delete error:', e));
-        markIdDeleted('expenses', expIdToRemove);
         updatedSale.expenseId = undefined;
       }
     } else if (isHistorical && newFee > 0) {
@@ -2777,7 +2958,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Also persist updatedSale with expenseId
       setSales((prev) => prev.map((s) => (s.id === saleId ? updatedSale : s)));
       saveDocument('sales', updatedSale);
-      putItem('sales', updatedSale).catch(() => {});
     } else if (matchingDeliveryOrder?.isPickupConfirmed && newFee > 0) {
       // If delivery pickup was already confirmed, create the Logistics expense
       const expenseTitle = `Logistics Delivery Fee - ${matchingDeliveryOrder.deliveryNo} (${existing.invoiceNo})`;
@@ -2796,13 +2976,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setExpenses((prev) => [newExpense, ...prev]);
       saveDocument('expenses', newExpense);
       putItem('expenses', newExpense).catch((e) => console.warn('IndexedDB expense put error:', e));
+      // Gap D — the pickup-confirmed auto-created expense never wrote its id
+      // back, so sale.expenseId / delivery.expenseId stayed empty and the next
+      // edit could not find it by id (only by fuzzy title match).
+      updatedSale.expenseId = newExpense.id;
+      setSales((prev) => prev.map((s) => (s.id === saleId ? updatedSale : s)));
+      saveDocument('sales', updatedSale);
+      if (matchingDeliveryOrder) {
+        const linkedDelivery: DeliveryOrder = { ...matchingDeliveryOrder, expenseId: newExpense.id, updatedAt: now };
+        matchingDeliveryOrder = linkedDelivery;
+        setDeliveryOrders((prev) => prev.map((d) => (d.id === linkedDelivery.id ? linkedDelivery : d)));
+        saveDocument('deliveryOrders', linkedDelivery);
+        putItem('deliveryOrders', linkedDelivery).catch((e) => console.warn('IndexedDB deliveryOrder put error:', e));
+      }
     }
 
     // 5. Cascade down to Customer (ownership transfer, lifetimeValue, outstandingBalance debt & loyalty points)
     const oldTotal = existing.totalAmount || 0;
     const totalDiff = calculatedTotal - oldTotal;
-    const oldPoints = Math.floor(oldTotal * (settings.pointsPerDollar || 0.01));
-    const newPoints = Math.floor(calculatedTotal * (settings.pointsPerDollar || 0.01));
+    const oldPoints = loyaltyPointsForAmount(oldTotal, settings.pointsPerDollar);
+    const newPoints = loyaltyPointsForAmount(calculatedTotal, settings.pointsPerDollar);
     const pointsDiff = newPoints - oldPoints;
 
     // Resolve old customer record (from previous sale state)
@@ -2893,6 +3086,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updatedTargetCust = {
           ...targetCust,
           name: finalCustomerName || targetCust.name,
+          // Gap H — deliveryPhone/Address edits never reached the customer
+          // directory, so Customers stayed stale after a dispatch correction.
+          phone: deliveryOnlyPhone !== undefined && deliveryOnlyPhone !== '' ? deliveryOnlyPhone : targetCust.phone,
+          address: deliveryOnlyAddress !== undefined && deliveryOnlyAddress !== '' ? deliveryOnlyAddress : targetCust.address,
           lifetimeValue: Math.max(0, (targetCust.lifetimeValue || 0) + totalDiff),
           loyaltyPoints: Math.max(0, (Number(targetCust.loyaltyPoints) || 0) + pointsDiff),
           outstandingBalance: netCredit < 0 ? Math.round(Math.abs(netCredit) * 100) / 100 : 0,
@@ -2940,10 +3137,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    // Also ensure updatedSale state reflects the finalized customerId
+    // Also ensure updatedSale state reflects the finalized customerId. Gap C —
+    // the §3 delivery sync above ran before ownership was resolved, so a
+    // transfer left delivery.customerId pointing at the old owner while the
+    // sale moved on. Re-align both sides to the finalized id.
+    if (updatedSale.customerId !== matchingDeliveryOrder?.customerId && (matchingDeliveryOrder || deletedDeliveryOrderId === null)) {
+      const currentDelivery = matchingDeliveryOrder
+        || deliveryOrders.find((d) => d.saleId === saleId || (existing.invoiceNo && d.invoiceNo === existing.invoiceNo));
+      if (currentDelivery && currentDelivery.customerId !== updatedSale.customerId) {
+        const realigned: DeliveryOrder = { ...currentDelivery, customerId: updatedSale.customerId, customerName: updatedSale.customerName || currentDelivery.customerName, updatedAt: now };
+        matchingDeliveryOrder = realigned;
+        setDeliveryOrders((prev) => prev.map((d) => (d.id === realigned.id ? realigned : d)));
+        saveDocument('deliveryOrders', realigned);
+        putItem('deliveryOrders', realigned).catch((e) => console.warn('IndexedDB deliveryOrder put error:', e));
+      }
+    }
     setSales((prev) => prev.map((s) => (s.id === saleId ? updatedSale : s)));
     saveDocument('sales', updatedSale);
-    putItem('sales', updatedSale).catch((e) => console.warn('IndexedDB sales put error:', e));
 
     if (newUnpaid > 0 && unpaidDiff > 0 && finalCustomerName) {
       const notif: NotificationItem = {
@@ -2965,21 +3175,121 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         (existing.invoiceNo && po.convertedInvoiceNo === existing.invoiceNo)
     );
     if (linkedPreOrder) {
-      const updatedPreOrderTotal = Math.max(
-        0,
-        (linkedPreOrder.subtotal || 0) - (linkedPreOrder.discount || 0) + newFee
-      );
+      // Gap G — the pre-order sync only carried deliveryFee, so item/discount
+      // edits on the invoice left the linked pre-order total stale. Mirror the
+      // sale's own subtotal/discount/fee formula plus identity fields.
+      const updatedPreOrderTotal = Math.max(0, subtotal - disc + newFee);
       const updatedPreOrder: WhatsAppPreOrder = {
         ...linkedPreOrder,
         deliveryFee: newFee,
         totalAmount: updatedPreOrderTotal,
+        customerId: updatedSale.customerId || linkedPreOrder.customerId,
         customerName: finalCustomerName || linkedPreOrder.customerName,
+        customerPhone: deliveryOnlyPhone !== undefined && deliveryOnlyPhone !== '' ? deliveryOnlyPhone : linkedPreOrder.customerPhone,
+        deliveryAddress: deliveryOnlyAddress !== undefined && deliveryOnlyAddress !== '' ? deliveryOnlyAddress : linkedPreOrder.deliveryAddress,
+        notes: updatedSale.notes !== undefined ? updatedSale.notes : linkedPreOrder.notes,
         updatedAt: now,
       };
       setWhatsAppPreOrders((prev) => prev.map((po) => (po.id === updatedPreOrder.id ? updatedPreOrder : po)));
       saveDocument('whatsAppPreOrders', updatedPreOrder);
       putItem('whatsAppPreOrders', updatedPreOrder).catch((e) => console.warn('IndexedDB whatsAppPreOrder put error:', e));
     }
+
+    // 6. Cascade to Money Movements (Treasury).
+    // processSale wrote one Sale Inflow per payment channel for live sales, but
+    // no invoice edit ever reconciled them — a payment-type change left the old
+    // subtype/destinationAccount/amount in place, so the till and the bank ran
+    // on stale figures. Rebuild live-sale inflows from the finalized values.
+    if (!isHistorical) {
+      const removedFlows = moneyMovements.filter(
+        (m) => m.type === 'Sale Inflow' && m.referenceId === saleId
+      );
+      removedFlows.forEach((m) => {
+        removeDocument('moneyMovements', m.id);
+        deleteItem('moneyMovements', m.id).catch(() => {});
+      });
+      if (removedFlows.length > 0) {
+        setMoneyMovements((prev) => prev.filter((m) => !(m.type === 'Sale Inflow' && m.referenceId === saleId)));
+      }
+
+      // Store Credit is a customer overage (not liquid cash) — no inflow.
+      const newFlows: MoneyMovement[] = [];
+      const inflowBase = {
+        date: updatedSale.createdAt || now,
+        type: 'Sale Inflow' as const,
+        referenceNo: existing.invoiceNo,
+        referenceId: saleId,
+        performedBy,
+        createdAt: now,
+      };
+      if (finalPaymentMethod === 'Cash') {
+        if (finalPaidAmount > 0) {
+          newFlows.push({
+            ...inflowBase,
+            id: generateUniqueId('mm'),
+            subtype: 'Cash Sale',
+            destinationAccount: 'Physical Cash',
+            amount: finalPaidAmount,
+            notes: `Cash sale: ${existing.invoiceNo} (${settings.currencySymbol}${finalPaidAmount.toFixed(2)})`,
+          });
+        }
+      } else if (finalPaymentMethod === 'Mobile Transfer' || finalPaymentMethod === 'Bank Transfer' || finalPaymentMethod === 'Card') {
+        if (finalPaidAmount > 0) {
+          newFlows.push({
+            ...inflowBase,
+            id: generateUniqueId('mm'),
+            subtype: finalPaymentMethod,
+            destinationAccount: 'Biz Account',
+            amount: finalPaidAmount,
+            notes: `${finalPaymentMethod} sale: ${existing.invoiceNo} (${settings.currencySymbol}${finalPaidAmount.toFixed(2)})`,
+          });
+        }
+      } else if (finalPaymentMethod === 'Split') {
+        const breakdown = finalPaymentBreakdown || {};
+        const cashPart = Math.max(0, Number(breakdown['Cash']) || 0);
+        const transferPart = Math.max(0,
+          (Number(breakdown['Mobile Transfer']) || 0) +
+          (Number(breakdown['Bank Transfer']) || 0) +
+          (Number(breakdown['Card']) || 0),
+        );
+        if (cashPart > 0) {
+          newFlows.push({
+            ...inflowBase,
+            id: generateUniqueId('mm'),
+            subtype: 'Split - Cash Portion',
+            destinationAccount: 'Physical Cash',
+            amount: cashPart,
+            notes: `Split sale cash portion: ${existing.invoiceNo} (${settings.currencySymbol}${cashPart.toFixed(2)})`,
+          });
+        }
+        if (transferPart > 0) {
+          newFlows.push({
+            ...inflowBase,
+            id: generateUniqueId('mm'),
+            subtype: 'Split - Transfer/Card Portion',
+            destinationAccount: 'Biz Account',
+            amount: transferPart,
+            notes: `Split sale bank portion: ${existing.invoiceNo} (${settings.currencySymbol}${transferPart.toFixed(2)})`,
+          });
+        }
+      }
+
+      if (newFlows.length > 0) {
+        setMoneyMovements((prev) => [...newFlows, ...prev]);
+        newFlows.forEach((mm) => {
+          saveDocument('moneyMovements', mm);
+          putItem('moneyMovements', mm).catch(() => {});
+        });
+      }
+    }
+
+    // Bridge: a Mall-originated sale (sale-<orderId>) is mirrored on the server's
+    // mall_orders. Push the committed edit so the buyer's tracking page (total,
+    // lines, status) stops showing the checkout-time snapshot. Best-effort only.
+    syncMallOrderFromPos(updatedSale, {
+      paymentStatus: newUnpaid <= 0 ? 'paid' : 'pending',
+      paidAmount: finalPaidAmount,
+    });
 
     logAudit(
       'UPDATE_SALE',
@@ -2993,6 +3303,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       message: `Sale record ${existing.invoiceNo} saved. Customer outstanding balance: ${settings.currencySymbol}${newUnpaid.toFixed(2)}.`,
       type: 'info',
     });
+    return true;
   };
 
   // Reconcile Historical Sales with Delivery Fees to automatically create/verify Historical Logistics Expenses
@@ -3145,46 +3456,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const histSaleIds = new Set(sales.filter(isHistoricalSaleRecord).map((s) => s.id));
     let purgedCount = 0;
 
-    setMoneyMovements((prev) => {
-      const toRemove: MoneyMovement[] = [];
-      const kept: MoneyMovement[] = [];
+    // Classification runs on the current state and the storage deletes run once
+    // — never inside the updater, where StrictMode's double-invoke deleted each
+    // historical record twice.
+    const isPurgeable = (m: MoneyMovement) => {
+      const isHistDeliveryExpenseMM =
+        (typeof m.id === 'string' && m.id.startsWith('mm-hist-')) ||
+        (m.subtype === 'Logistics' && (
+          (typeof m.referenceNo === 'string' && m.referenceNo.includes('Historical')) ||
+          (typeof m.notes === 'string' && (m.notes.includes('Historical') || m.notes.includes('Historical delivery fee')))
+        ));
 
-      prev.forEach((m) => {
-        const isHistDeliveryExpenseMM =
-          (typeof m.id === 'string' && m.id.startsWith('mm-hist-')) ||
-          (m.subtype === 'Logistics' && (
-            (typeof m.referenceNo === 'string' && m.referenceNo.includes('Historical')) ||
-            (typeof m.notes === 'string' && (m.notes.includes('Historical') || m.notes.includes('Historical delivery fee')))
-          ));
+      const isHistSaleInflow =
+        m.type === 'Sale Inflow' && (
+          (m.referenceId && histSaleIds.has(m.referenceId)) ||
+          (typeof m.notes === 'string' && (m.notes.includes('Historical') || m.notes.includes('Import Wizard')))
+        );
 
-        const isHistSaleInflow =
-          m.type === 'Sale Inflow' && (
-            (m.referenceId && histSaleIds.has(m.referenceId)) ||
-            (typeof m.notes === 'string' && (m.notes.includes('Historical') || m.notes.includes('Import Wizard')))
-          );
+      return isHistDeliveryExpenseMM || isHistSaleInflow;
+    };
 
-        if (isHistDeliveryExpenseMM || isHistSaleInflow) {
-          toRemove.push(m);
-        } else {
-          kept.push(m);
-        }
+    const toRemove = moneyMovements.filter(isPurgeable);
+    const kept = moneyMovements.filter((m) => !isPurgeable(m));
+    purgedCount = toRemove.length;
+
+    if (toRemove.length > 0) {
+      toRemove.forEach((m) => {
+        removeDocument('moneyMovements', m.id);
+        deleteItem('moneyMovements', m.id).catch(() => {});
       });
-
-      if (toRemove.length > 0) {
-        purgedCount = toRemove.length;
-        toRemove.forEach((m) => {
-          removeDocument('moneyMovements', m.id);
-          deleteItem('moneyMovements', m.id).catch(() => {});
-          markIdDeleted('moneyMovements', m.id);
-        });
-        console.log(`[Treasury] Purged ${toRemove.length} historical money movement records to preserve live Bank and Till balances.`);
-      }
-
-      return kept;
-    });
+      console.log(`[Treasury] Purged ${toRemove.length} historical money movement records to preserve live Bank and Till balances.`);
+      setMoneyMovements(kept);
+    }
 
     return { purgedCount };
-  }, [sales, isHistoricalSaleRecord]);
+  }, [sales, isHistoricalSaleRecord, moneyMovements]);
 
   const reconcileCustomerOverageBalances = React.useCallback(() => {
     const legacyOverpaidSales = sales.filter(
@@ -3361,110 +3667,190 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const cust = customers.find((c) => c.id === id);
     if (!cust) return;
 
-    const currentBal = Number(cust.outstandingBalance) || 0;
-    const currentOverage = Number(cust.overageBalance) || 0;
-    const rawNextBal = currentBal + amountChange;
-    const newBal = Math.max(0, rawNextBal);
-    const excessPayment = rawNextBal < 0 ? Math.round(Math.abs(rawNextBal) * 100) / 100 : 0;
-    const newOverage = Math.round((currentOverage + excessPayment) * 100) / 100;
-    const updatedCust = { ...cust, outstandingBalance: newBal, overageBalance: newOverage };
+    const user = paymentDetails?.performedBy || 'Admin';
+    const paymentMethod = paymentDetails?.paymentMethod || 'Cash';
+    const paymentNote = paymentDetails?.paymentNote ? ` [Note: ${paymentDetails.paymentNote}]` : '';
 
-    setCustomers((prev) =>
-      prev.map((c) => (c.id === id ? updatedCust : c))
+    // A debt payment is a NEGATIVE change. Positive changes are manual balance
+    // adjustments (e.g. opening balance) and keep their existing behaviour;
+    // a payment is settled through the shared ledger so an overpayment is
+    // clamped to the debt instead of silently minting store credit.
+    const isDebtPayment = amountChange < 0;
+
+    if (!isDebtPayment) {
+      const currentBal = Math.max(0, Number(cust.outstandingBalance) || 0);
+      const rawNextBal = currentBal + Number(amountChange);
+      const newBal = Math.max(0, Math.round(rawNextBal * 100) / 100);
+      const excessPayment = rawNextBal < 0 ? Math.round(Math.abs(rawNextBal) * 100) / 100 : 0;
+      const newOverage = Math.round(((Number(cust.overageBalance) || 0) + excessPayment) * 100) / 100;
+      const updatedCust = { ...cust, outstandingBalance: newBal, overageBalance: newOverage };
+      setCustomers((prev) => prev.map((c) => (c.id === id ? updatedCust : c)));
+      saveDocument('customers', updatedCust);
+      putItem('customers', updatedCust).catch((e) => console.warn('IndexedDB customer put error:', e));
+      showToast({
+        title: 'Customer Balance Updated',
+        message: `Updated balance for ${cust.name}. Current balance: ${settings.currencySymbol}${newBal.toFixed(2)}.`,
+        type: 'success',
+      });
+      return;
+    }
+
+    // --- Debt settlement path -------------------------------------------------
+    const requested = Math.abs(Number(amountChange));
+    const customerSales: LedgerSale[] = sales
+      .filter(
+        (s) =>
+          s.customerId === id ||
+          (s.customerName && cust.name && s.customerName.trim().toLowerCase() === cust.name.trim().toLowerCase())
+      )
+      .map((s) => ({ id: s.id, invoiceNo: s.invoiceNo, totalAmount: s.totalAmount, paidAmount: s.paidAmount, createdAt: s.createdAt, status: s.status }));
+
+    const plan = settleCustomerBalance(
+      {
+        id: cust.id,
+        name: cust.name,
+        outstandingBalance: Number(cust.outstandingBalance) || 0,
+        overageBalance: Number(cust.overageBalance) || 0,
+        loyaltyPoints: Number(cust.loyaltyPoints) || 0,
+        lifetimeValue: Number(cust.lifetimeValue) || 0,
+        purchaseHistoryCount: Number(cust.purchaseHistoryCount) || 0,
+      },
+      requested,
+      customerSales
     );
+
+    // Nothing owed (or nothing tendered): do not write a phantom ledger entry.
+    if (plan.appliedToDebt <= 0) {
+      showToast({
+        title: 'Nothing to Settle',
+        message: `${cust.name} has no outstanding balance to settle.`,
+        type: 'info',
+      });
+      return;
+    }
+
+    const settledAmount = plan.appliedToDebt;
+    const updatedCust: Customer = {
+      ...cust,
+      outstandingBalance: plan.customer.outstandingBalance,
+      // Store credit is never created by a debt settlement (audit C2).
+      overageBalance: Math.max(0, Number(cust.overageBalance) || 0),
+    };
+    setCustomers((prev) => prev.map((c) => (c.id === id ? updatedCust : c)));
     saveDocument('customers', updatedCust);
     putItem('customers', updatedCust).catch((e) => console.warn('IndexedDB customer put error:', e));
 
-    // If debt payment was made (amountChange < 0), reconcile and credit unpaid sales
-    if (amountChange < 0) {
-      let settlementAmount = Math.abs(amountChange);
-      const paymentMethod = paymentDetails?.paymentMethod || 'Cash';
-      const paymentNote = paymentDetails?.paymentNote ? ` [Note: ${paymentDetails.paymentNote}]` : '';
-
-      setSales((prev) => {
-        return prev.map((s) => {
-          const isCustSale =
-            s.customerId === id ||
-            (s.customerName && cust.name && s.customerName.trim().toLowerCase() === cust.name.trim().toLowerCase());
-          if (!isCustSale || settlementAmount <= 0) return s;
-
-          const unpaidOnSale = Math.max(
-            0,
-            (s.totalAmount || 0) - (s.paidAmount !== undefined ? s.paidAmount : s.totalAmount || 0)
-          );
-          if (unpaidOnSale <= 0) return s;
-
-          const credit = Math.min(settlementAmount, unpaidOnSale);
-          settlementAmount -= credit;
-          const currentPaid = s.paidAmount !== undefined ? s.paidAmount : s.totalAmount || 0;
-          const newPaid = currentPaid + credit;
-          const settlementNote = `Debt payment of ${settings.currencySymbol}${credit.toFixed(2)} received via ${paymentMethod}${paymentNote}.`;
-
+    // Reconcile only the invoices the ledger approved, via their exact credit.
+    const creditBySaleId = new Map(plan.reconciledSales.map((r) => [r.id, r]));
+    if (creditBySaleId.size > 0) {
+      setSales((prev) =>
+        prev.map((s) => {
+          const reconciled = creditBySaleId.get(s.id);
+          if (!reconciled || reconciled.credited <= 0) return s;
+          const settlementNote = `Debt payment of ${settings.currencySymbol}${reconciled.credited.toFixed(2)} received via ${paymentMethod}${paymentNote}.`;
           const updatedSale: Sale = {
             ...s,
-            paidAmount: newPaid,
+            paidAmount: reconciled.newPaid,
             notes: s.notes ? `${s.notes} | ${settlementNote}` : settlementNote,
           };
           saveDocument('sales', updatedSale);
           putItem('sales', updatedSale).catch((e) => console.warn('IndexedDB sale put error:', e));
           return updatedSale;
-        });
-      });
-
-      const user = paymentDetails?.performedBy || 'Admin';
-
-      // Auto-log Money Movement for Customer Debt Payment
-      const isCash = paymentMethod === 'Cash';
-      const debtMM: MoneyMovement = {
-        id: generateUniqueId('mm'),
-        date: new Date().toISOString(),
-        type: 'Customer Debt Payment',
-        subtype: paymentMethod,
-        destinationAccount: isCash ? 'Physical Cash' : 'Biz Account',
-        amount: Math.abs(amountChange),
-        referenceNo: cust.name,
-        referenceId: id,
-        performedBy: user,
-        notes: `Customer debt settled by ${cust.name}: ${settings.currencySymbol}${Math.abs(amountChange).toFixed(2)} via ${paymentMethod}${paymentNote}`,
-        createdAt: new Date().toISOString(),
-      };
-      setMoneyMovements((prev) => [debtMM, ...prev]);
-      saveDocument('moneyMovements', debtMM);
-      putItem('moneyMovements', debtMM).catch(() => {});
-
-      logAudit(
-        'SETTLE_DEBT',
-        'Customer',
-        id,
-        user,
-        `Settled balance for ${cust.name}: paid ${settings.currencySymbol}${Math.abs(amountChange).toFixed(2)} via ${paymentMethod}. New balance: ${settings.currencySymbol}${newBal.toFixed(2)}.`
+        })
       );
     }
 
+    // Auto-log Money Movement for Customer Debt Payment
+    const isCash = paymentMethod === 'Cash';
+    const debtMM: MoneyMovement = {
+      id: generateUniqueId('mm'),
+      date: new Date().toISOString(),
+      type: 'Customer Debt Payment',
+      subtype: paymentMethod,
+      destinationAccount: isCash ? 'Physical Cash' : 'Biz Account',
+      amount: settledAmount,
+      referenceNo: cust.name,
+      referenceId: id,
+      performedBy: user,
+      notes: `Customer debt settled by ${cust.name}: ${settings.currencySymbol}${settledAmount.toFixed(2)} via ${paymentMethod}${paymentNote}`,
+      createdAt: new Date().toISOString(),
+    };
+    setMoneyMovements((prev) => [debtMM, ...prev]);
+    saveDocument('moneyMovements', debtMM);
+    putItem('moneyMovements', debtMM).catch(() => { });
+
+    // The audit trail must carry the payment reference too (audit H3).
+    const noteForAudit = paymentDetails?.paymentNote ? ` Reference: ${paymentDetails.paymentNote}.` : '';
+    logAudit(
+      'SETTLE_DEBT',
+      'Customer',
+      id,
+      user,
+      `Settled balance for ${cust.name}: paid ${settings.currencySymbol}${settledAmount.toFixed(2)} via ${paymentMethod}.${noteForAudit} New balance: ${settings.currencySymbol}${plan.customer.outstandingBalance.toFixed(2)}.`
+    );
+
     showToast({
       title: 'Customer Balance Updated',
-      message: `Updated balance for ${cust.name}. Current balance: ${settings.currencySymbol}${newBal.toFixed(2)}.`,
-      type: 'success',
+      message:
+        plan.reason === 'EXCEEDS_OUTSTANDING_BALANCE'
+          ? `Payment of ${settings.currencySymbol}${requested.toFixed(2)} exceeded the debt. Settled ${settings.currencySymbol}${settledAmount.toFixed(2)}; no store credit was created.`
+          : `Updated balance for ${cust.name}. Current balance: ${settings.currencySymbol}${plan.customer.outstandingBalance.toFixed(2)}.`,
+      type: plan.reason === 'EXCEEDS_OUTSTANDING_BALANCE' ? 'info' : 'success',
     });
   };
 
   const deleteCustomer = (id: string) => {
     const target = customers.find((c) => c.id === id);
+    if (!target) {
+      removeDocument('customers', id);
+      deleteItem('customers', id).catch((e) => console.warn('IndexedDB customer delete error:', e));
+      return;
+    }
+
+    // Never erase money. A customer holding a live debt or store credit must be
+    // settled first — deleting the record would silently write off what the
+    // business is owed (or owes) with no trace. (Audit C1.)
+    const guard = customerDeleteGuard({
+      id: target.id,
+      name: target.name,
+      outstandingBalance: Number(target.outstandingBalance) || 0,
+      overageBalance: Number(target.overageBalance) || 0,
+      loyaltyPoints: Number(target.loyaltyPoints) || 0,
+      lifetimeValue: Number(target.lifetimeValue) || 0,
+      purchaseHistoryCount: Number(target.purchaseHistoryCount) || 0,
+    });
+    if (!guard.canDelete) {
+      const amount = guard.reason === 'OUTSTANDING_DEBT' ? guard.writtenOffDebt : guard.writtenOffCredit;
+      const label = guard.reason === 'OUTSTANDING_DEBT' ? 'outstanding debt' : 'store credit';
+      logAudit(
+        'BLOCKED_CUSTOMER_DELETE',
+        'Customer',
+        id,
+        'Admin',
+        `Refused to delete customer "${target.name}": account still holds ${settings.currencySymbol}${amount.toFixed(2)} of ${label}. Settle the account first.`
+      );
+      showToast({
+        title: 'Cannot Delete Customer',
+        message: `${target.name} still has ${settings.currencySymbol}${amount.toFixed(2)} of ${label}. Settle the account before deleting.`,
+        type: 'error',
+      });
+      return;
+    }
+
     setCustomers((prev) => prev.filter((c) => c.id !== id));
     removeDocument('customers', id);
     deleteItem('customers', id).catch((e) => console.warn('IndexedDB customer delete error:', e));
-    markIdDeleted('customers', id);
 
     // Clean up customer balance notifications
-    if (target) {
-      setNotifications((prev) => {
-        const removed = prev.filter((n) => n.message.includes(target.name));
-        removed.forEach((n) => removeDocument('notifications', n.id));
-        return prev.filter((n) => !n.message.includes(target.name));
-      });
-    }
+    setNotifications((prev) => {
+      const removed = prev.filter((n) => n.message.includes(target.name));
+      removed.forEach((n) => removeDocument('notifications', n.id));
+      return prev.filter((n) => !n.message.includes(target.name));
+    });
 
-    // Safely unlink customerId on sales (keep customerName so sales history is preserved)
+    // Safely unlink customerId on every linked record (keep the denormalised
+    // customerName so history is preserved). Sales alone used to be relinked,
+    // leaving delivery orders and pre-orders pointing at a deleted id. (H2.)
     setSales((prev) =>
       prev.map((s) => {
         if (s.customerId === id) {
@@ -3477,8 +3863,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
 
-    logAudit('DELETE_CUSTOMER', 'Customer', id, 'Admin', target ? `Deleted customer profile "${target.name}".` : `Deleted customer ${id}.`);
-    showToast({ title: 'Customer Deleted', message: target ? `Customer "${target.name}" removed from directory.` : 'Customer deleted.', type: 'error' });
+    setDeliveryOrders((prev) =>
+      prev.map((d) => {
+        if (d.customerId === id) {
+          const updatedDelivery: DeliveryOrder = { ...d, customerId: undefined, updatedAt: new Date().toISOString() };
+          saveDocument('deliveryOrders', updatedDelivery);
+          putItem('deliveryOrders', updatedDelivery).catch((e) => console.warn('IndexedDB del put error:', e));
+          return updatedDelivery;
+        }
+        return d;
+      })
+    );
+
+    setWhatsAppPreOrders((prev) =>
+      prev.map((po) => {
+        if (po.customerId === id) {
+          const updatedPo: WhatsAppPreOrder = { ...po, customerId: undefined, updatedAt: new Date().toISOString() };
+          saveDocument('whatsAppPreOrders', updatedPo);
+          putItem('whatsAppPreOrders', updatedPo).catch((e) => console.warn('IndexedDB po put error:', e));
+          return updatedPo;
+        }
+        return po;
+      })
+    );
+
+    logAudit('DELETE_CUSTOMER', 'Customer', id, 'Admin', `Deleted customer profile "${target.name}" (settled account: ${settings.currencySymbol}0.00 balance).`);
+    showToast({ title: 'Customer Deleted', message: `Customer "${target.name}" removed from directory.`, type: 'error' });
   };
 
   // Supplier Management
@@ -3545,7 +3955,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSuppliers((prev) => prev.filter((s) => s.id !== id));
     removeDocument('suppliers', id);
     deleteItem('suppliers', id).catch((e) => console.warn('IndexedDB supplier delete error:', e));
-    markIdDeleted('suppliers', id);
 
     // Unlink supplier from products
     setProducts((prev) =>
@@ -4130,7 +4539,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       expIds.forEach((id) => {
         removeDocument('expenses', id);
         deleteItem('expenses', id).catch(() => {});
-        markIdDeleted('expenses', id);
       });
     }
 
@@ -4166,7 +4574,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPurchases((prev) => prev.filter((p) => p.id !== poId));
     removeDocument('purchases', poId);
     deleteItem('purchases', poId).catch((e) => console.warn('IndexedDB purchases delete error:', e));
-    markIdDeleted('purchases', poId);
 
     // 6. Cascade to Money Movements: remove supplier payment movements for this PO
     setMoneyMovements((prev) => {
@@ -4174,7 +4581,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       removed.forEach((m) => {
         removeDocument('moneyMovements', m.id);
         deleteItem('moneyMovements', m.id).catch(() => {});
-        markIdDeleted('moneyMovements', m.id);
       });
       return prev.filter((m) => m.referenceId !== poId);
     });
@@ -4194,7 +4600,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Expense Tracking
-  const addExpense = (exp: Omit<Expense, 'id' | 'createdAt'> & { createdAt?: string }) => {
+  const addExpense = (exp: Omit<Expense, 'id' | 'createdAt'> & { createdAt?: string }, silent = false) => {
     const newExp: Expense = {
       ...exp,
       id: 'exp-' + Date.now(),
@@ -4226,7 +4632,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     logAudit('CREATE_EXPENSE', 'Expense', newExp.id, exp.paidBy, `Logged expense: ${exp.title} (${settings.currencySymbol}${exp.amount.toFixed(2)}) under ${exp.category}.`);
-    showToast({ title: 'Expense Logged', message: `Expense "${exp.title}" (${settings.currencySymbol}${exp.amount.toFixed(2)}) recorded.`, type: 'success' });
+    if (!silent) showToast({ title: 'Expense Logged', message: `Expense "${exp.title}" (${settings.currencySymbol}${exp.amount.toFixed(2)}) recorded.`, type: 'success' });
+    return newExp.id;
   };
 
   const deleteExpense = (id: string) => {
@@ -4234,7 +4641,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setExpenses((prev) => prev.filter((e) => e.id !== id));
     removeDocument('expenses', id);
     deleteItem('expenses', id).catch((e) => console.warn('IndexedDB expense delete error:', e));
-    markIdDeleted('expenses', id);
 
     // Cascade to Delivery Orders: clear expenseId if linked
     setDeliveryOrders((prev) =>
@@ -4255,7 +4661,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       removed.forEach((m) => {
         removeDocument('moneyMovements', m.id);
         deleteItem('moneyMovements', m.id).catch(() => {});
-        markIdDeleted('moneyMovements', m.id);
       });
       return prev.filter((m) => m.referenceId !== id);
     });
@@ -4284,7 +4689,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setMoneyMovements((prev) => prev.filter((m) => m.id !== id));
     removeDocument('moneyMovements', id);
     deleteItem('moneyMovements', id).catch((e) => console.warn('IndexedDB moneyMovement delete error:', e));
-    markIdDeleted('moneyMovements', id);
 
     logAudit(
       'DELETE_MONEY_MOVEMENT',
@@ -4511,7 +4915,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (amount <= 0 || isNaN(amount)) {
       showToast({ title: 'Invalid Amount', message: 'Withdrawal amount must be greater than zero.', type: 'error' });
-      return;
+      return '';
     }
 
     const sourceBalance = sourceAccount === 'Biz Account' ? (treasuryBalances.bizAccountBalance ?? 0) : (treasuryBalances.physicalCashBalance ?? 0);
@@ -4521,7 +4925,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         message: `Cannot withdraw ${settings.currencySymbol}${amount.toLocaleString()}. Available in ${sourceAccount}: ${settings.currencySymbol}${sourceBalance.toLocaleString()}.`,
         type: 'error',
       });
-      return;
+      return '';
     }
 
     const now = new Date().toISOString();
@@ -4554,6 +4958,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       message: `Withdrew ${settings.currencySymbol}${amount.toLocaleString()} (${subtype}) from ${sourceAccount}.`,
       type: 'warning',
     });
+    return mm.id;
   };
 
   const recordOwnerRepayment = (
@@ -4566,6 +4971,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let amount: number;
     let notes: string | undefined;
     let referenceNo: string | undefined;
+    let loanReferenceId: string | undefined;
     let performedBy: string;
     let date: string;
 
@@ -4574,6 +4980,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       amount = Number(paramsOrDestination.amount) || 0;
       notes = paramsOrDestination.notes;
       referenceNo = paramsOrDestination.referenceNo;
+      loanReferenceId = paramsOrDestination.loanReferenceId;
       performedBy = paramsOrDestination.performedBy || 'Owner';
       date = paramsOrDestination.date || new Date().toISOString();
     } else {
@@ -4598,6 +5005,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       destinationAccount,
       amount,
       referenceNo: referenceNo || `REP-${Date.now().toString().slice(-6)}`,
+      loanReferenceId,
       performedBy,
       notes: notes || `Owner repayment/deposit into ${destinationAccount}`,
       createdAt: now,
@@ -4913,7 +5321,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setWhatsAppPreOrders((prev) => prev.filter((w) => w.id !== id));
     removeDocument('whatsAppPreOrders', id);
     deleteItem('whatsAppPreOrders', id).catch((e) => console.warn('IndexedDB whatsAppPreOrder delete error:', e));
-    markIdDeleted('whatsAppPreOrders', id);
     logAudit('DELETE_WHATSAPP_PREORDER', 'WhatsAppPreOrder', id, 'Staff', target ? `Deleted pre-order "${target.preOrderNo}".` : `Deleted pre-order ${id}.`);
     showToast({ title: 'Pre-Order Deleted', message: target ? `WhatsApp Pre-Order "${target.preOrderNo}" deleted.` : 'Pre-order deleted.', type: 'error' });
   };
@@ -4948,10 +5355,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const now = new Date().toISOString();
 
-    // Automatically create a new expense record categorized under Logistics
+    // Automatically create a new expense record categorized under Logistics.
+    // Route through addExpense so it also records the Expense Outflow money
+    // movement — keeps the Treasury liquid balance consistent with Reports.
     const expenseTitle = `Logistics Delivery Fee - ${existing.deliveryNo} (${existing.invoiceNo})`;
-    const newExpense: Expense = {
-      id: generateUniqueId('exp'),
+    // silent: the pickup toast below already reports the expense — avoid a
+    // duplicate "Expense Logged" toast from addExpense.
+    const expenseId = addExpense({
       title: expenseTitle,
       category: 'Logistics',
       amount: existing.deliveryFee,
@@ -4960,11 +5370,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       paymentMethod: 'Cash',
       date: now.split('T')[0],
       createdAt: now,
-    };
-
-    setExpenses((prev) => [newExpense, ...prev]);
-    saveDocument('expenses', newExpense);
-    putItem('expenses', newExpense).catch((e) => console.warn('IndexedDB expense put error:', e));
+    }, true);
 
     const updatedDeliveryOrder: DeliveryOrder = {
       ...existing,
@@ -4972,7 +5378,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isPickupConfirmed: true,
       pickupConfirmedAt: now,
       pickupConfirmedBy: performedBy,
-      expenseId: newExpense.id,
+      expenseId,
       courierNotes: courierNotes || existing.courierNotes,
       updatedAt: now,
     };
@@ -5030,9 +5436,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const now = new Date().toISOString();
-    const finalFee = updates.deliveryFee !== undefined ? Math.max(0, Number(updates.deliveryFee)) : existing.deliveryFee;
+    // Mall-linked deliveries are managed by the Mall fulfilment workflow: the
+    // dispatch transaction already booked the Logistics expense and set
+    // isPickupConfirmed. Letting this flow rewrite the fee would desync the
+    // expense from the paid Mall order total, so only contact fields pass through.
+    const isMallManaged = /Created from Mall order /.test(existing.notes || '');
+    const finalFee = !isMallManaged && updates.deliveryFee !== undefined ? Math.max(0, Number(updates.deliveryFee)) : existing.deliveryFee;
     const feeDiff = finalFee - (existing.deliveryFee || 0);
-    const finalIsPickupConfirmed = updates.isPickupConfirmed !== undefined ? updates.isPickupConfirmed : existing.isPickupConfirmed;
+    const finalIsPickupConfirmed = isMallManaged ? true : (updates.isPickupConfirmed !== undefined ? updates.isPickupConfirmed : existing.isPickupConfirmed);
     const finalCustomerName = updates.customerName !== undefined ? updates.customerName : existing.customerName;
     const finalCustomerPhone = updates.customerPhone !== undefined ? updates.customerPhone : existing.customerPhone;
     const finalDeliveryAddress = updates.deliveryAddress !== undefined ? updates.deliveryAddress : existing.deliveryAddress;
@@ -5088,12 +5499,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         putItem('expenses', newExpense).catch((e) => console.warn('IndexedDB expense put error:', e));
       }
     } else if (!finalIsPickupConfirmed && linkedExpenseId) {
-      // If pickup confirmation is explicitly reset/reverted, clean up the linked expense
+      // If pickup confirmation is explicitly reset/reverted, clean up the linked
+      // expense AND its auto-created "Expense Outflow" money movement. Deleting
+      // the expense row alone left an orphaned outflow behind that still moved
+      // the Treasury liquid balance (the same cascade deleteExpense performs).
       const idToRemove = linkedExpenseId;
       setExpenses((prev) => prev.filter((e) => e.id !== idToRemove));
       removeDocument('expenses', idToRemove);
       deleteItem('expenses', idToRemove).catch((e) => console.warn('IndexedDB expense delete error:', e));
-      markIdDeleted('expenses', idToRemove);
+      setMoneyMovements((prev) => {
+        const removed = prev.filter((m) => m.referenceId === idToRemove);
+        removed.forEach((m) => {
+          removeDocument('moneyMovements', m.id);
+          deleteItem('moneyMovements', m.id).catch(() => {});
+        });
+        return prev.filter((m) => m.referenceId !== idToRemove);
+      });
       linkedExpenseId = undefined;
     }
 
@@ -5204,7 +5625,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setDeliveryOrders((prev) => prev.filter((d) => d.id !== id));
     removeDocument('deliveryOrders', id);
     deleteItem('deliveryOrders', id).catch((e) => console.warn('IndexedDB deliveryOrder delete error:', e));
-    markIdDeleted('deliveryOrders', id);
 
     if (target) {
       // If there was an auto-created expense linked to this delivery order, clean it up as well
@@ -5221,7 +5641,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setExpenses((prev) => prev.filter((e) => e.id !== linkedExpId));
         removeDocument('expenses', linkedExpId);
         deleteItem('expenses', linkedExpId).catch((e) => console.warn('IndexedDB expense delete error:', e));
-        markIdDeleted('expenses', linkedExpId);
       }
 
       logAudit(
@@ -5266,14 +5685,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setNotifications((prev) => prev.filter((n) => n.id !== id));
     removeDocument('notifications', id);
     deleteItem('notifications', id).catch(() => {});
-    markIdDeleted('notifications', id);
   };
 
   const clearNotifications = () => {
     notifications.forEach((n) => {
       removeDocument('notifications', n.id).catch(() => {});
       deleteItem('notifications', n.id).catch(() => {});
-      markIdDeleted('notifications', n.id);
     });
     setNotifications([]);
     localStorage.removeItem('idofera_notifications');
@@ -5283,32 +5700,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Settings
   const updateSettings = (newSettings: Partial<StoreSettings>) => {
-    setSettings((prev) => {
-      const updated = sanitizeStoreSettings({ ...prev, ...newSettings });
-      saveDocument('settings', { ...updated, id: 'store_settings' });
-      return updated;
-    });
+    // Persist outside the updater: a StrictMode double-invoke used to fire two
+    // settings saves (and two D1 dirty marks) per change.
+    const updated = sanitizeStoreSettings({ ...settings, ...newSettings });
+    saveDocument('settings', { ...updated, id: 'store_settings' });
+    setSettings(updated);
     showToast({ title: 'Settings Saved', message: 'Store preferences updated successfully.', type: 'success' });
   };
 
   const orderedLists = useMemo(() => {
+    // Index suppliers once instead of filtering the whole purchase/product lists
+    // per supplier: the old shape was O(suppliers x (purchases + products)) and
+    // re-ran on ANY collection change (even reading one notification).
+    const supplierKey = (name?: string) => (name ? name.trim().toLowerCase() : '');
+    const posBySupplier = new Map<string, Map<string, PurchaseOrder>>();
+    const addPo = (key: string, po: PurchaseOrder) => {
+      if (!key) return;
+      let bucket = posBySupplier.get(key);
+      if (!bucket) posBySupplier.set(key, bucket = new Map());
+      bucket.set(po.id, po);
+    };
+    for (const po of purchases) {
+      if (po.isDraft || po.deliveryStatus === 'Cancelled') continue;
+      addPo(po.supplierId, po);
+      addPo(supplierKey(po.supplierName), po);
+    }
+    const productsBySupplier = new Map<string, Map<string, Product>>();
+    const addProduct = (key: string, prod: Product) => {
+      if (!key) return;
+      let bucket = productsBySupplier.get(key);
+      if (!bucket) productsBySupplier.set(key, bucket = new Map());
+      bucket.set(prod.id, prod);
+    };
+    for (const prod of products) {
+      addProduct(prod.supplierId, prod);
+      addProduct(supplierKey(prod.supplierName), prod);
+    }
+    const collect = <T,>(map: Map<string, Map<string, T>>, ...keys: string[]) => {
+      const merged = new Map<string, T>();
+      for (const key of keys) {
+        const bucket = map.get(key);
+        if (bucket) bucket.forEach((value, id) => merged.set(id, value));
+      }
+      return [...merged.values()];
+    };
     const augmentedSuppliers = suppliers.map((sup) => {
-      // Find all official (non-draft, non-cancelled) purchase orders for this supplier
-      const supplierPOs = purchases.filter(
-        (p) =>
-          (p.supplierId === sup.id || (p.supplierName && sup.name && p.supplierName.trim().toLowerCase() === sup.name.trim().toLowerCase())) &&
-          !p.isDraft &&
-          p.deliveryStatus !== 'Cancelled'
-      );
+      const supplierPOs = collect(posBySupplier, sup.id, supplierKey(sup.name));
       const calculatedPayable = supplierPOs.reduce(
         (sum, po) => sum + Math.max(0, (Number(po.totalAmount) || 0) - (Number(po.paidAmount) || 0)),
         0
       );
-      const linkedProducts = products.filter(
-        (prod) =>
-          prod.supplierId === sup.id ||
-          (prod.supplierName && sup.name && prod.supplierName.trim().toLowerCase() === sup.name.trim().toLowerCase())
-      );
+      const linkedProducts = collect(productsBySupplier, sup.id, supplierKey(sup.name));
       const hasPOs = supplierPOs.length > 0;
       const outstandingBalance = hasPOs ? calculatedPayable : (Number(sup.outstandingBalance) || 0);
 
