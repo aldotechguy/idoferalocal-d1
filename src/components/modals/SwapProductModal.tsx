@@ -468,10 +468,10 @@ export const SwapProductModal: React.FC<SwapProductModalProps> = ({
 
                       <div className="text-right shrink-0">
                         <div className="font-bold text-xs text-emerald-600 dark:text-emerald-400 font-mono">
-                          {item.marginPct.toFixed(1)}% Margin
+                          {(Number(item.marginPct) || 0).toFixed(1)}% Margin
                         </div>
                         <div className="text-[10px] text-slate-500 font-mono">
-                          +{cs}{item.marginPerUnit.toLocaleString()} / unit
+                          +{cs}{(Number(item.marginPerUnit) || 0).toLocaleString()} / unit
                         </div>
                       </div>
                     </div>
@@ -480,16 +480,16 @@ export const SwapProductModal: React.FC<SwapProductModalProps> = ({
                     <div className="mt-2.5 pt-2 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-between text-[11px] text-slate-500">
                       <div className="flex items-center gap-3">
                         <span>
-                          Cost: <strong className="text-slate-800 dark:text-slate-200">{cs}{item.product.costPrice.toLocaleString()}</strong>
+                          Cost: <strong className="text-slate-800 dark:text-slate-200">{cs}{(Number(item.product.costPrice) || 0).toLocaleString()}</strong>
                         </span>
                         <span>
-                          Retail: <strong className="text-slate-800 dark:text-slate-200">{cs}{item.product.retailPrice.toLocaleString()}</strong>
+                          Retail: <strong className="text-slate-800 dark:text-slate-200">{cs}{(Number(item.product.retailPrice) || 0).toLocaleString()}</strong>
                         </span>
                       </div>
                       <div className="flex items-center gap-1.5 font-medium">
                         <Zap className="w-3 h-3 text-amber-500" />
                         <span className="text-slate-700 dark:text-slate-300 font-mono">
-                          {item.dailyVelocity.toFixed(2)}
+                          {(Number(item.dailyVelocity) || 0).toFixed(2)}
                         </span>{' '}
                         <span>u/day</span>
                       </div>
@@ -595,7 +595,7 @@ export const SwapProductModal: React.FC<SwapProductModalProps> = ({
                         <span className="text-slate-500">Gross Margin %:</span>
                         <div className="text-right">
                           <span className="font-bold text-slate-900 dark:text-white font-mono">
-                            {selectedItem.marginPct.toFixed(1)}%
+                            {(Number(selectedItem.marginPct) || 0).toFixed(1)}%
                           </span>
                           <span
                             className={`text-[10px] ml-1 font-semibold ${
@@ -603,7 +603,7 @@ export const SwapProductModal: React.FC<SwapProductModalProps> = ({
                             }`}
                           >
                             ({comparisonDelta.marginPctDiff >= 0 ? '+' : ''}
-                            {comparisonDelta.marginPctDiff.toFixed(1)}%)
+                            {(Number(comparisonDelta.marginPctDiff) || 0).toFixed(1)}%)
                           </span>
                         </div>
                       </div>

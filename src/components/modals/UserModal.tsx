@@ -184,6 +184,11 @@ export const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, userToEdi
       return;
     }
 
+    if (formData.password.trim() && formData.password.trim().length < 8) {
+      setError('Password must be at least 8 characters long');
+      return;
+    }
+
     try {
       const now = new Date().toISOString();
       if (userToEdit) {

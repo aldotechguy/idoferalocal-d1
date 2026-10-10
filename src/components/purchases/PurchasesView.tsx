@@ -594,7 +594,7 @@ export const PurchasesView: React.FC = () => {
         updateProduct(
           prod.id,
           { costPrice: item.unitCost },
-          `PO Cost Price updated from ${settings.currencySymbol}${prod.costPrice.toFixed(2)} to ${settings.currencySymbol}${item.unitCost.toFixed(2)}`
+          `PO Cost Price updated from ${settings.currencySymbol}${(Number(prod.costPrice) || 0).toFixed(2)} to ${settings.currencySymbol}${(Number(item.unitCost) || 0).toFixed(2)}`
         );
 
         // Check if cost price increased and user hasn't already adjusted retail price to compensate
@@ -602,7 +602,7 @@ export const PurchasesView: React.FC = () => {
         if (item.unitCost > prod.costPrice && !item.updateCatalogRetailPrice) {
           addNotification({
             title: 'Cost Price Increase Alert',
-            message: `Cost price for "${prod.name}" increased from ${settings.currencySymbol}${prod.costPrice.toFixed(2)} to ${settings.currencySymbol}${item.unitCost.toFixed(2)}. Adjust selling prices for optimum profit margin.`,
+            message: `Cost price for "${prod.name}" increased from ${settings.currencySymbol}${(Number(prod.costPrice) || 0).toFixed(2)} to ${settings.currencySymbol}${(Number(item.unitCost) || 0).toFixed(2)}. Adjust selling prices for optimum profit margin.`,
             type: 'price_increase_alert',
           });
 
@@ -1091,16 +1091,16 @@ export const PurchasesView: React.FC = () => {
                       {/* Amount */}
                       <td className="py-3.5 px-3">
                         <p className="font-black text-slate-900 dark:text-white font-mono">
-                          {isPrivacyMode ? `${settings.currencySymbol}••••••` : `${settings.currencySymbol}${po.totalAmount.toFixed(2)}`}
+                          {isPrivacyMode ? `${settings.currencySymbol}••••••` : `${settings.currencySymbol}${(Number(po.totalAmount) || 0).toFixed(2)}`}
                         </p>
                         {!isPrivacyMode && po.deliveryFee && po.deliveryFee > 0 ? (
                           <p className="text-[10px] text-blue-600 dark:text-blue-400 font-medium">
-                            Supplier logistics: {settings.currencySymbol}{po.deliveryFee.toFixed(2)}
+                            Supplier logistics: {settings.currencySymbol}{(Number(po.deliveryFee) || 0).toFixed(2)}
                           </p>
                         ) : null}
                         {!isPrivacyMode && po.localLogisticsFee && po.localLogisticsFee > 0 ? (
                           <p className="text-[10px] text-violet-600 dark:text-violet-400 font-medium">
-                            Local logistics: {settings.currencySymbol}{po.localLogisticsFee.toFixed(2)}
+                            Local logistics: {settings.currencySymbol}{(Number(po.localLogisticsFee) || 0).toFixed(2)}
                           </p>
                         ) : null}
                         {!isPrivacyMode && po.deliveryStatus !== 'Draft' && remainingPayment > 0 && (
@@ -1628,7 +1628,7 @@ export const PurchasesView: React.FC = () => {
                           <div className="flex-1">
                             <p className="font-bold text-slate-900 dark:text-white">{p?.name}</p>
                             <p className="text-[10px] font-mono text-slate-400">
-                              SKU: {p?.sku} • Catalog Cost: <strong className="text-slate-700 dark:text-slate-300">{settings.currencySymbol}{p?.costPrice.toFixed(2)}</strong> • Catalog Retail: <strong className="text-slate-700 dark:text-slate-300">{settings.currencySymbol}{p?.retailPrice.toFixed(2)}</strong>
+                              SKU: {p?.sku} • Catalog Cost: <strong className="text-slate-700 dark:text-slate-300">{settings.currencySymbol}{(Number(p?.costPrice) || 0).toFixed(2)}</strong> • Catalog Retail: <strong className="text-slate-700 dark:text-slate-300">{settings.currencySymbol}{(Number(p?.retailPrice) || 0).toFixed(2)}</strong>
                             </p>
                           </div>
 
@@ -1709,7 +1709,7 @@ export const PurchasesView: React.FC = () => {
                           <div className="p-2 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 rounded-xl text-[11px] text-emerald-900 dark:text-emerald-200 flex items-center justify-between gap-2">
                             <div className="flex items-center gap-1.5">
                               <TrendingUp className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                              <span>Retail changed: {settings.currencySymbol}{p.retailPrice.toFixed(2)} → {settings.currencySymbol}{currentRetail.toFixed(2)}</span>
+                              <span>Retail changed: {settings.currencySymbol}{(Number(p.retailPrice) || 0).toFixed(2)} → {settings.currencySymbol}{(Number(currentRetail) || 0).toFixed(2)}</span>
                             </div>
                             <label className="flex items-center gap-1.5 cursor-pointer font-bold shrink-0 text-[10px]">
                               <input
@@ -1736,8 +1736,8 @@ export const PurchasesView: React.FC = () => {
                               <AlertTriangle className={`w-4 h-4 shrink-0 ${isCostHigher ? 'text-amber-600' : 'text-blue-600'}`} />
                               <div>
                                 <span className="font-bold">Cost Price Mismatch:</span> Catalog is{' '}
-                                <span className="font-mono font-bold">{settings.currencySymbol}{p.costPrice.toFixed(2)}</span> vs PO cost{' '}
-                                <span className="font-mono font-bold">{settings.currencySymbol}{item.unitCost.toFixed(2)}</span>.
+                                <span className="font-mono font-bold">{settings.currencySymbol}{(Number(p.costPrice) || 0).toFixed(2)}</span> vs PO cost{' '}
+                                <span className="font-mono font-bold">{settings.currencySymbol}{(Number(item.unitCost) || 0).toFixed(2)}</span>.
                               </div>
                             </div>
 
@@ -1751,8 +1751,8 @@ export const PurchasesView: React.FC = () => {
                                 />
                                 <span>
                                   {item.updateCatalogCost
-                                    ? `Update catalog cost to ${settings.currencySymbol}${item.unitCost.toFixed(2)}`
-                                    : `Maintain previous cost (${settings.currencySymbol}${p.costPrice.toFixed(2)})`}
+                                    ? `Update catalog cost to ${settings.currencySymbol}${(Number(item.unitCost) || 0).toFixed(2)}`
+                                    : `Maintain previous cost (${settings.currencySymbol}${(Number(p.costPrice) || 0).toFixed(2)})`}
                                 </span>
                               </label>
                             </div>
@@ -2115,9 +2115,9 @@ export const PurchasesView: React.FC = () => {
                       <div className="p-2.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200/80 dark:border-slate-800 space-y-1">
                         <p className="text-[10px] font-bold text-slate-400 uppercase">Cost Price Change</p>
                         <div className="flex items-center justify-between font-mono font-bold">
-                          <span className="text-slate-400 line-through">{settings.currencySymbol}{item.oldCost.toFixed(2)}</span>
+                          <span className="text-slate-400 line-through">{settings.currencySymbol}{(Number(item.oldCost) || 0).toFixed(2)}</span>
                           <span className="text-slate-400">→</span>
-                          <span className="text-amber-600 dark:text-amber-400">{settings.currencySymbol}{item.newCost.toFixed(2)}</span>
+                          <span className="text-amber-600 dark:text-amber-400">{settings.currencySymbol}{(Number(item.newCost) || 0).toFixed(2)}</span>
                         </div>
                       </div>
 
@@ -2141,7 +2141,7 @@ export const PurchasesView: React.FC = () => {
                             className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono font-bold"
                           />
                           <span className="text-[10px] text-slate-400 block mt-0.5">
-                            Current: {settings.currencySymbol}{item.oldRetail.toFixed(2)}
+                            Current: {settings.currencySymbol}{(Number(item.oldRetail) || 0).toFixed(2)}
                           </span>
                         </div>
                       </div>
@@ -2166,7 +2166,7 @@ export const PurchasesView: React.FC = () => {
                             className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono font-bold"
                           />
                           <span className="text-[10px] text-slate-400 block mt-0.5">
-                            Current: {settings.currencySymbol}{item.oldWholesale.toFixed(2)}
+                            Current: {settings.currencySymbol}{(Number(item.oldWholesale) || 0).toFixed(2)}
                           </span>
                         </div>
                       </div>

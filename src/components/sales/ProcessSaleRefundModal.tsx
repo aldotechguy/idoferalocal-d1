@@ -497,7 +497,7 @@ export const ProcessSaleRefundModal: React.FC<ProcessSaleRefundModalProps> = ({
 
                         <div className="flex items-center gap-3 text-[11px] text-slate-500">
                           {it.sku && <span>SKU: {it.sku}</span>}
-                          <span>Price: {settings.currencySymbol}{it.unitPrice.toFixed(2)}</span>
+                          <span>Price: {settings.currencySymbol}{(Number(it.unitPrice) || 0).toFixed(2)}</span>
                           <span>Purchased: {it.purchasedQty}</span>
                           {it.alreadyReturnedQty > 0 && (
                             <span className="text-amber-600 dark:text-amber-400 font-semibold">

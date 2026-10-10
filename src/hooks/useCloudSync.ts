@@ -269,7 +269,7 @@ export function useCloudSync() {
     }
     setIsSyncing(true);
     try {
-      const d1Stores = ALL_STORES.filter((store) => store !== 'users');
+      const d1Stores = [...ALL_STORES];
       const changedKeys = new Set(getUnsyncedItemKeys());
       const submittedVersions = captureUnsyncedItemVersions(changedKeys);
       const hasLocalChanges = changedKeys.size > 0;

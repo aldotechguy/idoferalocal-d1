@@ -331,8 +331,8 @@ export const ReportsView: React.FC = () => {
         ...expensesByCategory.map((e) => [
           'Expense Item',
           e.category,
-          `${e.pctOfTotal.toFixed(1)}% of total overhead`,
-          e.amount.toFixed(2),
+          `${(Number(e.pctOfTotal) || 0).toFixed(1)}% of total overhead`,
+          (Number(e.amount) || 0).toFixed(2),
         ]),
         ['---', '---', '---', '---'],
         ['Top Products in Month', 'Product SKU', 'Units Sold in Month', 'Revenue in Month'],
@@ -340,7 +340,7 @@ export const ReportsView: React.FC = () => {
           p.name,
           p.sku,
           p.unitsSold,
-          p.totalRevenue.toFixed(2),
+          (Number(p.totalRevenue) || 0).toFixed(2),
         ]),
         ['---', '---', '---', '---'],
         ['Transactions Ledger', 'Date & Time', 'Customer', 'Invoice Total'],
@@ -402,7 +402,7 @@ export const ReportsView: React.FC = () => {
         item.name,
         item.sku,
         item.unitsSold,
-        item.totalRevenue.toFixed(2),
+        (Number(item.totalRevenue) || 0).toFixed(2),
       ]);
     } else if (reportType === 'DeadStock') {
       headers = ['Product Name', 'SKU', 'Category', 'Stock Level', 'Unit Cost', 'Tied Capital Value'];
@@ -768,8 +768,8 @@ export const ReportsView: React.FC = () => {
                       <div className="flex justify-between text-xs font-semibold text-slate-700 dark:text-slate-300">
                         <span>{item.category}</span>
                         <span className="font-bold text-slate-900 dark:text-white">
-                          {isPrivacyMode ? `${cs}••••••` : `${cs}${item.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}{' '}
-                          <span className="text-[10px] text-slate-400 font-normal">({isPrivacyMode ? '••%' : `${item.pctOfTotal.toFixed(1)}%`})</span>
+                          {isPrivacyMode ? `${cs}••••••` : `${cs}${(Number(item.amount) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}{' '}
+                          <span className="text-[10px] text-slate-400 font-normal">({isPrivacyMode ? '••%' : `${(Number(item.pctOfTotal) || 0).toFixed(1)}%`})</span>
                         </span>
                       </div>
                       <div className="w-full bg-slate-100 dark:bg-slate-800 h-2 rounded-full overflow-hidden">
@@ -793,7 +793,7 @@ export const ReportsView: React.FC = () => {
                     <div key={pm.method} className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800">
                       <p className="text-[10px] text-slate-400 font-bold truncate">{pm.method}</p>
                       <p className="text-xs font-extrabold text-slate-900 dark:text-white">
-                        {isPrivacyMode ? `${cs}••••` : `${cs}${pm.total.toFixed(0)}`}
+                        {isPrivacyMode ? `${cs}••••` : `${cs}${(Number(pm.total) || 0).toFixed(0)}`}
                       </p>
                       <p className="text-[9px] text-slate-500">{pm.count} orders</p>
                     </div>
@@ -846,7 +846,7 @@ export const ReportsView: React.FC = () => {
                           <td className="py-3 px-3 font-mono text-[11px] text-slate-500">{item.sku}</td>
                           <td className="py-3 px-3 font-bold text-emerald-600 text-right">{item.unitsSold} units</td>
                           <td className="py-3 px-3 font-bold text-slate-900 dark:text-white text-right">
-                            {isPrivacyMode ? `${cs}••••••` : `${cs}${item.totalRevenue.toFixed(2)}`}
+                            {isPrivacyMode ? `${cs}••••••` : `${cs}${(Number(item.totalRevenue) || 0).toFixed(2)}`}
                           </td>
                           <td className="py-3 px-4 font-bold text-emerald-600 dark:text-emerald-400 text-right">
                             {isPrivacyMode ? `${cs}••••••` : `+${cs}${itemProfit.toFixed(2)}`}
@@ -1003,10 +1003,10 @@ export const ReportsView: React.FC = () => {
                         <td className="py-3 px-3">{p.category}</td>
                         <td className="py-3 px-3 font-bold">{p.currentStock} {p.unit}</td>
                         <td className="py-3 px-3">
-                          {isPrivacyMode ? `${cs}••••` : `${cs}${p.costPrice.toFixed(2)}`}
+                          {isPrivacyMode ? `${cs}••••` : `${cs}${(Number(p.costPrice) || 0).toFixed(2)}`}
                         </td>
                         <td className="py-3 px-4 font-bold text-blue-600 dark:text-blue-400 text-right">
-                          {isPrivacyMode ? `${cs}••••••` : `${cs}${(p.currentStock * p.costPrice).toFixed(2)}`}
+                          {isPrivacyMode ? `${cs}••••••` : `${cs}${((Number(p.currentStock) || 0) * (Number(p.costPrice) || 0)).toFixed(2)}`}
                         </td>
                       </tr>
                     ))
@@ -1037,10 +1037,10 @@ export const ReportsView: React.FC = () => {
                         <td className="py-3 px-4 font-bold text-slate-900 dark:text-white">{p.name}</td>
                         <td className="py-3 px-3 font-mono text-[11px]">{p.sku}</td>
                         <td className="py-3 px-3 text-slate-500">
-                          {isPrivacyMode ? `${cs}••••` : `${cs}${p.costPrice.toFixed(2)}`}
+                          {isPrivacyMode ? `${cs}••••` : `${cs}${(Number(p.costPrice) || 0).toFixed(2)}`}
                         </td>
-                        <td className="py-3 px-3 font-bold text-emerald-600 dark:text-emerald-400">{cs}{p.retailPrice.toFixed(2)}</td>
-                        <td className="py-3 px-3 font-bold text-indigo-600 dark:text-indigo-400">{cs}{p.wholesalePrice.toFixed(2)}</td>
+                        <td className="py-3 px-3 font-bold text-emerald-600 dark:text-emerald-400">{cs}{(Number(p.retailPrice) || 0).toFixed(2)}</td>
+                        <td className="py-3 px-3 font-bold text-indigo-600 dark:text-indigo-400">{cs}{(Number(p.wholesalePrice) || 0).toFixed(2)}</td>
                         <td className="py-3 px-4 font-bold text-right text-blue-600 dark:text-blue-400">+{premPct}%</td>
                       </tr>
                     );
@@ -1076,7 +1076,7 @@ export const ReportsView: React.FC = () => {
                         <td className="py-3 px-3 font-mono text-[11px]">{item.sku}</td>
                         <td className="py-3 px-3 font-bold text-emerald-600">{item.unitsSold} units</td>
                         <td className="py-3 px-4 font-black text-slate-900 dark:text-white text-right">
-                          {isPrivacyMode ? `${cs}••••••` : `${cs}${item.totalRevenue.toFixed(2)}`}
+                          {isPrivacyMode ? `${cs}••••••` : `${cs}${(Number(item.totalRevenue) || 0).toFixed(2)}`}
                         </td>
                       </tr>
                     ))
@@ -1113,10 +1113,10 @@ export const ReportsView: React.FC = () => {
                         <td className="py-3 px-3">{p.category}</td>
                         <td className="py-3 px-3 font-bold text-amber-600">{p.currentStock} {p.unit}</td>
                         <td className="py-3 px-3">
-                          {isPrivacyMode ? `${cs}••••` : `${cs}${p.costPrice.toFixed(2)}`}
+                          {isPrivacyMode ? `${cs}••••` : `${cs}${(Number(p.costPrice) || 0).toFixed(2)}`}
                         </td>
                         <td className="py-3 px-4 font-bold text-rose-600 text-right">
-                          {isPrivacyMode ? `${cs}••••••` : `${cs}${(p.currentStock * p.costPrice).toFixed(2)}`}
+                          {isPrivacyMode ? `${cs}••••••` : `${cs}${((Number(p.currentStock) || 0) * (Number(p.costPrice) || 0)).toFixed(2)}`}
                         </td>
                       </tr>
                     ))

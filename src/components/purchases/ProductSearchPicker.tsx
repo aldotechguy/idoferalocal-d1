@@ -650,10 +650,10 @@ export const ProductSearchPicker: React.FC<ProductSearchPickerProps> = ({
                   <div className="flex items-center gap-3 shrink-0">
                     <div className="text-right">
                       <p className="text-xs font-black font-mono text-slate-900 dark:text-white">
-                        {currencySymbol}{product.costPrice.toFixed(2)}
+                        {currencySymbol}{(Number(product.costPrice) || 0).toFixed(2)}
                       </p>
                       <p className="text-[10px] text-slate-400 font-mono">
-                        Retail: {currencySymbol}{product.retailPrice.toFixed(2)}
+                        Retail: {currencySymbol}{(Number(product.retailPrice) || 0).toFixed(2)}
                       </p>
                     </div>
 

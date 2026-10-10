@@ -19,8 +19,10 @@ import {
   Clock,
   Check,
   EyeOff,
+  UserCheck,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { useCloudSync } from '../../hooks/useCloudSync';
 import {
@@ -47,7 +49,8 @@ type CategoryType =
   | 'suppliers'
   | 'purchases'
   | 'heldOrders'
-  | 'moneyMovements';
+  | 'moneyMovements'
+  | 'users';
 
 interface SyncItem {
   id: string;
@@ -85,6 +88,7 @@ export const UnsyncedChangesModal: React.FC<UnsyncedChangesModalProps> = ({ isOp
     settings,
   } = useApp();
 
+  const { users, deleteUser } = useAuth();
   const { showToast } = useToast();
   const { triggerSync, triggerDriveSync, isSyncing, unsyncedRecordsCount } = useCloudSync();
 
@@ -231,6 +235,18 @@ export const UnsyncedChangesModal: React.FC<UnsyncedChangesModalProps> = ({ isOp
     });
   });
 
+  users.forEach((u) => {
+    allItems.push({
+      id: u.id,
+      category: 'users',
+      categoryLabel: 'Staff Member',
+      title: u.displayName || u.email,
+      subtitle: `${u.role} • ${u.email} • Status: ${u.status}`,
+      date: u.createdAt ? new Date(u.createdAt).toLocaleString() : 'Recent',
+      originalItem: u,
+    });
+  });
+
   // Filter for UNSYNCED items only: local records pending D1 sync (explicit keys).
   const unsyncedAllItems = allItems.filter((item) => isItemUnsynced(item.category, item.id));
 
@@ -247,6 +263,7 @@ export const UnsyncedChangesModal: React.FC<UnsyncedChangesModalProps> = ({ isOp
     purchases: unsyncedAllItems.filter((i) => i.category === 'purchases').length,
     heldOrders: unsyncedAllItems.filter((i) => i.category === 'heldOrders').length,
     moneyMovements: unsyncedAllItems.filter((i) => i.category === 'moneyMovements').length,
+    users: unsyncedAllItems.filter((i) => i.category === 'users').length,
   };
 
   // Filter unsynced items by active category and search query
@@ -316,6 +333,9 @@ export const UnsyncedChangesModal: React.FC<UnsyncedChangesModalProps> = ({ isOp
           break;
         case 'moneyMovements':
           deleteMoneyMovement(item.id);
+          break;
+        case 'users':
+          deleteUser(item.id);
           break;
       }
 
@@ -389,6 +409,9 @@ export const UnsyncedChangesModal: React.FC<UnsyncedChangesModalProps> = ({ isOp
             case 'moneyMovements':
               deleteMoneyMovement(item.id);
               break;
+            case 'users':
+              deleteUser(item.id);
+              break;
           }
           removeItemUnsyncedKey(item.category, item.id);
           count++;
@@ -421,6 +444,7 @@ export const UnsyncedChangesModal: React.FC<UnsyncedChangesModalProps> = ({ isOp
     { id: 'purchases', label: 'Purchases', icon: FileText },
     { id: 'heldOrders', label: 'Held Orders', icon: Clock },
     { id: 'moneyMovements', label: 'Treasury / Cash', icon: DollarSign },
+    { id: 'users', label: 'Staff / Users', icon: UserCheck },
   ];
 
   return (

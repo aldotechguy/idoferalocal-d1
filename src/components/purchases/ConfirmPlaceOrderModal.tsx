@@ -93,13 +93,13 @@ export const ConfirmPlaceOrderModal: React.FC<ConfirmPlaceOrderModalProps> = ({
             updateProduct(
               prod.id,
               { costPrice: item.unitCost },
-              `PO Cost Price updated from ${settings.currencySymbol}${prod.costPrice.toFixed(2)} to ${settings.currencySymbol}${item.unitCost.toFixed(2)} (${po.poNumber})`
+              `PO Cost Price updated from ${settings.currencySymbol}${(Number(prod.costPrice) || 0).toFixed(2)} to ${settings.currencySymbol}${(Number(item.unitCost) || 0).toFixed(2)} (${po.poNumber})`
             );
 
             if (item.unitCost > prod.costPrice) {
               addNotification({
                 title: 'Cost Price Increase Alert',
-                message: `Cost price for "${prod.name}" increased to ${settings.currencySymbol}${item.unitCost.toFixed(2)} in PO #${po.poNumber}. Review retail prices to protect gross margin.`,
+                message: `Cost price for "${prod.name}" increased to ${settings.currencySymbol}${(Number(item.unitCost) || 0).toFixed(2)} in PO #${po.poNumber}. Review retail prices to protect gross margin.`,
                 type: 'price_increase_alert',
               });
             }
@@ -179,7 +179,7 @@ export const ConfirmPlaceOrderModal: React.FC<ConfirmPlaceOrderModalProps> = ({
           <div className="flex justify-between items-center pt-2 border-t border-slate-200 dark:border-slate-700">
             <span className="font-bold text-slate-700 dark:text-slate-300">Total Order Amount:</span>
             <span className="font-mono font-black text-sm text-emerald-600 dark:text-emerald-400">
-              {settings.currencySymbol}{po.totalAmount.toFixed(2)}
+              {settings.currencySymbol}{(Number(po.totalAmount) || 0).toFixed(2)}
             </span>
           </div>
         </div>

@@ -739,9 +739,9 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
     let msg = '';
 
     if (type === 'confirm') {
-      const delFeeLine = (order.deliveryFee && order.deliveryFee > 0) ? `\nDelivery Fee: ${settings.currencySymbol}${order.deliveryFee.toFixed(2)}` : '';
-      const discLine = (order.discount && order.discount > 0) ? `\nDiscount: -${settings.currencySymbol}${order.discount.toFixed(2)}` : '';
-      msg = `Hi ${order.customerName}! Thank you for your WhatsApp catalogue order #${order.preOrderNo}.\n\nOrder Items:\n${order.items.map((i) => `• ${i.quantity}x ${i.productName} (${settings.currencySymbol}${i.total.toFixed(2)})`).join('\n')}\n\nSubtotal: ${settings.currencySymbol}${order.subtotal.toFixed(2)}${discLine}${delFeeLine}\nTotal: ${settings.currencySymbol}${order.totalAmount.toFixed(2)} (Tax Exempt)\nDeposit Paid: ${settings.currencySymbol}${order.depositAmount.toFixed(2)}\nRemaining: ${settings.currencySymbol}${(order.totalAmount - order.depositAmount).toFixed(2)}\nStatus: ${order.status}\n\nWe are processing your order for dispatch!`;
+      const delFeeLine = (order.deliveryFee && order.deliveryFee > 0) ? `\nDelivery Fee: ${settings.currencySymbol}${(Number(order.deliveryFee) || 0).toFixed(2)}` : '';
+      const discLine = (order.discount && order.discount > 0) ? `\nDiscount: -${settings.currencySymbol}${(Number(order.discount) || 0).toFixed(2)}` : '';
+      msg = `Hi ${order.customerName}! Thank you for your WhatsApp catalogue order #${order.preOrderNo}.\n\nOrder Items:\n${order.items.map((i) => `• ${i.quantity}x ${i.productName} (${settings.currencySymbol}${(Number(i.total) || 0).toFixed(2)})`).join('\n')}\n\nSubtotal: ${settings.currencySymbol}${(Number(order.subtotal) || 0).toFixed(2)}${discLine}${delFeeLine}\nTotal: ${settings.currencySymbol}${(Number(order.totalAmount) || 0).toFixed(2)} (Tax Exempt)\nDeposit Paid: ${settings.currencySymbol}${(Number(order.depositAmount) || 0).toFixed(2)}\nRemaining: ${settings.currencySymbol}${((Number(order.totalAmount) || 0) - (Number(order.depositAmount) || 0)).toFixed(2)}\nStatus: ${order.status}\n\nWe are processing your order for dispatch!`;
     } else if (type === 'ready') {
       msg = `Hi ${order.customerName}, good news! Your order #${order.preOrderNo} is packed and ready for delivery/pickup.\nDelivery Address: ${order.deliveryAddress || 'Store Pickup'}.`;
     } else {
@@ -922,11 +922,11 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
                     <div className="text-right">
                       <div className="text-xs font-semibold text-slate-400">Total Pre-Order</div>
                       <div className="text-lg font-black text-slate-900 dark:text-white">
-                        {settings.currencySymbol}{order.totalAmount.toFixed(2)}
+                        {settings.currencySymbol}{(Number(order.totalAmount) || 0).toFixed(2)}
                       </div>
                       {order.depositAmount > 0 && order.status !== 'Completed' && (
                         <div className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
-                          Deposit Paid: {settings.currencySymbol}{order.depositAmount.toFixed(2)} (Bal: {settings.currencySymbol}{remainingBalance.toFixed(2)})
+                          Deposit Paid: {settings.currencySymbol}{(Number(order.depositAmount) || 0).toFixed(2)} (Bal: {settings.currencySymbol}{(Number(remainingBalance) || 0).toFixed(2)})
                         </div>
                       )}
                     </div>
@@ -1084,8 +1084,8 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
                                       ) : null}
                                     </td>
                                     <td className="p-2.5 text-center font-bold">{item.quantity}</td>
-                                    <td className="p-2.5 text-right font-mono">{settings.currencySymbol}{item.unitPrice.toFixed(2)}</td>
-                                    <td className="p-2.5 text-right font-bold font-mono">{settings.currencySymbol}{item.total.toFixed(2)}</td>
+                                    <td className="p-2.5 text-right font-mono">{settings.currencySymbol}{(Number(item.unitPrice) || 0).toFixed(2)}</td>
+                                    <td className="p-2.5 text-right font-bold font-mono">{settings.currencySymbol}{(Number(item.total) || 0).toFixed(2)}</td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -1097,18 +1097,18 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
                         <div className="p-3 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-slate-200/80 dark:border-slate-800 space-y-1.5 text-xs">
                           <div className="flex justify-between text-slate-600 dark:text-slate-400">
                             <span>Subtotal:</span>
-                            <span className="font-mono">{settings.currencySymbol}{order.subtotal.toFixed(2)}</span>
+                            <span className="font-mono">{settings.currencySymbol}{(Number(order.subtotal) || 0).toFixed(2)}</span>
                           </div>
                           {order.discount > 0 && (
                             <div className="flex justify-between text-rose-600 dark:text-rose-400">
                               <span>Discount:</span>
-                              <span className="font-mono">-{settings.currencySymbol}{order.discount.toFixed(2)}</span>
+                              <span className="font-mono">-{settings.currencySymbol}{(Number(order.discount) || 0).toFixed(2)}</span>
                             </div>
                           )}
                           {(order.deliveryFee || 0) > 0 ? (
                             <div className="flex justify-between text-blue-600 dark:text-blue-400 font-semibold">
                               <span>Delivery Fee Collected:</span>
-                              <span className="font-mono">+{settings.currencySymbol}{(order.deliveryFee || 0).toFixed(2)}</span>
+                              <span className="font-mono">+{settings.currencySymbol}{(Number(order.deliveryFee) || 0).toFixed(2)}</span>
                             </div>
                           ) : (
                             <div className="flex justify-between text-slate-400">
@@ -1122,12 +1122,12 @@ export const WhatsAppOrdersView: React.FC<{ onNavigate?: (page: string) => void 
                           </div>
                           <div className="flex justify-between font-bold pt-1.5 border-t border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white">
                             <span>Total Amount:</span>
-                            <span className="font-mono text-sm">{settings.currencySymbol}{order.totalAmount.toFixed(2)}</span>
+                            <span className="font-mono text-sm">{settings.currencySymbol}{(Number(order.totalAmount) || 0).toFixed(2)}</span>
                           </div>
                           {order.depositAmount > 0 && (
                             <div className="flex justify-between text-emerald-700 dark:text-emerald-400 font-semibold pt-1 border-t border-slate-200/60 dark:border-slate-800">
                               <span>Deposit Paid:</span>
-                              <span className="font-mono">{settings.currencySymbol}{order.depositAmount.toFixed(2)}</span>
+                              <span className="font-mono">{settings.currencySymbol}{(Number(order.depositAmount) || 0).toFixed(2)}</span>
                             </div>
                           )}
                         </div>
@@ -1475,7 +1475,7 @@ Address: Victoria Island, Lagos`}
                                 >
                                   {products.map((p) => (
                                     <option key={p.id} value={p.id}>
-                                      {p.name} ({settings.currencySymbol}{p.retailPrice.toFixed(2)}) — Stock: {p.currentStock} {p.unit}
+                                      {p.name} ({settings.currencySymbol}{(Number(p.retailPrice) || 0).toFixed(2)}) — Stock: {p.currentStock} {p.unit}
                                     </option>
                                   ))}
                                 </select>
@@ -1504,7 +1504,7 @@ Address: Victoria Island, Lagos`}
                                 />
 
                                 <div className="w-20 text-right font-mono font-bold text-xs text-slate-900 dark:text-white">
-                                  {settings.currencySymbol}{item.total.toFixed(2)}
+                                  {settings.currencySymbol}{(Number(item.total) || 0).toFixed(2)}
                                 </div>
 
                                 <button
@@ -1550,7 +1550,7 @@ Address: Victoria Island, Lagos`}
                                       </span>
                                     ) : (
                                       <span className="bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400 text-[9px] font-bold px-1.5 py-0.5 rounded">
-                                        Wholesale Price Triggered ({settings.currencySymbol}{matchedProd?.wholesalePrice.toFixed(2)})
+                                        Wholesale Price Triggered ({settings.currencySymbol}{(Number(matchedProd?.wholesalePrice) || 0).toFixed(2)})
                                       </span>
                                     )}
 
@@ -1700,19 +1700,19 @@ Address: Victoria Island, Lagos`}
               <div className="flex justify-between text-slate-600 dark:text-slate-300">
                 <span>Total Sale Value:</span>
                 <span className="font-mono font-bold text-slate-900 dark:text-white">
-                  {settings.currencySymbol}{orderToConvert.totalAmount.toFixed(2)}
+                  {settings.currencySymbol}{(Number(orderToConvert.totalAmount) || 0).toFixed(2)}
                 </span>
               </div>
               <div className="flex justify-between text-slate-600 dark:text-slate-300">
                 <span>Deposit Already Paid:</span>
                 <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">
-                  {settings.currencySymbol}{orderToConvert.depositAmount.toFixed(2)}
+                  {settings.currencySymbol}{(Number(orderToConvert.depositAmount) || 0).toFixed(2)}
                 </span>
               </div>
               <div className="flex justify-between text-slate-900 dark:text-white font-bold pt-1 border-t border-emerald-200 dark:border-emerald-800">
                 <span>Remaining Settlement:</span>
                 <span className="font-mono">
-                  {settings.currencySymbol}{(orderToConvert.totalAmount - orderToConvert.depositAmount).toFixed(2)}
+                  {settings.currencySymbol}{((Number(orderToConvert.totalAmount) || 0) - (Number(orderToConvert.depositAmount) || 0)).toFixed(2)}
                 </span>
               </div>
             </div>

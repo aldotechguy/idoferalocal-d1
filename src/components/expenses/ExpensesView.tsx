@@ -135,7 +135,7 @@ export const ExpensesView: React.FC = () => {
                     </span>
                   </td>
                   <td className="py-3 px-3 font-extrabold text-rose-600 dark:text-rose-400">
-                    {isPrivacyMode ? '••••••' : `-${settings.currencySymbol}${exp.amount.toFixed(2)}`}
+                    {isPrivacyMode ? '••••••' : `-${settings.currencySymbol}${(Number(exp.amount) || 0).toFixed(2)}`}
                   </td>
                   <td className="py-3 px-3 font-medium">{exp.paymentMethod}</td>
                   <td className="py-3 px-3 font-semibold">{exp.paidBy}</td>
@@ -214,7 +214,7 @@ export const ExpensesView: React.FC = () => {
       <ConfirmModal
         isOpen={!!expenseToDelete}
         title="Delete Expense Log"
-        message={`Are you sure you want to delete the expense log "${expenseToDelete?.title}" for ${settings.currencySymbol}${expenseToDelete?.amount.toFixed(2)}?`}
+        message={`Are you sure you want to delete the expense log "${expenseToDelete?.title}" for ${settings.currencySymbol}${(Number(expenseToDelete?.amount) || 0).toFixed(2)}?`}
         confirmText="Delete Expense"
         variant="danger"
         onClose={() => setExpenseToDelete(null)}

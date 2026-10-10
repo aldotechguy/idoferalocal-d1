@@ -111,7 +111,7 @@ export async function getAllItems<T>(storeName: StoreName): Promise<T[]> {
 export async function getAllLocalStores(): Promise<Record<string, any[]>> {
   const stores: Record<string, any[]> = {};
   await Promise.all(
-    LOCAL_BUSINESS_STORES.map(async (name) => {
+    ALL_STORES.map(async (name) => {
       stores[name] = await getAllItems(name);
     })
   );
@@ -403,6 +403,20 @@ export async function writeD1SnapshotToIndexedDB(stores: Record<string, any[]>):
       migratedStores.settings && Array.isArray(migratedStores.settings) && migratedStores.settings.length > 0
         ? putItem('settings', migrateRecord('settings', { ...migratedStores.settings[0], id: 'store_settings' }))
         : Promise.resolve(),
+      (async () => {
+        if (Array.isArray(migratedStores.users) && migratedStores.users.length > 0) {
+          const existingUsers = await getAllItems<any>('users');
+          const existingMap = new Map(existingUsers.map((u: any) => [u.id, u]));
+          const mergedUsers = migratedStores.users.map((u: any) => {
+            const prev = existingMap.get(u.id);
+            return prev?.password && !u.password ? { ...u, password: prev.password } : u;
+          });
+          await replaceStoreItems('users', mergedUsers);
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('idofera_db_restored', { detail: { users: mergedUsers } }));
+          }
+        }
+      })(),
     ]);
   } catch (err) {
     console.warn('writeD1SnapshotToIndexedDB warning:', err);

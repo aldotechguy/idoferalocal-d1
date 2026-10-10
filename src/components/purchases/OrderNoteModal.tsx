@@ -131,12 +131,12 @@ export const OrderNoteModal: React.FC<OrderNoteModalProps> = ({
       `*Requested Items:*`,
       ...po.items.map(
         (item, idx) =>
-          `${idx + 1}. ${item.productName} (SKU: ${item.sku}) - Qty: ${item.quantity} units @ Est. ${settings.currencySymbol}${item.unitCost.toFixed(2)}`
+          `${idx + 1}. ${item.productName} (SKU: ${item.sku}) - Qty: ${item.quantity} units @ Est. ${settings.currencySymbol}${(Number(item.unitCost) || 0).toFixed(2)}`
       ),
       ``,
-      `*Estimated Items Total:* ${settings.currencySymbol}${po.items.reduce((acc, i) => acc + i.quantity * i.unitCost, 0).toFixed(2)}`,
-      po.deliveryFee ? `*Target Logistics Fee:* ${settings.currencySymbol}${po.deliveryFee.toFixed(2)}` : '',
-      `*Estimated Grand Total:* ${settings.currencySymbol}${po.totalAmount.toFixed(2)}`,
+      `*Estimated Items Total:* ${settings.currencySymbol}${po.items.reduce((acc, i) => acc + (Number(i.quantity) || 0) * (Number(i.unitCost) || 0), 0).toFixed(2)}`,
+      po.deliveryFee ? `*Target Logistics Fee:* ${settings.currencySymbol}${(Number(po.deliveryFee) || 0).toFixed(2)}` : '',
+      `*Estimated Grand Total:* ${settings.currencySymbol}${(Number(po.totalAmount) || 0).toFixed(2)}`,
       ``,
       `_Please confirm availability, lead time, and your current net unit prices. Thank you._`,
     ].filter(Boolean);
@@ -396,10 +396,10 @@ export const OrderNoteModal: React.FC<OrderNoteModalProps> = ({
                         {item.quantity} units
                       </td>
                       <td className="py-3 px-3 text-right font-mono">
-                        {settings.currencySymbol}{item.unitCost.toFixed(2)}
+                        {settings.currencySymbol}{(Number(item.unitCost) || 0).toFixed(2)}
                       </td>
                       <td className="py-3 px-3 text-right font-bold font-mono text-slate-900">
-                        {settings.currencySymbol}{(item.quantity * item.unitCost).toFixed(2)}
+                        {settings.currencySymbol}{((Number(item.quantity) || 0) * (Number(item.unitCost) || 0)).toFixed(2)}
                       </td>
                       <td className="py-3 px-3 text-center border-l border-slate-200 bg-slate-50/50">
                         <div className="text-[10px] text-slate-500 space-y-0.5">
@@ -445,7 +445,7 @@ export const OrderNoteModal: React.FC<OrderNoteModalProps> = ({
                   <div className="flex justify-between text-blue-700">
                     <span>Target Logistics Allowance:</span>
                     <span className="font-mono font-bold">
-                      +{settings.currencySymbol}{po.deliveryFee.toFixed(2)}
+                      +{settings.currencySymbol}{(Number(po.deliveryFee) || 0).toFixed(2)}
                     </span>
                   </div>
                 )}
@@ -453,7 +453,7 @@ export const OrderNoteModal: React.FC<OrderNoteModalProps> = ({
                 <div className="flex justify-between items-center pt-2 border-t-2 border-slate-300 font-bold text-sm text-slate-900">
                   <span>Estimated Total:</span>
                   <span className="font-mono font-black text-base text-blue-700">
-                    {settings.currencySymbol}{po.totalAmount.toFixed(2)}
+                    {settings.currencySymbol}{(Number(po.totalAmount) || 0).toFixed(2)}
                   </span>
                 </div>
                 <p className="text-[10px] text-slate-400 text-right italic">

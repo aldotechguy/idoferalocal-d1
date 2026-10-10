@@ -110,6 +110,7 @@ const UNSYNCED_CATEGORY_ALIASES: Record<string, string[]> = {
   purchases: ['purchases'],
   heldOrders: ['heldOrders'],
   moneyMovements: ['moneyMovements'],
+  users: ['users'],
 };
 
 function getUnsyncedKeyVariants(category: string, id: string): string[] {
@@ -135,6 +136,7 @@ function getCanonicalUnsyncedStore(category: string): string {
     purchases: 'purchases',
     heldOrders: 'heldOrders',
     moneyMovements: 'moneyMovements',
+    users: 'users',
   };
   return canonical[category] || category;
 }
