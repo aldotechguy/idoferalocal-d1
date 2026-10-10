@@ -54,7 +54,13 @@ export async function saveDocument<T extends { id: string }>(
   collectionName: string,
   data: T
 ): Promise<void> {
-  const localData = { ...data, _lastSyncedAt: new Date().toISOString() };
+  // Credentials never leave this process. The server keeps the only hashed
+  // copy; writing the plaintext `password` into IndexedDB/localStorage would
+  // hand every script in the page (and every IndexedDB backup/restore) the
+  // keys to every account. Strip it before anything persists.
+  const localData: any = collectionName === 'users'
+    ? (() => { const { password, ...rest } = data as any; return rest; })()
+    : { ...data, _lastSyncedAt: new Date().toISOString() };
   markD1RecordChanged(collectionName, data.id);
 
   // 1. Save locally in IndexedDB

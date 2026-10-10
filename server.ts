@@ -954,6 +954,42 @@ app.post("/api/auth/verify-password", async (req, res) => {
   }
 });
 
+/**
+ * Clear the ENTIRE audit trail. Wiping every log is a super-admin action: it
+ * must be gated on the DB flag, the IdP group, and a fresh password step-up
+ * (the same bar as deleting a protected account), because the trail is the
+ * only record of who did what. The previous client-only `clearAuditLogs`
+ * emptied the local IndexedDB copy and left the D1/Drive copy intact, so the
+ * "cleared" trail reappeared on the next sync — a silent audit-cover-up.
+ */
+app.post("/api/auth/audit-logs/clear", async (req, res) => {
+  try {
+    const privileged = await requireSuperAdmin(req, res);
+    if ("denied" in privileged) return privileged.denied;
+    const actor = privileged.actor;
+
+    db.prepare("DELETE FROM audit_logs").run();
+
+    // Record the wipe itself so the trail is not left with zero evidence.
+    db.prepare(
+      `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      `audit-clear-${Date.now()}`,
+      String(actor.id),
+      'AUDIT_CLEAR',
+      'auditLogs',
+      null,
+      `Audit trail cleared by ${actor.display_name || actor.username} (${actor.id}).`,
+      new Date().toISOString()
+    );
+
+    return res.json({ ok: true });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message || "Failed to clear audit logs" });
+  }
+});
+
 // =================== D1 STORAGE ROUTES ===================
 
 // =================== MALL STOREFRONT API (Phase 5) ===================

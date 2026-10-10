@@ -137,25 +137,18 @@ export const DEMO_USERS: Record<UserRole, UserProfile> = {
 const DUMMY_USER_IDS = new Set(['usr-sales-1', 'usr-accountant-1']);
 
 const sanitizeUsersList = (rawUsers: UserProfile[]): UserProfile[] => {
-  const cleaned = rawUsers.filter((u) => u && !DUMMY_USER_IDS.has(u.id));
-  const sanitized = cleaned.map((u) => {
-    if (u.id === 'usr-admin-1' || u.username === 'admin') {
-      return {
-        ...u,
-        isSuperAdmin: false,
-        isProtected: false,
-      };
-    }
-    // The usr-admin-1 normalization that used to live here was dead code: the
-    // force-super branch above matched usr-admin-1 first (nothing excluded it),
-    // so the standard admin profile was promoted to Super-Admin plus
-    // isProtected. Derived flags are now trusted as received; privilege comes
-    // from the server's is_super_admin column and nowhere else.
-    return u;
-  });
+    const cleaned = rawUsers.filter((u) => u && !DUMMY_USER_IDS.has(u.id));
+    // Trust the server's `is_super_admin` column verbatim. The previous branch
+    // here force-cleared `isSuperAdmin` for `usr-admin-1` / username `admin`,
+    // which is the very account the seed installs as super-admin: the client
+    // was un-flagging the one super-admin it had, so every UI gate that reads
+    // `isSuperUser()` (privacy mode, role/status edits, audit clear) denied the
+    // legitimate super-admin while letting a non-admin through. Privilege is
+    // server-authoritative; this list is a roster, not a policy engine.
+    const sanitized = cleaned;
 
-  const uniqueUsers = new Map<string, UserProfile>();
-  for (const user of sanitized) {
+    const uniqueUsers = new Map<string, UserProfile>();
+    for (const user of sanitized) {
     const existing = uniqueUsers.get(user.id);
     if (!existing) {
       uniqueUsers.set(user.id, user);
@@ -690,17 +683,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return true;
       }
     } catch (err) {
-      console.warn('Server password verification fallback:', err);
+      console.warn('Server password verification unavailable:', err);
     }
 
-    // Fallback to local user record password check if offline or local account
-    const matchedUser =
-      users.find((u) => u.id === currentUser.id) ||
-      INITIAL_USERS.find((u) => u.id === currentUser.id) ||
-      currentUser;
-    if (matchedUser?.password && matchedUser.password === password) {
-      return true;
-    }
+    // There is no offline fallback. The client never stores a password —
+    // `saveDocument('users', …)` strips it, and the bundled placeholder profile
+    // carries none — so comparing against a local copy could only ever
+    // "verify" a phantom. A failed or offline verification is simply false;
+    // callers (disablePrivacyMode, step-up) surface the rejection instead of
+    // silently minting a pass.
     return false;
   };
 
@@ -781,12 +772,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       lastLogin: new Date().toISOString(),
     };
     setUsers((prev) => [newUser, ...prev]);
-    // Creating the account is privileged: the prompt/retry keeps this local
-    // creation in sync with what the server actually accepts.
+    saveDocument('users', newUser);
+
+    // Creating an account is privileged: the prompt/retry keeps this local
+    // creation in sync with what the server actually accepts. The local row is
+    // optimistic — if the server rejects it, revert the roster so a failed
+    // create cannot leave a phantom account behind.
     privilegedRequest('/api/auth/users', { method: 'PUT', body: JSON.stringify({ user: newUser, password: newUser.password }) })
       .then((response) => { if (!response.ok) throw new Error('Server rejected the new user.'); })
-      .catch((error) => showToast({ title: 'Server Account Error', message: error.message, type: 'error' }));
-    saveDocument('users', newUser);
+      .catch((error) => {
+        setUsers((prev) => prev.filter((u) => u.id !== newUser.id));
+        removeDocument('users', newUser.id).catch(() => {});
+        showToast({ title: 'Server Account Error', message: error.message, type: 'error' });
+      });
     showToast({
       title: 'New User Created',
       message: `User account for "${userData.displayName}" (${userData.role}) created successfully.`,
@@ -826,13 +824,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!target) return;
     targetName = target.displayName;
     const updated = { ...target, ...updates };
-    privilegedRequest('/api/auth/users', { method: 'PUT', body: JSON.stringify({ user: updated, password: updates.password }) })
-      .catch((error) => console.warn('Server user update warning:', error));
+
+    // Optimistic local write. The server PUT is privileged and may be refused
+    // (403 / 400); capture the previous row so a rejection can restore it
+    // instead of leaving the client diverged from the server.
+    const previousRow = { ...target };
     saveDocument('users', updated);
     setUsers((prev) => prev.map((u) => (u.id === id ? updated : u)));
     if (currentUser?.id === id) {
       setCurrentUser(updated);
     }
+
+    privilegedRequest('/api/auth/users', { method: 'PUT', body: JSON.stringify({ user: updated, password: updates.password }) })
+      .then(async (response) => {
+        if (response.ok) return;
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || `Server rejected the update (HTTP ${response.status}).`);
+      })
+      .catch((error) => {
+        // Revert to the row the server still holds.
+        saveDocument('users', previousRow);
+        setUsers((prev) => prev.map((u) => (u.id === id ? previousRow : u)));
+        if (currentUser?.id === id) setCurrentUser(previousRow);
+        showToast({ title: 'User Update Reverted', message: error.message || 'The server rejected the profile change. Local changes were reverted.', type: 'error' });
+      });
     showToast({
       title: 'User Profile Updated',
       message: `Account details for "${targetName}" updated.`,
@@ -840,7 +855,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
   };
 
-  const deleteUser = (id: string) => {
+  const deleteUser = async (id: string) => {
     if (!isSuperUser(currentUser)) {
       showToast({
         title: 'Delete Denied',
@@ -863,12 +878,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       showToast({ title: 'Delete Failed', message: 'Cannot delete the only remaining Administrator.', type: 'error' });
       throw new Error('Cannot delete the only remaining Administrator.');
     }
-    setUsers((prev) => prev.filter((u) => u.id !== id));
+
     // Deleting an account is privileged: the server demands a fresh password
     // confirmation (403 STEP_UP_REQUIRED), which privilegedRequest prompts for.
-    privilegedRequest(`/api/auth/users/${encodeURIComponent(id)}`, { method: 'DELETE' })
-      .then((response) => { if (!response.ok) console.warn('Server user deletion rejected:', response.status); })
-      .catch((error) => console.warn('Server user deletion warning:', error));
+    // Wait for the server's verdict BEFORE touching local state, so a refused
+    // or failed delete leaves the roster intact (the old code removed the row
+    // first and swallowed the error, leaving a phantom gap).
+    let response: Response;
+    try {
+      response = await privilegedRequest(`/api/auth/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    } catch (error: any) {
+      showToast({ title: 'Delete Failed', message: error.message || 'Could not delete user account.', type: 'error' });
+      throw error;
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      const message = body.error || `Server rejected the deletion (HTTP ${response.status}).`;
+      showToast({ title: 'Delete Failed', message, type: 'error' });
+      throw new Error(message);
+    }
+
+    setUsers((prev) => prev.filter((u) => u.id !== id));
     removeDocument('users', id);
     showToast({
       title: 'User Account Deleted',

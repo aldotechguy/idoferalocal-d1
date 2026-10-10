@@ -370,7 +370,7 @@ export const SettingsView: React.FC = () => {
     setIsUserModalOpen(true);
   };
 
-  const confirmDeleteUser = () => {
+  const confirmDeleteUser = async () => {
     if (!userToDelete) return;
     setActionError(null);
     try {
@@ -1258,8 +1258,6 @@ export const SettingsView: React.FC = () => {
                 <option value="Inventory">Inventory & Products</option>
                 <option value="User">Users & Role Security</option>
                 <option value="Pricing">Price Adjustments</option>
-                <option value="Supplier">Suppliers & Customers</option>
-                <option value="PO">Purchase Orders & Expenses</option>
               </select>
             </div>
 

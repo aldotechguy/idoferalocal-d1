@@ -782,19 +782,42 @@ async function changeAuthPassword(request: Request, env: Env) {
 async function verifyAuthPassword(request: Request, env: Env) {
   await ensureAuthSeed(env);
   const actor = await requireAppUser(request, env);
+  if (!actor) return json({error: 'Authentication required.'}, 401);
   const body = await readJson(request);
-  const fallbackUserId = String(body?.userId || '');
-  let targetUser = actor;
-  if (!targetUser && fallbackUserId) {
-    const rows = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(fallbackUserId).all<AppUserRow>();
-    targetUser = rows.results?.[0] || null;
-  }
-  if (!targetUser) return json({error: 'Authentication required.'}, 401);
+  const targetUser = actor;
   const password = String(body?.password || '');
   if (!password) return json({error: 'Password is required.'}, 400);
   const candidate = await hashPassword(password, targetUser.password_salt, targetUser.password_iterations);
   if (!safeEqual(candidate, targetUser.password_hash)) return json({error: 'Incorrect password.'}, 401);
   return json({ok: true});
+}
+
+/**
+ * Clear the ENTIRE audit trail. Wiping every log is a super-admin action: it
+ * must be gated on the DB flag, the IdP group, and a fresh password step-up
+ * (the same bar as deleting a protected account), because the trail is the
+ * only record of who did what. The previous client-only `clearAuditLogs`
+ * emptied the local IndexedDB copy and left the D1/Drive copy intact, so the
+ * "cleared" trail reappeared on the next sync — a silent audit-cover-up.
+ */
+async function clearAuditLogs(request: Request, env: Env) {
+  const privileged = await requireSuperAdmin(request, env);
+  if ('error' in privileged) return privileged.error;
+  const { actor } = privileged;
+  await env.DB.prepare('DELETE FROM audit_logs').run();
+  await env.DB.prepare(
+    `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    `audit-clear-${Date.now()}`,
+    String(actor.id),
+    'AUDIT_CLEAR',
+    'auditLogs',
+    null,
+    `Audit trail cleared by ${actor.display_name || actor.username} (${actor.id}).`,
+    new Date().toISOString()
+  ).run();
+  return json({ ok: true });
 }
 
 async function readJson(request: Request) {
@@ -1236,6 +1259,7 @@ export default {
       if (request.method === 'DELETE' && url.pathname.startsWith('/api/auth/users/')) return await deleteAuthUser(request, env, decodeURIComponent(url.pathname.slice('/api/auth/users/'.length)));
       if (request.method === 'POST' && url.pathname === '/api/auth/password') return await changeAuthPassword(request, env);
       if (request.method === 'POST' && url.pathname === '/api/auth/verify-password') return await verifyAuthPassword(request, env);
+      if (request.method === 'POST' && url.pathname === '/api/auth/audit-logs/clear') return await clearAuditLogs(request, env);
       if (request.method === 'PUT' && url.pathname === '/api/storage/snapshot') return await saveSnapshot(request, env);
       if (request.method === 'GET' && url.pathname === '/api/storage/snapshot') return await readSnapshot(request, env);
       if (request.method === 'PATCH' && url.pathname === '/api/storage/records') return await patchRecords(request, env);

@@ -88,7 +88,7 @@ export const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, userToEdi
   const isEditingSuperBlocked = isEditingSuper && !isCurrentSuper;
   const isCreationBlocked = !userToEdit && !isCurrentSuper;
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!userToEdit) return;
     if (!isCurrentSuper) {
       setError('Only the Super-User session can delete user accounts.');
@@ -184,6 +184,16 @@ export const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, userToEdi
       return;
     }
 
+    if (!userToEdit && (!formData.password.trim() || formData.password.trim().length < 8)) {
+      setError('An initial log-in password of at least 8 characters is required.');
+      return;
+    }
+
+    if (userToEdit && formData.password.trim() && formData.password.trim().length < 8) {
+      setError('New password must be at least 8 characters long.');
+      return;
+    }
+
     try {
       const now = new Date().toISOString();
       if (userToEdit) {
@@ -216,7 +226,7 @@ export const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, userToEdi
           role: formData.role,
           status: formData.status,
           avatarUrl: formData.avatarUrl.trim() || undefined,
-          password: formData.password.trim() || 'password123',
+          password: formData.password.trim(),
           passwordLastChanged: now,
         });
 

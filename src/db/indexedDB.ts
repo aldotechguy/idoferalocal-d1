@@ -315,6 +315,19 @@ export async function importDatabaseJSON(jsonString: string): Promise<boolean> {
 
     const migratedData = migrateSnapshot(data);
 
+    // Credentials never enter the local store. The server keeps the only hashed
+    // copy; an imported backup/restore that rewrites the `users` store would
+    // otherwise hand every plaintext password to this browser. Strip them before
+    // anything is written.
+    if (Array.isArray(migratedData.users)) {
+      migratedData.users = migratedData.users
+        .filter((u: any) => u && typeof u === 'object')
+        .map((u: any) => {
+          const { password, ...rest } = u;
+          return rest;
+        });
+    }
+
     for (const storeName of ALL_STORES) {
       const storeItems = migratedData[storeName];
 
@@ -350,15 +363,14 @@ export async function importDatabaseJSON(jsonString: string): Promise<boolean> {
       }
     }
 
-    // Special handling for users store in localStorage
-    if (Array.isArray(data.users) && data.users.length > 0) {
-      const activeUser = data.users.find((u: any) => u && u.id && u.role === 'SuperAdmin') ||
-        data.users.find((u: any) => u && u.id) ||
-        data.users[0];
-      if (activeUser && activeUser.id) {
-        safeSetLocalStorage('idofera_current_user_id', activeUser.id);
-      }
-    }
+    // A restored backup must not silently re-log somebody in. The previous
+    // version set `idofera_current_user_id` to whichever user row happened to
+    // carry a `SuperAdmin` role (or, failing that, the first row in the file),
+    // which on a backup from another tenant dropped a stranger's account into
+    // the active session. The current session is server-authoritative — leave
+    // the selection alone and let `/api/auth/session` decide on reload.
+    // (Passwords were already stripped above, so there is nothing here that
+    // could authenticate anything anyway.)
 
     // Dispatch global event so active React Contexts update immediately in memory
     if (typeof window !== 'undefined') {

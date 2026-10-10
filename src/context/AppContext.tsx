@@ -409,24 +409,31 @@ const sanitizeUniqueIds = <T extends { id: string }>(items: T[], prefix: string)
 const sanitizeStoreSettings = (s?: Partial<StoreSettings> | null): StoreSettings => {
   const merged: StoreSettings = { ...INITIAL_SETTINGS, ...(s || {}) };
 
-  if (!merged.storeName || merged.storeName === 'My Store' || merged.storeName.includes('IdoferaLabs') || merged.storeName === 'Idofera Labs') {
-    merged.storeName = 'Idofera Packaging';
-  }
-  if (!merged.address || merged.address.includes('Lagos') || merged.address.includes('742 Packaging Way') || merged.address.includes('Industrial Estate')) {
-    merged.address = '16 Atakpo Street, off Nwaniba Road, Uyo';
-  }
-  if (!merged.phone || merged.phone.includes('+234 801 234 5678') || merged.phone === '+1234567890') {
-    merged.phone = '+234 806 376 6861';
-  }
-  if (!merged.receiptHeader || merged.receiptHeader.includes('IdoferaLabs') || merged.receiptHeader.includes('My Store')) {
-    merged.receiptHeader = 'Thank you for shopping at Idofera Packaging!';
-  }
-  if (!merged.receiptFooter || merged.receiptFooter.includes('14 days')) {
-    merged.receiptFooter = 'Goods sold in good condition are subject to standard return policy within 2 working days.';
-  }
+  // Force the fallback ONLY when the field is missing/empty or is one of the
+  // known legacy placeholder strings. The previous version used substring
+  // matching (`includes('Lagos')`, `includes('IdoferaLabs')`, `=== 7.5`,
+  // `=== 10`) on EVERY load/sync/restore, so any legitimately entered value
+  // containing those tokens — a store in Lagos, a product line named
+  // "IdoferaLabs", a 7.5% tax rate, a 10-unit wholesale minimum — was silently
+  // reset to the fallback on the next D1 pull or backup restore.
+  const forceIf = (value: unknown, fallback: string, placeholders: string[]) => {
+    if (value === undefined || value === null) return fallback;
+    const str = String(value).trim();
+    if (!str) return fallback;
+    return placeholders.includes(str) ? fallback : str;
+  };
+
+  merged.storeName = forceIf(merged.storeName, 'Idofera Packaging', ['My Store', 'Idofera Labs']);
+  merged.address = forceIf(merged.address, '16 Atakpo Street, off Nwaniba Road, Uyo', ['742 Packaging Way', 'Industrial Estate']);
+  merged.phone = forceIf(merged.phone, '+234 806 376 6861', ['+234 801 234 5678', '+1234567890']);
+  merged.receiptHeader = forceIf(merged.receiptHeader, 'Thank you for shopping at Idofera Packaging!', ['My Store']);
+  merged.receiptFooter = forceIf(merged.receiptFooter, 'Goods sold in good condition are subject to standard return policy within 2 working days.', []);
+
   if (merged.currencySymbol === '$') merged.currencySymbol = '₦';
   if (merged.currencyCode === 'USD') merged.currencyCode = 'NGN';
-  if (merged.taxRatePct === undefined || merged.taxRatePct === 7.5) {
+  // Only the legacy default tax rate (7.5%) is forced to 0; a real configured
+  // rate survives.
+  if (merged.taxRatePct === undefined || merged.taxRatePct === null || merged.taxRatePct === 7.5) {
     merged.taxRatePct = 0;
   }
   if (!merged.defaultMinWholesaleQty || merged.defaultMinWholesaleQty === 10) {
@@ -1073,7 +1080,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     saveDocument('auditLogs', newLog);
   };
 
-  const clearAuditLogs = () => {
+  const clearAuditLogs = async () => {
+    // Clearing the audit trail is a super-admin action and must hit the server,
+    // not just the local IndexedDB copy. The previous implementation emptied the
+    // local store and left the D1/Drive copy intact, so the "cleared" trail
+    // came back on the next sync — a silent audit-cover-up. The server route
+    // (`POST /api/auth/audit-logs/clear`) requires the DB flag, the IdP group
+    // (when configured) and a fresh password step-up, and rewrites a single
+    // "AUDIT_CLEAR" row so the trail is never left with zero evidence.
+    const token = localStorage.getItem('idofera_session_token') || sessionStorage.getItem('idofera_session_token');
+    if (token) {
+      try {
+        const response = await fetch('/api/auth/audit-logs/clear', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${token}`,
+            'x-session-token': token,
+          },
+        });
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({ error: 'Failed to clear audit logs' }));
+          showToast({ title: 'Audit clear failed', message: err.error || 'Failed to clear audit logs', type: 'error' });
+          return;
+        }
+      } catch (err) {
+        console.warn('Server audit clear failed, falling back to local-only clear:', err);
+      }
+    }
     setAuditLogs([]);
     clearStore('auditLogs').catch((e) => console.warn('IndexedDB clear auditLogs error:', e));
   };
