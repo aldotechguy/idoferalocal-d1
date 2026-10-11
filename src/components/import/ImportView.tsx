@@ -21,6 +21,7 @@ import {
   Database,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { parseDelimitedLine, detectDelimiter } from '../../shared/importGuards';
 
 type ImportCategory = 'products' | 'customers' | 'suppliers' | 'sales' | 'whatsapp';
 
@@ -67,21 +68,27 @@ export const ImportView: React.FC = () => {
   };
 
   const parseCsvText = (text: string): any[] => {
-    const lines = text.split(/\r\n|\n/).filter((line) => line.trim().length > 0);
+    // Split on any common record separator (CRLF, LF, or bare CR) so files
+    // saved on any platform parse identically.
+    const lines = text.split(/\r\n|\n|\r/).filter((line) => line.trim().length > 0);
     if (lines.length < 2) return [];
 
+    // Detect the delimiter from the header row via the shared guard
+    // (the wizard advertises .tsv support).
+    const delimiter = detectDelimiter(lines[0]);
+
     // Extract Headers
-    const headers = parseCsvLine(lines[0]).map((h) => h.trim().toLowerCase());
+    const headers = parseDelimitedLine(lines[0], delimiter).map((h) => h.trim().toLowerCase());
 
     const records: any[] = [];
 
     for (let i = 1; i < lines.length; i++) {
-      const values = parseCsvLine(lines[i]);
+      const values = parseDelimitedLine(lines[i], delimiter);
       if (values.length === 0) continue;
 
       const rowObj: Record<string, any> = {};
       headers.forEach((header, idx) => {
-        const val = values[idx] ? values[idx].trim() : '';
+        const val = values[idx] !== undefined ? values[idx].trim() : '';
         rowObj[header] = val;
       });
 
@@ -91,26 +98,6 @@ export const ImportView: React.FC = () => {
     }
 
     return records;
-  };
-
-  const parseCsvLine = (line: string): string[] => {
-    const result: string[] = [];
-    let current = '';
-    let inQuotes = false;
-
-    for (let i = 0; i < line.length; i++) {
-      const char = line[i];
-      if (char === '"' || char === "'") {
-        inQuotes = !inQuotes;
-      } else if (char === ',' && !inQuotes) {
-        result.push(current);
-        current = '';
-      } else {
-        current += char;
-      }
-    }
-    result.push(current);
-    return result;
   };
 
   const normalizeRow = (row: Record<string, any>, cat: ImportCategory): any => {
@@ -124,11 +111,26 @@ export const ImportView: React.FC = () => {
       return defaultVal;
     };
 
+    // Parse a numeric column, returning undefined when the cell is empty or
+    // not a number. `allowZero` distinguishes a legitimate 0 (e.g. stock) from
+    // a missing value. Undefined lets the bulk importer keep existing data.
+    const getNumber = (possibleKeys: string[], allowZero = false): number | undefined => {
+      const raw = getVal(possibleKeys, '');
+      if (raw === '' || raw === null || raw === undefined) return undefined;
+      const parsed = Number(String(raw).replace(/[^0-9.-]/g, ''));
+      if (Number.isNaN(parsed)) return undefined;
+      if (!allowZero && parsed === 0) return undefined;
+      return parsed;
+    };
+
     if (cat === 'products') {
-      const cost = parseFloat(getVal(['cost', 'costprice', 'cost_price', 'buy'], '10')) || 10;
-      const retail = parseFloat(getVal(['retail', 'retailprice', 'price', 'selling'], '20')) || 20;
-      const wholesale = parseFloat(getVal(['wholesale', 'wholesaleprice', 'bulk'], '15')) || 15;
-      const stock = parseInt(getVal(['stock', 'currentstock', 'qty', 'quantity'], '10')) || 10;
+      // Missing or invalid numerics stay undefined so the bulk importer can
+      // preserve an existing value on update, instead of overwriting real
+      // prices/stock with fabricated defaults.
+      const cost = getNumber(['cost', 'costprice', 'cost_price', 'buy']);
+      const retail = getNumber(['retail', 'retailprice', 'price', 'selling']);
+      const wholesale = getNumber(['wholesale', 'wholesaleprice', 'bulk']);
+      const stock = getNumber(['stock', 'currentstock', 'qty', 'quantity'], true);
       const gen4Char = () => Array.from({ length: 4 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 36)]).join('');
 
       return {
@@ -142,14 +144,14 @@ export const ImportView: React.FC = () => {
         currentStock: stock,
       };
     } else if (cat === 'customers') {
+      // Only fields that exist on the Customer schema are produced; the wizard
+      // previously previewed company/type/creditLimit which were then dropped
+      // silently on commit. Those columns do not exist, so they are removed.
       return {
         name: getVal(['name', 'customer', 'client'], 'Imported Client'),
         email: getVal(['email', 'mail'], ''),
         phone: getVal(['phone', 'mobile', 'whatsapp', 'contact'], ''),
-        company: getVal(['company', 'business', 'organization'], ''),
-        type: getVal(['type', 'group'], 'Retail'),
         address: getVal(['address', 'location', 'city'], ''),
-        creditLimit: parseFloat(getVal(['credit', 'limit', 'creditlimit'], '100000')) || 100000,
       };
     } else if (cat === 'suppliers') {
       return {
@@ -162,7 +164,7 @@ export const ImportView: React.FC = () => {
         paymentTerms: getVal(['terms', 'paymentterms'], 'Net 30'),
       };
     } else if (cat === 'sales') {
-      const total = parseFloat(getVal(['total', 'amount', 'totalamount', 'price'], '5000')) || 5000;
+      const total = getNumber(['total', 'amount', 'totalamount', 'price']);
       return {
         invoiceNo: getVal(['invoice', 'invoiceno', 'receipt', 'ref'], `INV-IMP-${Math.floor(Math.random() * 89999 + 10000)}`),
         customerName: getVal(['customer', 'client', 'name'], 'Walk-in Customer'),
@@ -173,9 +175,9 @@ export const ImportView: React.FC = () => {
         saleType: getVal(['type', 'saletype'], 'Retail'),
       };
     } else if (cat === 'whatsapp') {
-      const unit = parseFloat(getVal(['unit', 'unitprice', 'price'], '2500')) || 2500;
-      const qty = parseInt(getVal(['qty', 'quantity', 'count'], '1')) || 1;
-      const total = parseFloat(getVal(['total', 'totalamount', 'amount'], (unit * qty).toString())) || unit * qty;
+      const unit = getNumber(['unit', 'unitprice', 'price']) ?? 2500;
+      const qty = getNumber(['qty', 'quantity', 'count'], true) ?? 1;
+      const total = getNumber(['total', 'totalamount', 'amount']) ?? unit * qty;
 
       return {
         customerName: getVal(['customer', 'client', 'name'], 'WhatsApp Client'),
@@ -286,19 +288,28 @@ export const ImportView: React.FC = () => {
       return;
     }
 
-    if (category === 'products') {
-      bulkImportProducts(recordsToImport);
-    } else if (category === 'customers') {
-      bulkImportCustomers(recordsToImport);
-    } else if (category === 'suppliers') {
-      bulkImportSuppliers(recordsToImport);
-    } else if (category === 'sales') {
-      bulkImportSales(recordsToImport);
-    } else if (category === 'whatsapp') {
-      bulkImportWhatsAppPreOrders(recordsToImport);
+    setErrorMessage(null);
+    try {
+      // Each bulk importer reports its own detailed result (created vs. updated
+      // vs. skipped duplicates) via a toast and audit entry, so this banner only
+      // confirms the commit was dispatched rather than over-claiming success.
+      if (category === 'products') {
+        bulkImportProducts(recordsToImport);
+      } else if (category === 'customers') {
+        bulkImportCustomers(recordsToImport);
+      } else if (category === 'suppliers') {
+        bulkImportSuppliers(recordsToImport);
+      } else if (category === 'sales') {
+        bulkImportSales(recordsToImport);
+      } else if (category === 'whatsapp') {
+        bulkImportWhatsAppPreOrders(recordsToImport);
+      }
+      setImportSuccess(`Committed ${recordsToImport.length} selected ${category} record(s). See the toast for created/updated counts.`);
+    } catch (err: any) {
+      setErrorMessage(`Import failed: ${err?.message || 'unexpected error'}. No records were committed.`);
+      return;
     }
 
-    setImportSuccess(`Successfully imported ${recordsToImport.length} ${category} records into live workspace.`);
     setParsedItems([]);
     setSelectedRows([]);
     setFileSelected(null);
@@ -551,9 +562,7 @@ export const ImportView: React.FC = () => {
                       <th className="py-2.5 px-3">Customer Name</th>
                       <th className="py-2.5 px-3">Email</th>
                       <th className="py-2.5 px-3">Phone</th>
-                      <th className="py-2.5 px-3">Company</th>
-                      <th className="py-2.5 px-3">Type</th>
-                      <th className="py-2.5 px-3">Credit Limit</th>
+                      <th className="py-2.5 px-3">Address</th>
                     </>
                   )}
                   {category === 'suppliers' && (
@@ -620,9 +629,7 @@ export const ImportView: React.FC = () => {
                         <td className="py-2.5 px-3 font-bold text-slate-900 dark:text-white">{item.name}</td>
                         <td className="py-2.5 px-3">{item.email || 'N/A'}</td>
                         <td className="py-2.5 px-3 font-mono">{item.phone || 'N/A'}</td>
-                        <td className="py-2.5 px-3">{item.company || 'Private'}</td>
-                        <td className="py-2.5 px-3 font-bold">{item.type}</td>
-                        <td className="py-2.5 px-3 font-mono">{settings.currencySymbol}{(item.creditLimit || 0).toLocaleString()}</td>
+                        <td className="py-2.5 px-3">{item.address || 'N/A'}</td>
                       </>
                     )}
 

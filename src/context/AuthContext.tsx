@@ -777,19 +777,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // Creating an account is privileged: the prompt/retry keeps this local
     // creation in sync with what the server actually accepts. The local row is
     // optimistic — if the server rejects it, revert the roster so a failed
-    // create cannot leave a phantom account behind.
+    // create cannot leave a phantom account behind. The success toast fires
+    // only after the server accepts, never while the PUT is still in flight.
     privilegedRequest('/api/auth/users', { method: 'PUT', body: JSON.stringify({ user: newUser, password: newUser.password }) })
-      .then((response) => { if (!response.ok) throw new Error('Server rejected the new user.'); })
+      .then((response) => {
+        if (!response.ok) throw new Error('Server rejected the new user.');
+        showToast({
+          title: 'New User Created',
+          message: `User account for "${userData.displayName}" (${userData.role}) created successfully.`,
+          type: 'success',
+        });
+      })
       .catch((error) => {
         setUsers((prev) => prev.filter((u) => u.id !== newUser.id));
         removeDocument('users', newUser.id).catch(() => {});
         showToast({ title: 'Server Account Error', message: error.message, type: 'error' });
       });
-    showToast({
-      title: 'New User Created',
-      message: `User account for "${userData.displayName}" (${userData.role}) created successfully.`,
-      type: 'success',
-    });
     return newUser;
   };
 
@@ -837,7 +840,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     privilegedRequest('/api/auth/users', { method: 'PUT', body: JSON.stringify({ user: updated, password: updates.password }) })
       .then(async (response) => {
-        if (response.ok) return;
+        if (response.ok) {
+          showToast({
+            title: 'User Profile Updated',
+            message: `Account details for "${targetName}" updated.`,
+            type: 'info',
+          });
+          return;
+        }
         const body = await response.json().catch(() => ({})) as { error?: string };
         throw new Error(body.error || `Server rejected the update (HTTP ${response.status}).`);
       })
@@ -848,11 +858,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (currentUser?.id === id) setCurrentUser(previousRow);
         showToast({ title: 'User Update Reverted', message: error.message || 'The server rejected the profile change. Local changes were reverted.', type: 'error' });
       });
-    showToast({
-      title: 'User Profile Updated',
-      message: `Account details for "${targetName}" updated.`,
-      type: 'info',
-    });
   };
 
   const deleteUser = async (id: string) => {
@@ -903,7 +908,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     showToast({
       title: 'User Account Deleted',
       message: targetUser ? `User "${targetUser.displayName}" removed.` : 'User account removed.',
-      type: 'error',
+      type: 'success',
     });
   };
 

@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef, useMemo 
 import { useAuth } from './AuthContext';
 import { catalogStatus } from '../shared/productStatus';
 import { syncMallOrderFromPos } from '../shared/posMallSync';
+import { findExistingCustomerIndex, findExistingSupplierIndex, isDuplicateSaleInvoice } from '../shared/importGuards';
 import {
   Product,
   Customer,
@@ -1332,24 +1333,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           saveDocument('products', updatedProduct);
           updatedCount++;
         } else {
-          const stockVal = Number(item.currentStock) || 0;
-          const minStock = Number(item.minimumStockLevel) || 5;
+          // Create: only fall back to a safe default where the schema requires
+          // a value; never fabricate a barcode or a phantom supplier link.
+          const stockVal = item.currentStock ?? 0;
+          const minStock = item.minimumStockLevel ?? 5;
           const newProduct: Product = {
-            id: 'prod-imp-' + Date.now() + '-' + idx,
+            id: generateUniqueId('prod'),
             name: item.name || 'Imported Product',
             sku: itemSKU,
-            barcode: item.barcode || `${Math.floor(Math.random() * 899999999999 + 100000000000)}`,
+            barcode: item.barcode || '',
             category: item.category || 'General',
             brand: item.brand || 'Unbranded',
-            supplierId: item.supplierId || 'sup-1',
-            supplierName: item.supplierName || 'General Supplier',
+            supplierId: item.supplierId || '',
+            supplierName: item.supplierName || '',
             description: item.description || '',
             images: item.images && item.images.length > 0 ? item.images : ['https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f?w=600&auto=format&fit=crop'],
-            costPrice: Number(item.costPrice) || 10,
-            retailPrice: Number(item.retailPrice) || 20,
-            wholesalePrice: Number(item.wholesalePrice) || 15,
-            minWholesaleQty: Number(item.minWholesaleQty) || settings.defaultMinWholesaleQty,
-            minimumSellingPrice: Number(item.minimumSellingPrice) || 12,
+            costPrice: item.costPrice ?? 0,
+            retailPrice: item.retailPrice ?? 0,
+            wholesalePrice: item.wholesalePrice ?? 0,
+            minWholesaleQty: item.minWholesaleQty ?? settings.defaultMinWholesaleQty,
+            minimumSellingPrice: item.minimumSellingPrice ?? 0,
             currentStock: stockVal,
             minimumStockLevel: minStock,
             unit: item.unit || 'pcs',
@@ -1377,57 +1380,140 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const bulkImportCustomers = (imported: Partial<Customer>[]) => {
     const now = new Date().toISOString();
-    const newItems: Customer[] = imported.map((item, idx) => ({
-      id: 'cust-imp-' + Date.now() + '-' + idx,
-      name: item.name || 'Imported Customer',
-      email: item.email || `client${idx + 1}@example.com`,
-      phone: item.phone || '+234 800 000 0000',
-      address: item.address || 'Lagos, Nigeria',
-      outstandingBalance: Number(item.outstandingBalance) || 0,
-      loyaltyPoints: Number(item.loyaltyPoints) || 0,
-      lifetimeValue: Number(item.lifetimeValue) || 0,
-      purchaseHistoryCount: Number(item.purchaseHistoryCount) || 0,
-      createdAt: now,
-    }));
+    // Compute the full result against the current state (not inside a setState
+    // updater) so the created/updated counts and audit line are accurate and the
+    // same-record dedup is reliable.
+    const workingList = [...customers];
+    let createdCount = 0;
+    let updatedCount = 0;
 
-    setCustomers((prev) => [...newItems, ...prev]);
-    newItems.forEach((c) => saveDocument('customers', c));
-    logAudit('BULK_IMPORT', 'Customer', undefined, 'User', `Imported ${newItems.length} customers via data wizard.`);
-    showToast({ title: 'Customers Imported', message: `Successfully imported ${newItems.length} customer records.`, type: 'success' });
+    imported.forEach((item) => {
+      const name = (item.name || '').trim();
+      const phone = (item.phone || '').trim();
+      const email = (item.email || '').trim();
+
+      // Dedup by phone, else by name (see findExistingCustomerIndex), so
+      // re-importing the same file updates in place instead of duplicating.
+      const existingIdx = findExistingCustomerIndex(workingList, { name, phone });
+
+      if (existingIdx !== -1) {
+        const existing = workingList[existingIdx];
+        const updated: Customer = {
+          ...existing,
+          name: name || existing.name,
+          email: email || existing.email,
+          phone: phone || existing.phone,
+          address: item.address || existing.address,
+        };
+        workingList[existingIdx] = updated;
+        saveDocument('customers', updated);
+        updatedCount++;
+      } else {
+        const created: Customer = {
+          id: generateUniqueId('cust'),
+          name: name || 'Imported Customer',
+          email: email,
+          phone: phone,
+          address: item.address || '',
+          outstandingBalance: Number(item.outstandingBalance) || 0,
+          loyaltyPoints: Number(item.loyaltyPoints) || 0,
+          lifetimeValue: Number(item.lifetimeValue) || 0,
+          purchaseHistoryCount: Number(item.purchaseHistoryCount) || 0,
+          createdAt: now,
+        };
+        workingList.unshift(created);
+        saveDocument('customers', created);
+        createdCount++;
+      }
+    });
+
+    setCustomers(workingList);
+    logAudit('BULK_IMPORT', 'Customer', undefined, 'User', `Imported ${imported.length} customers (${createdCount} new, ${updatedCount} matched existing).`);
+    showToast({ title: 'Customers Imported', message: `Processed ${imported.length} customer record(s): ${createdCount} created, ${updatedCount} matched existing.`, type: 'success' });
   };
 
   const bulkImportSuppliers = (imported: Partial<Supplier>[]) => {
     const now = new Date().toISOString();
-    const newItems: Supplier[] = imported.map((item, idx) => ({
-      id: 'sup-imp-' + Date.now() + '-' + idx,
-      name: item.name || 'Imported Supplier',
-      contactPerson: item.contactPerson || 'Account Manager',
-      email: item.email || `vendor${idx + 1}@supplier.com`,
-      phone: item.phone || '+234 800 000 0000',
-      address: item.address || 'Industrial Zone, Ikeja',
-      paymentTerms: item.paymentTerms || 'Net 30',
-      outstandingBalance: Number(item.outstandingBalance) || 0,
-      productsCount: Number(item.productsCount) || 0,
-      createdAt: now,
-    }));
+    // Compute against current state so counts/audit are accurate and dedup is
+    // reliable (see bulkImportCustomers).
+    const workingList = [...suppliers];
+    let createdCount = 0;
+    let updatedCount = 0;
 
-    setSuppliers((prev) => [...newItems, ...prev]);
-    newItems.forEach((s) => saveDocument('suppliers', s));
-    logAudit('BULK_IMPORT', 'Supplier', undefined, 'User', `Imported ${newItems.length} suppliers via data wizard.`);
-    showToast({ title: 'Suppliers Imported', message: `Successfully imported ${newItems.length} supplier profiles.`, type: 'success' });
+    imported.forEach((item) => {
+      const name = (item.name || '').trim();
+      const phone = (item.phone || '').trim();
+      const email = (item.email || '').trim();
+
+      // Dedup by phone, else by name (see findExistingSupplierIndex), so
+      // re-importing the same file updates in place instead of duplicating.
+      const existingIdx = findExistingSupplierIndex(workingList, { name, phone });
+
+      if (existingIdx !== -1) {
+        const existing = workingList[existingIdx];
+        const updated: Supplier = {
+          ...existing,
+          name: name || existing.name,
+          contactPerson: item.contactPerson || existing.contactPerson,
+          email: email || existing.email,
+          phone: phone || existing.phone,
+          address: item.address || existing.address,
+          paymentTerms: item.paymentTerms || existing.paymentTerms,
+        };
+        workingList[existingIdx] = updated;
+        saveDocument('suppliers', updated);
+        updatedCount++;
+      } else {
+        const created: Supplier = {
+          id: generateUniqueId('sup'),
+          name: name || 'Imported Supplier',
+          contactPerson: item.contactPerson || '',
+          email: email,
+          phone: phone,
+          address: item.address || '',
+          paymentTerms: item.paymentTerms || 'Net 30',
+          outstandingBalance: Number(item.outstandingBalance) || 0,
+          productsCount: Number(item.productsCount) || 0,
+          createdAt: now,
+        };
+        workingList.unshift(created);
+        saveDocument('suppliers', created);
+        createdCount++;
+      }
+    });
+
+    setSuppliers(workingList);
+    logAudit('BULK_IMPORT', 'Supplier', undefined, 'User', `Imported ${imported.length} suppliers (${createdCount} new, ${updatedCount} matched existing).`);
+    showToast({ title: 'Suppliers Imported', message: `Processed ${imported.length} supplier record(s): ${createdCount} created, ${updatedCount} matched existing.`, type: 'success' });
   };
 
   const bulkImportSales = (imported: Partial<Sale>[]) => {
     const now = new Date().toISOString();
     const newExpenses: Expense[] = [];
-    const newItems: Sale[] = imported.map((item, idx) => {
-      const saleId = 'sale-imp-' + Date.now() + '-' + idx;
+    // Compute against current state; dedup by invoiceNo so re-importing the
+    // same historical-sales file updates in place instead of doubling revenue
+    // and delivery expenses on every run.
+    const workingList = [...sales];
+    let createdCount = 0;
+    let skippedCount = 0;
+
+    imported.forEach((item) => {
+      const invoiceNo = (item.invoiceNo || '').trim();
+
+      // Dedup by invoiceNo (see isDuplicateSaleInvoice) so re-running the same
+      // historical-sales file never doubles revenue or delivery expenses.
+      if (isDuplicateSaleInvoice(workingList, invoiceNo)) {
+        skippedCount++;
+        return;
+      }
+
+      const saleId = generateUniqueId('sale');
       const fee = Number(item.deliveryFee) || 0;
       let expId: string | undefined = undefined;
 
       if (fee > 0) {
         expId = generateUniqueId('exp');
-        const invoiceRef = item.invoiceNo && item.invoiceNo !== 'N/A' ? item.invoiceNo : saleId.slice(-6).toUpperCase();
+        const invoiceRef = invoiceNo && invoiceNo !== 'N/A' ? invoiceNo : saleId.slice(-6).toUpperCase();
         const saleDate = item.createdAt ? item.createdAt.split('T')[0] : now.split('T')[0];
         const saleIso = item.createdAt || now;
         const newExp: Expense = {
@@ -1435,7 +1521,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           title: `Logistics Delivery Fee - Historical (${invoiceRef})`,
           category: 'Logistics',
           amount: fee,
-          description: `Historical delivery fee expense for ${item.customerName || 'Walk-in Customer'}. Sale ${item.invoiceNo && item.invoiceNo !== 'N/A' ? item.invoiceNo : saleId}.${item.notes ? ' ' + item.notes : ''}`.trim(),
+          description: `Historical delivery fee expense for ${item.customerName || 'Walk-in Customer'}. Sale ${invoiceNo && invoiceNo !== 'N/A' ? invoiceNo : saleId}.${item.notes ? ' ' + item.notes : ''}`.trim(),
           paidBy: item.createdBy || 'Import Wizard',
           paymentMethod: (item.paymentMethod as PaymentMethod) || 'Cash',
           date: saleDate,
@@ -1446,9 +1532,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         newExpenses.push(newExp);
       }
 
-      return {
+      const totalAmount = Number(item.totalAmount) || 0;
+      const newSale: Sale = {
         id: saleId,
-        invoiceNo: item.invoiceNo || 'N/A',
+        invoiceNo: invoiceNo || 'N/A',
         customerName: item.customerName || 'Walk-in Customer',
         type: item.type || 'Retail',
         items: item.items && item.items.length > 0 ? item.items : [
@@ -1457,18 +1544,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             productName: 'Historical Item',
             sku: 'HIST-001',
             quantity: 1,
-            unitPrice: Number(item.totalAmount) || 5000,
-            costPrice: (Number(item.totalAmount) || 5000) * 0.6,
-            total: Number(item.totalAmount) || 5000,
+            unitPrice: totalAmount,
+            costPrice: totalAmount * 0.6,
+            total: totalAmount,
           }
         ],
-        subtotal: Number(item.subtotal) || Number(item.totalAmount) || 5000,
+        subtotal: Number(item.subtotal) || totalAmount,
         discount: Number(item.discount) || 0,
         tax: Number(item.tax) || 0,
         deliveryFee: fee,
-        totalAmount: Number(item.totalAmount) || 5000,
+        totalAmount: totalAmount,
         paymentMethod: (item.paymentMethod as PaymentMethod) || 'Cash',
-        paidAmount: Number(item.paidAmount) || Number(item.totalAmount) || 5000,
+        paidAmount: Number(item.paidAmount) || totalAmount,
         status: item.status || 'Completed',
         notes: item.notes || 'Historical Data Import Wizard',
         createdBy: item.createdBy || 'Import Wizard',
@@ -1476,10 +1563,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isHistorical: true,
         expenseId: expId,
       };
+
+      workingList.unshift(newSale);
+      saveDocument('sales', newSale);
+      createdCount++;
     });
 
-    setSales((prev) => [...newItems, ...prev]);
-    newItems.forEach((s) => saveDocument('sales', s));
+    setSales(workingList);
 
     if (newExpenses.length > 0) {
       setExpenses((prev) => [...newExpenses, ...prev]);
@@ -1489,8 +1579,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    logAudit('BULK_IMPORT', 'Sale', undefined, 'User', `Imported ${newItems.length} sales records via data wizard${newExpenses.length > 0 ? ` (${newExpenses.length} delivery expenses created)` : ''}.`);
-    showToast({ title: 'Sales Imported', message: `Successfully imported ${newItems.length} historical sales records (no invoices created).`, type: 'success' });
+    logAudit('BULK_IMPORT', 'Sale', undefined, 'User', `Imported ${createdCount} sales records via data wizard${skippedCount > 0 ? ` (${skippedCount} skipped as duplicate invoice)` : ''}${newExpenses.length > 0 ? ` (${newExpenses.length} delivery expenses created)` : ''}.`);
+    showToast({ title: 'Sales Imported', message: `Imported ${createdCount} historical sales record(s)${skippedCount > 0 ? `, ${skippedCount} duplicate invoice(s) skipped` : ''} (no invoices created).`, type: 'success' });
   };
 
   const bulkImportWhatsAppPreOrders = (imported: Partial<WhatsAppPreOrder>[]) => {
@@ -1503,7 +1593,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const preOrderNo = item.preOrderNo || `WAPO-${new Date().getFullYear()}-${String(currentPreOrders.length + idx + 1).padStart(3, '0')}`;
 
       const newPo: WhatsAppPreOrder = {
-        id: 'wa-imp-' + Date.now() + '-' + idx,
+        id: generateUniqueId('wa'),
         preOrderNo,
         convertedInvoiceNo: uniqueInvoiceNo,
         customerName: item.customerName || 'WhatsApp Customer',
