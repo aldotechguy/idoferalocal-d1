@@ -12,6 +12,7 @@ import { verifyAccessToken } from './src/server/accessJwt';
 import { staffSuperAdminSession, staffPrivilegeCheck, staffEditorCheck } from './src/server/staffPrivileges';
 import { STEP_UP_SECONDS, issueStepUp, hasStepUp, revokeStepUp, revokeStepUpForUser, stepUpCookie } from './src/server/stepUp';
 import { SESSION_COOKIE, sessionExpiry, sessionIdleSeconds, sessionIdleExpired, isMissingIdleColumn } from './src/server/staffSession';
+import { aiRoleAllowed, businessFallback, forecastFallback, pricingFallback } from './src/shared/aiAssistant';
 
 dotenv.config();
 
@@ -386,6 +387,42 @@ async function createSession(userId: string, res: Response) {
     path: "/",
   });
   return token;
+}
+
+/** AI assistant endpoints mirror the `ai` page allow-list (Administrator, Store
+ * Manager, Accountant). The global middleware already requires a session; this
+ * closes the gap where a role hidden from the page could call the API
+ * directly. Returns the actor, or sends the denial and returns null. */
+async function requireAiRole(req: Request, res: Response): Promise<any | null> {
+  const actor = await requireAppUser(req);
+  if (!actor) {
+    res.status(401).json({ error: "Authentication required." });
+    return null;
+  }
+  if (!aiRoleAllowed(actor.role)) {
+    res.status(403).json({ error: "The AI assistant is not permitted for this role." });
+    return null;
+  }
+  return actor;
+}
+
+/** Best-effort audit line for AI usage (endpoint + actor + timestamp). Cost
+ * and sales payloads leave the building on every call, so the trail must show
+ * who asked, when, and which engine answered. Never throws. */
+function logAiQuery(actor: any, endpoint: string, detail: string) {
+  try {
+    const id = 'audit-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+    db.prepare(
+      "INSERT INTO audit_logs (id, actor_id, action, entity, details, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run(
+      id,
+      actor?.display_name || actor?.id || 'Unknown',
+      'AI_QUERY',
+      endpoint,
+      detail,
+      new Date().toISOString()
+    );
+  } catch { /* audit must never break an AI answer */ }
 }
 
 // Lazy init Gemini AI
@@ -1537,14 +1574,15 @@ app.get("/api/health", (_req, res) => {
 
 app.post("/api/ai/business-assistant", async (req, res) => {
   try {
+    const actor = await requireAiRole(req, res);
+    if (!actor) return;
     const { prompt, businessContext } = req.body;
     const ai = getGeminiClient();
 
     if (!ai) {
-      return res.json({
-        answer: `[IdoferaLabs AI Analysis]\n\nBased on your recent business data:\n- Today's Total Sales: ₦${businessContext?.todaySales || 0}\n- Active Low Stock Items: ${businessContext?.lowStockCount || 0}\n- Monthly Revenue: ₦${businessContext?.monthlyRevenue || 0}\n\n**Key Takeaway**: ${prompt.toLowerCase().includes("reorder") ? "We recommend immediate replenishment for items below minimum stock threshold to prevent lost revenue." : "Sales trends show consistent activity. Monitor top-performing categories to optimize inventory turnover."}`,
-        source: "fallback",
-      });
+      const fallback = businessFallback(businessContext, prompt);
+      logAiQuery(actor, "business-assistant", "Answered from local business context (no AI key).");
+      return res.json(fallback);
     }
 
     const systemInstruction = `You are IdoferaLabs AI Business Assistant, an expert business analyst for retail, wholesale, and hybrid enterprises. Answer the user query using the provided context clearly, concisely, and with actionable business recommendations.`;
@@ -1555,6 +1593,7 @@ app.post("/api/ai/business-assistant", async (req, res) => {
       contents: fullPrompt,
     });
 
+    logAiQuery(actor, "business-assistant", "Answered by gemini-2.5-flash.");
     res.json({
       answer: response.text,
       source: "gemini-2.5-flash",
@@ -1567,26 +1606,14 @@ app.post("/api/ai/business-assistant", async (req, res) => {
 
 app.post("/api/ai/pricing-assistant", async (req, res) => {
   try {
+    const actor = await requireAiRole(req, res);
+    if (!actor) return;
     const { product } = req.body;
     const ai = getGeminiClient();
 
     if (!ai || !product) {
-      const cost = product?.costPrice || 100;
-      const currentRetail = product?.retailPrice || 150;
-      const currentWholesale = product?.wholesalePrice || 125;
-      const suggestedRetail = Math.round(cost * 1.45 * 100) / 100;
-      const suggestedWholesale = Math.round(cost * 1.25 * 100) / 100;
-      const margin = Math.round(((suggestedRetail - cost) / suggestedRetail) * 100);
-
-      return res.json({
-        recommendedRetailPrice: suggestedRetail,
-        recommendedWholesalePrice: suggestedWholesale,
-        suggestedDiscountPct: 5,
-        projectedProfitMargin: margin,
-        riskLevel: "Low",
-        explanation: `Based on a cost price of ₦${cost}, the suggested retail price (₦${suggestedRetail}) maintains a healthy ${margin}% margin while remaining competitive in the current category market. The wholesale price (₦${suggestedWholesale}) yields a stable 20% margin for volume orders.`,
-        source: "fallback",
-      });
+      logAiQuery(actor, "pricing-assistant", `Answered from local cost data for ${product?.name || "unknown product"} (no AI key or no product).`);
+      return res.json(pricingFallback(product));
     }
 
     const prompt = `You are IdoferaLabs AI Pricing Assistant. Analyze the following product pricing and stock details, and respond ONLY with a strict valid JSON object (no markdown surrounding ticks, just pure JSON) with the following fields:
@@ -1613,6 +1640,7 @@ ${JSON.stringify(product, null, 2)}`;
     }
 
     const parsed = JSON.parse(text);
+    logAiQuery(actor, "pricing-assistant", `Answered by gemini-2.5-flash for ${product?.name || "unknown product"}.`);
     res.json({ ...parsed, source: "gemini-2.5-flash" });
   } catch (error: any) {
     console.error("AI Pricing Assistant Error:", error);
@@ -1622,24 +1650,14 @@ ${JSON.stringify(product, null, 2)}`;
 
 app.post("/api/ai/sales-forecasting", async (req, res) => {
   try {
+    const actor = await requireAiRole(req, res);
+    if (!actor) return;
     const { historicalSales, products } = req.body;
     const ai = getGeminiClient();
 
     if (!ai) {
-      return res.json({
-        forecastDays: 30,
-        predictedRevenue: 485000,
-        predictedSalesCount: 340,
-        highRiskStockouts: ["Corrugated Box 10x10", "Kraft Paper Rolls"],
-        suggestedReorderDate: "Within 5 days",
-        cashFlowTrend: "Positive (+12.4% MoM)",
-        insights: [
-          "Demand for packaging products is projected to rise 18% over the next 2 weeks.",
-          "Stock levels for high-velocity SKUs require immediate purchase order dispatch.",
-          "Expected net cash inflow is projected at ₦142,000 after pending supplier commitments.",
-        ],
-        source: "fallback",
-      });
+      logAiQuery(actor, "sales-forecasting", `Answered from local sales/stock data (${(historicalSales || []).length} sales, no AI key).`);
+      return res.json(forecastFallback(historicalSales, products));
     }
 
     const prompt = `You are IdoferaLabs AI Sales Forecasting Engine. Analyze the historical sales and current product inventory data provided below, and respond ONLY with a strict valid JSON object with fields:
@@ -1669,6 +1687,7 @@ Sample Products: ${JSON.stringify((products || []).slice(0, 5), null, 2)}`;
     }
 
     const parsed = JSON.parse(text);
+    logAiQuery(actor, "sales-forecasting", `Answered by gemini-2.5-flash over ${(historicalSales || []).length} sales.`);
     res.json({ ...parsed, source: "gemini-2.5-flash" });
   } catch (error: any) {
     console.error("AI Forecasting Error:", error);

@@ -73,6 +73,7 @@ import { readAccessIdentity, ACCESS_JWT_HEADER, type AccessIdentity } from './sr
 import { staffSuperAdminSession, staffPrivilegeCheck, staffEditorCheck } from './src/server/staffPrivileges.js';
 import { STEP_UP_SECONDS, issueStepUp, hasStepUp, revokeStepUp, revokeStepUpForUser, stepUpCookie } from './src/server/stepUp.js';
 import { SESSION_COOKIE, sessionExpiry, sessionIdleSeconds, sessionIdleExpired, isMissingIdleColumn } from './src/server/staffSession.js';
+import { aiRoleAllowed, businessFallback, forecastFallback, pricingFallback } from './src/shared/aiAssistant.js';
 
 /** Rows out of D1 -> the QueryAll shape the shared mapper expects. */
 function makeD1QueryAll(env: Env): QueryAll {
@@ -1005,6 +1006,29 @@ async function patchRecords(request: Request, env: Env) {
   });
 }
 
+/** AI assistant endpoints mirror the `ai` page allow-list (Administrator, Store
+ * Manager, Accountant). The router already requires an entrance or session;
+ * each handler checks `aiRoleAllowed(actor.role)` so a role hidden from the
+ * page cannot call the API directly. `aiDenied` maps the outcome to 401/403.
+ */
+function aiDenied(actor: AppUserRow | null) {
+  return actor
+    ? json({ error: 'The AI assistant is not permitted for this role.' }, 403)
+    : json({ error: 'Authentication required.' }, 401);
+}
+
+/** Best-effort audit line for AI usage. Cost and sales payloads leave the
+ * building on every call, so the trail must show who asked, when, and which
+ * engine answered. Never throws. */
+async function logAiQuery(env: Env, actor: AppUserRow | null, endpoint: string, detail: string) {
+  try {
+    const id = `audit-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    await env.DB.prepare(
+      'INSERT INTO audit_logs (id, actor_id, action, entity, details, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).bind(id, actor?.display_name || actor?.id || 'Unknown', 'AI_QUERY', endpoint, detail, new Date().toISOString()).run();
+  } catch { /* audit must never break an AI answer */ }
+}
+
 async function askGemini(apiKey: string, prompt: string) {
   const model = 'gemini-2.5-flash';
   const response = await fetch(
@@ -1030,17 +1054,18 @@ function stripJsonFence(text: string) {
 async function businessAssistant(request: Request, env: Env) {
   const body = await readJson(request);
   if (!body?.prompt) return json({ error: 'A prompt is required.' }, 400);
+  const actor = await requireAppUser(request, env);
+  if (!actor || !aiRoleAllowed(actor.role)) return aiDenied(actor);
   const context = body.businessContext || {};
   if (!env.GEMINI_API_KEY) {
-    return json({
-      answer: `[IdoferaLabs AI Analysis]\n\nBased on your recent business data:\n- Today's Total Sales: ${context.todaySales || 0}\n- Active Low Stock Items: ${context.lowStockCount || 0}\n- Monthly Revenue: ${context.monthlyRevenue || 0}\n\n**Key Takeaway**: ${String(body.prompt).toLowerCase().includes('reorder') ? 'Replenish items below their minimum stock threshold to prevent lost sales.' : 'Monitor top-performing categories and stock velocity to protect margins.'}`,
-      source: 'fallback',
-    });
+    await logAiQuery(env, actor, 'business-assistant', 'Answered from local business context (no AI key).');
+    return json(businessFallback(context, body.prompt));
   }
   const answer = await askGemini(
     env.GEMINI_API_KEY,
     `You are IdoferaLabs AI Business Assistant. Give concise, actionable retail and wholesale advice.\n\nBusiness context:\n${JSON.stringify(context, null, 2)}\n\nQuestion:\n${body.prompt}`,
   );
+  await logAiQuery(env, actor, 'business-assistant', 'Answered by gemini-2.5-flash.');
   return json({ answer, source: 'gemini-2.5-flash' });
 }
 
@@ -1048,25 +1073,17 @@ async function pricingAssistant(request: Request, env: Env) {
   const body = await readJson(request);
   const product = body?.product;
   if (!product) return json({ error: 'A product is required.' }, 400);
-  const cost = Number(product.costPrice) || 100;
+  const actor = await requireAppUser(request, env);
+  if (!actor || !aiRoleAllowed(actor.role)) return aiDenied(actor);
   if (!env.GEMINI_API_KEY) {
-    const retail = Math.round(cost * 145) / 100;
-    const wholesale = Math.round(cost * 125) / 100;
-    const margin = Math.round(((retail - cost) / retail) * 100);
-    return json({
-      recommendedRetailPrice: retail,
-      recommendedWholesalePrice: wholesale,
-      suggestedDiscountPct: 5,
-      projectedProfitMargin: margin,
-      riskLevel: 'Low',
-      explanation: `The recommendation preserves a ${margin}% retail margin while keeping a volume-friendly wholesale price.`,
-      source: 'fallback',
-    });
+    await logAiQuery(env, actor, 'pricing-assistant', `Answered from local cost data for ${product?.name || 'unknown product'} (no AI key).`);
+    return json(pricingFallback(product));
   }
   const text = await askGemini(
     env.GEMINI_API_KEY,
     `Return only valid JSON with recommendedRetailPrice, recommendedWholesalePrice, suggestedDiscountPct, projectedProfitMargin, riskLevel, and explanation for this product:\n${JSON.stringify(product, null, 2)}`,
   );
+  await logAiQuery(env, actor, 'pricing-assistant', `Answered by gemini-2.5-flash for ${product?.name || 'unknown product'}.`);
   return json({ ...JSON.parse(stripJsonFence(text)), source: 'gemini-2.5-flash' });
 }
 
@@ -1074,22 +1091,17 @@ async function salesForecast(request: Request, env: Env) {
   const body = await readJson(request);
   const sales = body?.historicalSales || [];
   const products = body?.products || [];
+  const actor = await requireAppUser(request, env);
+  if (!actor || !aiRoleAllowed(actor.role)) return aiDenied(actor);
   if (!env.GEMINI_API_KEY) {
-    return json({
-      forecastDays: 30,
-      predictedRevenue: sales.reduce((sum: number, sale: any) => sum + (Number(sale.totalAmount) || 0), 0),
-      predictedSalesCount: sales.length,
-      highRiskStockouts: products.filter((p: any) => Number(p.currentStock) <= Number(p.minimumStockLevel)).slice(0, 5).map((p: any) => p.name),
-      suggestedReorderDate: 'Within 5 days',
-      cashFlowTrend: 'Monitor current sales velocity',
-      insights: ['Review low-stock products before the next sales cycle.', 'Use recent category velocity to prioritize purchase orders.'],
-      source: 'fallback',
-    });
+    await logAiQuery(env, actor, 'sales-forecasting', `Answered from local sales/stock data (${sales.length} sales, no AI key).`);
+    return json(forecastFallback(sales, products));
   }
   const text = await askGemini(
     env.GEMINI_API_KEY,
     `Return only valid JSON with forecastDays, predictedRevenue, predictedSalesCount, highRiskStockouts, suggestedReorderDate, cashFlowTrend, and insights. Sales count: ${sales.length}. Products: ${JSON.stringify(products.slice(0, 20), null, 2)}`,
   );
+  await logAiQuery(env, actor, 'sales-forecasting', `Answered by gemini-2.5-flash over ${sales.length} sales.`);
   return json({ ...JSON.parse(stripJsonFence(text)), source: 'gemini-2.5-flash' });
 }
 

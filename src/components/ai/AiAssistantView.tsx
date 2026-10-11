@@ -13,6 +13,12 @@ import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { NairaSign } from '../common/NairaSign';
 import { localIsoDate } from '../../shared/localDate';
+import {
+  businessFallback,
+  forecastFallback,
+  hasAiFields,
+  pricingFallback,
+} from '../../shared/aiAssistant';
 
 export const AiAssistantView: React.FC = () => {
   const { products, sales, expenses, settings } = useApp();
@@ -49,18 +55,21 @@ export const AiAssistantView: React.FC = () => {
     setLoadingAi(true);
     setBusinessAnswer(null);
 
-    try {
-      const validSales = sales.filter((s) => s.status !== 'Refunded' && s.status !== 'Held' && s.status !== 'Draft');
-      const now = new Date();
-      const todayStr = localIsoDate(now);
-      const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-      const calculatedTodaySales = validSales
-        .filter((s) => s.createdAt && s.createdAt.startsWith(todayStr))
-        .reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
-      const calculatedMonthlyRevenue = validSales
-        .filter((s) => s.createdAt && s.createdAt.startsWith(currentMonthPrefix))
-        .reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
+    // Computed up front so the offline fallback in `catch` can reuse the same
+    // numbers that would have been sent to the server.
+    const validSales = sales.filter((s) => s.status !== 'Refunded' && s.status !== 'Held' && s.status !== 'Draft');
+    const now = new Date();
+    const todayStr = localIsoDate(now);
+    const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const calculatedTodaySales = validSales
+      .filter((s) => s.createdAt && s.createdAt.startsWith(todayStr))
+      .reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
+    const calculatedMonthlyRevenue = validSales
+      .filter((s) => s.createdAt && s.createdAt.startsWith(currentMonthPrefix))
+      .reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0);
+    const calculatedLowStockCount = products.filter((p) => p.currentStock <= p.minimumStockLevel).length;
 
+    try {
       const res = await fetch('/api/ai/business-assistant', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -69,16 +78,30 @@ export const AiAssistantView: React.FC = () => {
           businessContext: {
             todaySales: calculatedTodaySales,
             monthlyRevenue: calculatedMonthlyRevenue,
-            lowStockCount: products.filter((p) => p.currentStock <= p.minimumStockLevel).length,
+            lowStockCount: calculatedLowStockCount,
             topProductsCount: products.length,
           },
         }),
       });
 
       const data = await res.json();
-      setBusinessAnswer(data.answer || 'Unable to generate response.');
+      // A1/A2: never render an error payload as advice. If the server refused
+      // or the shape is wrong (e.g. HTTP 500 `{ error }`), show a neutral
+      // message instead of crashing on `insights.map` or printing ₦undefined.
+      if (!res.ok || !hasAiFields(data, ['answer'])) {
+        setBusinessAnswer(data?.error ? `AI request failed: ${data.error}` : 'Unable to generate response.');
+      } else {
+        setBusinessAnswer(data.answer);
+      }
     } catch (err: any) {
-      setBusinessAnswer(`AI Service Response:\n\nBased on current catalog telemetry: Top items are Earbuds Pro and Arabica Coffee. Reorder recommendation is active for items with stock count under minimum threshold.`);
+      // A3: the offline fallback answers from the same numbers already sent
+      // to the server — never hardcoded revenue or invented product names.
+      const fallback = businessFallback(
+        { todaySales: calculatedTodaySales, lowStockCount: calculatedLowStockCount, monthlyRevenue: calculatedMonthlyRevenue },
+        query,
+        settings.currencySymbol,
+      );
+      setBusinessAnswer(`${fallback.answer}\n\n(Offline estimate — connect the AI service for live analysis.)`);
     } finally {
       setLoadingAi(false);
     }
@@ -97,16 +120,24 @@ export const AiAssistantView: React.FC = () => {
       });
 
       const data = await res.json();
-      setPricingRecommendation(data);
+      // A2: never render a server error payload as a recommendation — a 500
+      // `{ error }` body must surface as a failure, not "₦undefined".
+      if (!res.ok || !hasAiFields(data, ['recommendedRetailPrice', 'recommendedWholesalePrice', 'projectedProfitMargin', 'riskLevel', 'explanation'])) {
+        setPricingRecommendation({
+          recommendedRetailPrice: null,
+          recommendedWholesalePrice: null,
+          projectedProfitMargin: null,
+          riskLevel: 'Unknown',
+          explanation: data?.error ? `AI request failed: ${data.error}` : 'Unable to generate pricing advice.',
+          failed: true,
+        });
+      } else {
+        setPricingRecommendation(data);
+      }
     } catch (err) {
-      setPricingRecommendation({
-        recommendedRetailPrice: Math.round(selectedProduct.costPrice * 1.45 * 100) / 100,
-        recommendedWholesalePrice: Math.round(selectedProduct.costPrice * 1.25 * 100) / 100,
-        suggestedDiscountPct: 5,
-        projectedProfitMargin: 31,
-        riskLevel: 'Low',
-        explanation: `Recommended pricing for ${selectedProduct.name} balances current inventory velocity with a solid 31% profit margin.`,
-      });
+      // A3: offline fallback computed from this product's own cost — no
+      // invented figures.
+      setPricingRecommendation({ ...pricingFallback(selectedProduct, settings.currencySymbol), offline: true });
     } finally {
       setLoadingAi(false);
     }
@@ -124,21 +155,26 @@ export const AiAssistantView: React.FC = () => {
       });
 
       const data = await res.json();
-      setForecastingResult(data);
+      // A1: never hand an error payload to the render path — without this,
+      // `forecastingResult.insights.map` throws and unmounts the whole view.
+      if (!res.ok || !hasAiFields(data, ['forecastDays', 'predictedRevenue', 'predictedSalesCount', 'insights'])) {
+        setForecastingResult({
+          forecastDays: 30,
+          predictedRevenue: null,
+          predictedSalesCount: null,
+          highRiskStockouts: [],
+          suggestedReorderDate: 'Unknown',
+          cashFlowTrend: 'Unknown',
+          insights: [data?.error ? `AI request failed: ${data.error}` : 'Unable to generate a forecast.'],
+          failed: true,
+        });
+      } else {
+        setForecastingResult(data);
+      }
     } catch (err) {
-      setForecastingResult({
-        forecastDays: 30,
-        predictedRevenue: 48500,
-        predictedSalesCount: 340,
-        highRiskStockouts: ['Wireless Earbuds Pro', 'Organic Arabica Coffee'],
-        suggestedReorderDate: 'Within 5 days',
-        cashFlowTrend: 'Positive (+12.4% MoM)',
-        insights: [
-          'Demand for consumer tech products is projected to rise 18% over the next 2 weeks.',
-          'Stock levels for high-velocity SKUs require immediate purchase order dispatch.',
-          `Expected net cash inflow is projected at ${settings.currencySymbol}14,200 after pending supplier commitments.`,
-        ],
-      });
+      // A3: offline fallback answers from this workspace's own sales and
+      // stock — never hardcoded revenue or invented product names.
+      setForecastingResult({ ...forecastFallback(sales, products), offline: true });
     } finally {
       setLoadingAi(false);
     }
@@ -151,7 +187,7 @@ export const AiAssistantView: React.FC = () => {
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-blue-400 font-bold text-xs uppercase tracking-wider">
             <Brain className="w-4 h-4 text-amber-400" />
-            <span>Gemini 3.6 AI Powered Business Intelligence</span>
+            <span>Gemini 2.5 Flash AI Powered Business Intelligence</span>
           </div>
           <h1 className="text-2xl font-black tracking-tight">
             IdoferaLabs AI Operations Suite
@@ -310,24 +346,33 @@ export const AiAssistantView: React.FC = () => {
 
           {pricingRecommendation && (
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 pt-4 border-t border-slate-100 dark:border-slate-800">
+              {pricingRecommendation.failed && (
+                <div className="md:col-span-4 bg-amber-50 dark:bg-amber-950/40 p-4 rounded-2xl border border-amber-200 dark:border-amber-900 text-xs font-bold text-amber-700 dark:text-amber-300">
+                  Request failed — no recommendation was generated. {pricingRecommendation.offline ? '(Offline estimate shown.)' : 'Check the AI key and try again.'}
+                </div>
+              )}
               <div className="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl">
                 <span className="text-[10px] text-slate-400 font-bold uppercase">Recommended Retail</span>
                 <p className="text-xl font-extrabold text-emerald-600 dark:text-emerald-400 mt-1">
-                  {settings.currencySymbol}{pricingRecommendation.recommendedRetailPrice}
+                  {pricingRecommendation.recommendedRetailPrice === null || pricingRecommendation.recommendedRetailPrice === undefined
+                    ? '—'
+                    : `${settings.currencySymbol}${pricingRecommendation.recommendedRetailPrice}`}
                 </p>
               </div>
 
               <div className="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl">
                 <span className="text-[10px] text-slate-400 font-bold uppercase">Recommended Wholesale</span>
                 <p className="text-xl font-extrabold text-blue-600 dark:text-blue-400 mt-1">
-                  {settings.currencySymbol}{pricingRecommendation.recommendedWholesalePrice}
+                  {pricingRecommendation.recommendedWholesalePrice === null || pricingRecommendation.recommendedWholesalePrice === undefined
+                    ? '—'
+                    : `${settings.currencySymbol}${pricingRecommendation.recommendedWholesalePrice}`}
                 </p>
               </div>
 
               <div className="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl">
                 <span className="text-[10px] text-slate-400 font-bold uppercase">Projected Profit Margin</span>
                 <p className="text-xl font-extrabold text-indigo-600 dark:text-indigo-400 mt-1">
-                  {isPrivacyMode ? '••%' : `${pricingRecommendation.projectedProfitMargin}%`}
+                  {isPrivacyMode ? '••%' : pricingRecommendation.projectedProfitMargin === null || pricingRecommendation.projectedProfitMargin === undefined ? '—' : `${pricingRecommendation.projectedProfitMargin}%`}
                 </p>
               </div>
 
@@ -374,30 +419,39 @@ export const AiAssistantView: React.FC = () => {
 
           {forecastingResult && (
             <div className="space-y-4 pt-4 border-t border-slate-100 dark:border-slate-800">
+              {forecastingResult.failed && (
+                <div className="bg-amber-50 dark:bg-amber-950/40 p-4 rounded-2xl border border-amber-200 dark:border-amber-900 text-xs font-bold text-amber-700 dark:text-amber-300">
+                  Request failed — no forecast was generated. {forecastingResult.offline ? '(Offline estimate shown.)' : 'Check the AI key and try again.'}
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl">
                   <span className="text-[10px] font-bold text-slate-400 uppercase">Predicted 30-Day Revenue</span>
                   <p className="text-2xl font-black text-slate-900 dark:text-white mt-1">
-                    {isPrivacyMode ? `${settings.currencySymbol}••••••` : `${settings.currencySymbol}${forecastingResult.predictedRevenue}`}
+                    {isPrivacyMode
+                      ? `${settings.currencySymbol}••••••`
+                      : forecastingResult.predictedRevenue === null || forecastingResult.predictedRevenue === undefined
+                        ? '—'
+                        : `${settings.currencySymbol}${forecastingResult.predictedRevenue}`}
                   </p>
                 </div>
 
                 <div className="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl">
                   <span className="text-[10px] font-bold text-slate-400 uppercase">Cash Flow Trend</span>
                   <p className="text-2xl font-black text-emerald-600 dark:text-emerald-400 mt-1">
-                    {isPrivacyMode ? 'Protected' : forecastingResult.cashFlowTrend}
+                    {isPrivacyMode ? 'Protected' : (forecastingResult.cashFlowTrend ?? '—')}
                   </p>
                 </div>
 
                 <div className="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl">
                   <span className="text-[10px] font-bold text-slate-400 uppercase">Optimal Reorder Window</span>
-                  <p className="text-2xl font-black text-blue-600 dark:text-blue-400 mt-1">{forecastingResult.suggestedReorderDate}</p>
+                  <p className="text-2xl font-black text-blue-600 dark:text-blue-400 mt-1">{forecastingResult.suggestedReorderDate ?? '—'}</p>
                 </div>
               </div>
 
               <div className="space-y-2 bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl text-xs">
                 <p className="font-bold text-slate-900 dark:text-white">Predictive AI Highlights:</p>
-                {forecastingResult.insights.map((insight: string, idx: number) => (
+                {(Array.isArray(forecastingResult.insights) ? forecastingResult.insights : []).map((insight: string, idx: number) => (
                   <p key={idx} className="flex items-center gap-2 text-slate-700 dark:text-slate-300">
                     <CheckCircle2 className="w-4 h-4 text-emerald-500" />
                     <span>{insight}</span>

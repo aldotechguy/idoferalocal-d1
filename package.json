@@ -13,6 +13,7 @@
     "test:frontend": "tsx --test scripts/frontend-smoke.test.ts",
     "test:customers": "tsx --test scripts/customer-hub.test.ts",
     "test:import": "tsx --test scripts/data-import.test.ts",
+    "test:ai": "tsx --test scripts/ai-assistant.test.ts",
     "test:loyalty-reconcile": "tsx --test scripts/reconcile-loyalty.test.ts",
     "test:mall-backend": "tsx --test scripts/mall-backend.test.ts scripts/mall-safety.test.ts",
     "test:mall-part-payment": "tsx --test scripts/mall-part-payment.test.ts",
