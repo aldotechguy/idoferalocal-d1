@@ -17,6 +17,7 @@
     "test:loyalty-reconcile": "tsx --test scripts/reconcile-loyalty.test.ts",
     "test:mall-backend": "tsx --test scripts/mall-backend.test.ts scripts/mall-safety.test.ts",
     "test:mall-part-payment": "tsx --test scripts/mall-part-payment.test.ts",
+    "test:pos-ledger": "tsx --test scripts/pos-ledger.test.ts",
     "test:access": "tsx --test scripts/access-jwt.test.ts scripts/staff-access.test.ts scripts/staff-privileges.test.ts scripts/staff-accounts.test.ts",
     "verify:access-apps": "tsx scripts/verify-access-apps.ts",
     "verify:access-aud": "tsx scripts/verify-access-aud.ts",

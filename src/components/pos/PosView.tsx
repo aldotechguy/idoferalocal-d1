@@ -34,7 +34,8 @@ import {
   Package,
   UserPlus,
 } from 'lucide-react';
-import { useApp } from '../../context/AppContext';
+import { useApp, toLedgerProduct } from '../../context/AppContext';
+import { resolveUnitPrice } from '../../shared/posLedger';
 import { Product, SaleItem, PaymentMethod, Customer, Sale } from '../../types';
 import { ReceiptModal } from '../common/ReceiptModal';
 import { EditSaleModal } from '../sales/EditSaleModal';
@@ -298,10 +299,9 @@ export const PosView: React.FC = () => {
         if (item.productId !== productId) return item;
         const newUseRP = !item.useRetailPrice;
         const prod = product || products.find((p) => p.sku === item.sku);
-        const retailPrice = prod ? prod.retailPrice : item.unitPrice;
-        const wholesalePrice = prod ? prod.wholesalePrice : item.unitPrice;
-
-        const unitPrice = newUseRP ? retailPrice : wholesalePrice;
+        const unitPrice = prod
+          ? resolveUnitPrice(toLedgerProduct(prod), item.quantity, newUseRP ? 'Retail' : 'Wholesale')
+          : item.unitPrice;
         return {
           ...item,
           unitPrice,
@@ -331,11 +331,7 @@ export const PosView: React.FC = () => {
         const meetsWholesale = newQty >= product.minWholesaleQty;
         const useRP = Boolean(existing.useRetailPrice && meetsWholesale);
         const isWholesale = meetsWholesale && !useRP;
-        const unitPrice = useRP
-          ? product.retailPrice
-          : isWholesale
-          ? product.wholesalePrice
-          : product.retailPrice;
+        const unitPrice = resolveUnitPrice(toLedgerProduct(product), newQty, existing.useRetailPrice ? 'Retail' : undefined);
 
         return prevCart.map((item) =>
           item.productId === product.id
@@ -352,7 +348,7 @@ export const PosView: React.FC = () => {
       } else {
         const meetsWholesale = 1 >= product.minWholesaleQty;
         const isWholesale = meetsWholesale;
-        const unitPrice = isWholesale ? product.wholesalePrice : product.retailPrice;
+        const unitPrice = resolveUnitPrice(toLedgerProduct(product), 1);
         return [
           ...prevCart,
           {
@@ -510,11 +506,7 @@ export const PosView: React.FC = () => {
           const unitPrice =
             isBackdateMode && currentUser?.role === 'Administrator'
               ? item.unitPrice
-              : useRP
-              ? (product?.retailPrice || 0)
-              : isWholesale
-              ? (product?.wholesalePrice || 0)
-              : (product?.retailPrice || 0);
+              : resolveUnitPrice(toLedgerProduct(product), newQty, item.useRetailPrice ? 'Retail' : undefined);
           const costPrice =
             isBackdateMode && currentUser?.role === 'Administrator'
               ? item.costPrice
@@ -570,11 +562,7 @@ export const PosView: React.FC = () => {
         const unitPrice =
           isBackdateMode && currentUser?.role === 'Administrator'
             ? item.unitPrice
-            : useRP
-            ? (product?.retailPrice || 0)
-            : isWholesale
-            ? (product?.wholesalePrice || 0)
-            : (product?.retailPrice || 0);
+            : resolveUnitPrice(toLedgerProduct(product), finalQty, item.useRetailPrice ? 'Retail' : undefined);
         const costPrice =
           isBackdateMode && currentUser?.role === 'Administrator'
             ? item.costPrice
@@ -2710,7 +2698,7 @@ export const PosView: React.FC = () => {
             {(() => {
               const parsedQty = parseInt(qtyInputVal, 10) || 0;
               const isWholesale = parsedQty >= qtyModalProduct.product.minWholesaleQty;
-              const unitPrice = isWholesale ? qtyModalProduct.product.wholesalePrice : qtyModalProduct.product.retailPrice;
+              const unitPrice = resolveUnitPrice(toLedgerProduct(qtyModalProduct.product), parsedQty);
               const total = parsedQty * unitPrice;
 
               return (

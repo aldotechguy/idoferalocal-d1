@@ -849,7 +849,7 @@ test('an invoice edit cascades every editable field to its linked records', () =
   assert.match(body, /updates\.status === 'Refunded'/);
   assert.match(body, /updates\.status === 'Partially Refunded'/);
   // Gap F — a Retail<->Wholesale flip reprices catalogue lines from the book.
-  assert.match(body, /nextType === 'Wholesale' \? catalogue\.wholesalePrice : catalogue\.retailPrice/);
+  assert.match(body, /resolveUnitPrice\(toLedgerProduct\(catalogue\), Number\(line\.quantity\) \|\| 0, nextType\)/);
   // Gap E — leaving Split clears the stale breakdown; entering Split keeps data.
   assert.match(body, /finalPaymentBreakdown/);
   assert.match(body, /paymentBreakdown: finalPaymentBreakdown/);
@@ -899,6 +899,72 @@ test('an invoice edit cascades every editable field to its linked records', () =
   assert.ok(editRegion.length > 0, 'the inline edit modal must still exist');
   assert.doesNotMatch(editRegion, /<option value="Refunded">Refunded<\/option>/);
   assert.match(editRegion, /use Process Refund/);
+});
+
+test('PosView uses forceTier=Retail for useRetailPrice override', () => {
+  const posView = fs.readFileSync('src/components/pos/PosView.tsx', 'utf8');
+  // useRetailPrice should force retail pricing via forceTier='Retail'
+  assert.match(posView, /resolveUnitPrice\(toLedgerProduct\(product\), newQty, item\.useRetailPrice \? 'Retail' : undefined\)/);
+});
+
+test('EditSaleModal add-product pricing uses resolveUnitPrice with editType', () => {
+  const editModal = fs.readFileSync('src/components/sales/EditSaleModal.tsx', 'utf8');
+  // Adding a product should price it via resolveUnitPrice with the current editType tier
+  assert.match(editModal, /resolveUnitPrice\(toLedgerProduct\(prodToAdd\), 1, editType\)/);
+});
+
+test('ProcessSaleRefundModal uses computeRefundSale from posLedger', () => {
+  const refundModal = fs.readFileSync('src/components/sales/ProcessSaleRefundModal.tsx', 'utf8');
+  // Should import refundSale as computeRefundSale
+  assert.match(refundModal, /import.*refundSale as computeRefundSale.*from.*posLedger/);
+  // Should call computeRefundSale with originalItems, refundedItems, and financials
+  assert.match(refundModal, /computeRefundSale\(/);
+  assert.match(refundModal, /saleSubtotal:/);
+  assert.match(refundModal, /discount:/);
+  assert.match(refundModal, /tax:/);
+  assert.match(refundModal, /deliveryFeeRefunded:/);
+});
+
+test('AppContext updateSale super-admin bypass for historical sales', () => {
+  const app = fs.readFileSync('src/context/AppContext.tsx', 'utf8');
+  const start = app.indexOf('const updateSale = (');
+  assert.ok(start > 0, 'updateSale must exist');
+  const body = app.slice(start, app.indexOf('\n};', start));
+  // Historical sales should be editable by super-admin (isSuperAdminOverride)
+  assert.match(body, /isSuperAdminOverride/);
+  // isHistorical check must exist
+  assert.match(body, /isHistorical/);
+  // The restriction check should allow isSuperAdminOverride
+  assert.match(body, /!isHistorical && !isSuperAdminOverride/);
+});
+
+test('AppContext refundSale uses posLedger refundSale for proration', () => {
+  const app = fs.readFileSync('src/context/AppContext.tsx', 'utf8');
+  const start = app.indexOf('const refundSale = (');
+  assert.ok(start > 0, 'refundSale must exist');
+  const body = app.slice(start, app.indexOf('\n};', start));
+  // Should call computeRefundSale (imported from posLedger)
+  assert.match(body, /computeRefundSale\(/);
+  // Should pass financials for proration
+  assert.match(body, /saleSubtotal:/);
+  assert.match(body, /discount:/);
+  assert.match(body, /tax:/);
+  assert.match(body, /deliveryFeeRefunded:/);
+  // Should use returned netRefundAmount
+  assert.match(body, /netRefundAmount/);
+});
+
+test('AppContext receiveAndInspectPO uses processGRN', () => {
+  const app = fs.readFileSync('src/context/AppContext.tsx', 'utf8');
+  const start = app.indexOf('const receiveAndInspectPO = (');
+  assert.ok(start > 0, 'receiveAndInspectPO implementation must exist');
+  const body = app.slice(start, app.indexOf('\n  };', start));
+  // Should call processGRN for each line
+  assert.match(body, /processGRN\(/);
+  // Should check isFullyDelivered
+  assert.match(body, /isFullyDelivered/);
+  // Should check hasPriceAdjustment
+  assert.match(body, /hasPriceAdjustment/);
 });
 
 test('a loan repayment nets back against owner drawings and loans', () => {

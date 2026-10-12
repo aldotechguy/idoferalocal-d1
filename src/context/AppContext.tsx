@@ -66,6 +66,42 @@ import {
   refundCustomerMetrics,
   type LedgerSale,
 } from '../shared/customerLedger';
+import {
+  editSale,
+  refundSale as computeRefundSale,
+  processGRN,
+  resolveUnitPrice,
+  type CatalogLine,
+  type Product as LedgerProduct,
+  type SaleLine,
+} from '../shared/posLedger';
+
+/**
+ * Map an app `Product` (prices in Naira, `minimumSellingPrice`/`currentStock`)
+ * into the ledger's currency-agnostic `Product` so the pure ledger functions can
+ * price and restock it. Safe for a missing product (returns a zeroed line item),
+ * which lets edit/refund paths tolerate catalogue lookups for deleted products.
+ */
+export const toLedgerProduct = (p?: Product): LedgerProduct => ({
+  id: p?.id ?? '',
+  name: p?.name ?? '',
+  retailPrice: Number(p?.retailPrice) || 0,
+  wholesalePrice: Number(p?.wholesalePrice) || 0,
+  minWholesaleQty: Number(p?.minWholesaleQty) || 0,
+  minSellingPrice: Number(p?.minimumSellingPrice) || 0,
+  stockQty: Number(p?.currentStock) || 0,
+});
+
+/** Map an app sale line into a ledger SaleLine (quantity + the unit price it sold at). */
+const toLedgerSaleLine = (it: SaleItem): SaleLine => ({
+  productId: it.productId,
+  quantity: Number(it.quantity) || 0,
+  unitPrice: Number(it.unitPrice) || 0,
+});
+
+/** Is this sale line a real inventory item (excludes clearance / non-catalogue lines)? */
+const isInventoryLine = (it: SaleItem): boolean =>
+  Boolean(it.productId) && !it.isClearance && !it.productId.startsWith('clearance-');
 
 const isAutoSyncLog = (log: any): boolean => {
   if (!log) return false;
@@ -2218,34 +2254,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    // Financial Proration
-    const itemsSubtotal = returnedItemsList.reduce(
-      (acc, it) => acc + it.unitPrice * it.quantity,
-      0
-    );
+    // Financial Proration — computed by the ledger so the refund math shared with
+    // ProcessSaleRefundModal can only live in one place. The ledger prorates
+    // discount/tax/delivery against the returned gross using raw (unrounded) totals,
+    // exactly matching the previous inline formula.
     const saleBaseSubtotal =
       sale.subtotal ||
-      sale.items.reduce((acc, it) => acc + it.unitPrice * it.quantity, 0);
+      sale.items.reduce((acc, it) => acc + (Number(it.unitPrice) || 0) * (Number(it.quantity) || 0), 0);
 
-    const discountDeducted =
-      saleBaseSubtotal > 0 && Number(sale.discount) > 0
-        ? Math.round(((itemsSubtotal / saleBaseSubtotal) * Number(sale.discount)) * 100) / 100
-        : 0;
-
-    const taxDeducted =
-      saleBaseSubtotal > 0 && Number(sale.tax) > 0
-        ? Math.round(((itemsSubtotal / saleBaseSubtotal) * Number(sale.tax)) * 100) / 100
-        : 0;
-
-    const deliveryFeeRefunded = options?.refundDeliveryFee
-      ? Number(sale.deliveryFee) || 0
-      : 0;
-
-    const netRefundAmount = Math.max(
-      0,
-      Math.round(
-        (itemsSubtotal - discountDeducted + taxDeducted + deliveryFeeRefunded) * 100
-      ) / 100
+    const {
+      refundAmount: itemsSubtotal,
+      discountDeducted,
+      taxDeducted,
+      deliveryFeeRefunded,
+      netRefundAmount,
+    } = computeRefundSale(
+      sale.items.map(toLedgerSaleLine),
+      returnedItemsList.map((it) => ({ productId: it.productId, quantity: it.quantity, unitPrice: it.unitPrice })),
+      {
+        saleSubtotal: saleBaseSubtotal,
+        discount: Number(sale.discount) || 0,
+        tax: Number(sale.tax) || 0,
+        deliveryFeeRefunded: options?.refundDeliveryFee ? (Number(sale.deliveryFee) || 0) : 0,
+      }
     );
 
     const settlementMethod: RefundSettlementMethod =
@@ -2775,7 +2806,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (!line.productId || line.isClearance || line.productId.startsWith('clearance-')) return line;
         const catalogue = products.find((p) => p.id === line.productId);
         if (!catalogue) return line;
-        const unitPrice = nextType === 'Wholesale' ? catalogue.wholesalePrice : catalogue.retailPrice;
+        const unitPrice = resolveUnitPrice(toLedgerProduct(catalogue), Number(line.quantity) || 0, nextType);
         return {
           ...line,
           unitPrice,
@@ -2863,27 +2894,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updatedAt: now,
     };
 
-    // 1. Cascade to Inventory Stock: adjust quantity differences if items were modified (skip non-inventory clearance items)
+    // 1. Cascade to Inventory Stock: restore/take stock for the quantity diff.
+    //    The delta is computed by the ledger's editSale so the
+    //    "quantity reduced => stock restored" convention (positive delta restores)
+    //    lives in exactly one place. Clearance / non-inventory lines are skipped,
+    //    matching the original behaviour.
     if (!isHistorical && existing.status !== 'Refunded' && updates.items) {
-      const oldItemMap = new Map<string, number>();
-      existing.items.forEach((it) => {
-        if (it.productId && !it.isClearance && !it.productId.startsWith('clearance-')) {
-          oldItemMap.set(it.productId, (oldItemMap.get(it.productId) || 0) + it.quantity);
-        }
-      });
-
-      const newItemMap = new Map<string, number>();
-      updates.items.forEach((it) => {
-        if (it.productId && !it.isClearance && !it.productId.startsWith('clearance-')) {
-          newItemMap.set(it.productId, (newItemMap.get(it.productId) || 0) + it.quantity);
-        }
-      });
-
-      const allProductIds = new Set([...oldItemMap.keys(), ...newItemMap.keys()]);
-      allProductIds.forEach((pId) => {
-        const oldQty = oldItemMap.get(pId) || 0;
-        const newQty = newItemMap.get(pId) || 0;
-        const diff = oldQty - newQty; // If positive, restore to stock (+diff); if negative, deduct from stock (-diff)
+      const previousLines = existing.items.filter(isInventoryLine).map(toLedgerSaleLine);
+      const updatedLines: CatalogLine[] = updates.items.filter(isInventoryLine).map((it) => ({
+        productId: it.productId,
+        product: toLedgerProduct(products.find((p) => p.id === it.productId)),
+        quantity: Number(it.quantity) || 0,
+      }));
+      const { stockDelta } = editSale(previousLines, updatedLines);
+      Object.entries(stockDelta).forEach(([pId, diff]) => {
         if (diff !== 0) {
           adjustStock(
             pId,
@@ -4183,9 +4207,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let totalShortageUnits = 0;
     let totalExcessUnits = 0;
 
+    const lineFullyReceived: boolean[] = [];
     const updatedItems = po.items.map((item) => {
       const inspectItem = inspectionData.items.find((i) => i.productId === item.productId);
-      if (!inspectItem) return item;
+      if (!inspectItem) {
+        lineFullyReceived.push((item.receivedQuantity || 0) >= item.quantity);
+        return item;
+      }
 
       const newReceived = (item.receivedQuantity || 0) + inspectItem.receivingQty;
       const newAccepted = (item.acceptedQuantity || 0) + inspectItem.acceptedQty;
@@ -4206,9 +4234,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const prod = products.find((p) => p.id === item.productId);
 
       const newUnitCost = inspectItem.unitCost !== undefined ? inspectItem.unitCost : item.unitCost;
-      const oldUnitCost = inspectItem.oldUnitCost !== undefined 
-        ? inspectItem.oldUnitCost 
-        : (item.oldUnitCost !== undefined ? item.oldUnitCost : (item.unitCost !== newUnitCost ? item.unitCost : (prod?.costPrice || item.unitCost)));
+
+      // Per-line GRN evaluation via the ledger: delivery completeness (cumulative) and
+      // whether the received cost differs from the PO line's cost.
+      const grn = processGRN(
+        { productId: item.productId, product: toLedgerProduct(prod), quantityOrdered: item.quantity, unitPrice: item.unitCost },
+        newReceived,
+        newUnitCost
+      );
+      lineFullyReceived.push(grn.isFullyDelivered);
+
+      const oldUnitCost = inspectItem.oldUnitCost !== undefined
+        ? inspectItem.oldUnitCost
+        : (item.oldUnitCost !== undefined ? item.oldUnitCost : (grn.hasPriceAdjustment ? item.unitCost : (prod?.costPrice || item.unitCost)));
 
       const newRetailPrice = inspectItem.customRetailPrice !== undefined ? inspectItem.customRetailPrice : (item.customRetailPrice || prod?.retailPrice);
       const oldRetailPrice = inspectItem.oldRetailPrice !== undefined
@@ -4284,10 +4322,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     });
 
-    // Check if fully received
-    const isFullyReceived = updatedItems.every(
-      (item) => (item.receivedQuantity || 0) >= item.quantity
-    );
+    // The PO is fully received once every line's cumulative received quantity
+    // meets its ordered quantity. processGRN marked each line (unmatched lines
+    // were counted too), so a single reduction yields the overall status.
+    const isFullyReceived = lineFullyReceived.every(Boolean);
     let newDeliveryStatus: PurchaseOrder['deliveryStatus'] = isFullyReceived ? 'Received' : 'Partial';
     if (inspectionData.closeShortage && !isFullyReceived) {
       newDeliveryStatus = 'Received with Shortage';

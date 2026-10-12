@@ -6,6 +6,7 @@ import {
   ProcessRefundOptions,
 } from '../../types';
 import { useApp } from '../../context/AppContext';
+import { refundSale as computeRefundSale } from '../../shared/posLedger';
 import { useAuth } from '../../context/AuthContext';
 import { useInteractions } from '../../context/InteractionContext';
 import {
@@ -224,30 +225,30 @@ export const ProcessSaleRefundModal: React.FC<ProcessSaleRefundModalProps> = ({
       (acc, it) => acc + (it.remainingQty - (it.returnQty || 0)),
       0
     );
-    const grossSub = itemStates.reduce(
-      (acc, it) => acc + (it.returnQty || 0) * it.unitPrice,
-      0
-    );
 
     const saleBaseSubtotal =
       sale.subtotal ||
-      sale.items.reduce((acc, it) => acc + it.unitPrice * it.quantity, 0);
+      sale.items.reduce((acc, it) => acc + (Number(it.unitPrice) || 0) * (Number(it.quantity) || 0), 0);
 
-    const discountProrated =
-      saleBaseSubtotal > 0 && Number(sale.discount) > 0
-        ? Math.round(((grossSub / saleBaseSubtotal) * Number(sale.discount)) * 100) / 100
-        : 0;
-
-    const taxProrated =
-      saleBaseSubtotal > 0 && Number(sale.tax) > 0
-        ? Math.round(((grossSub / saleBaseSubtotal) * Number(sale.tax)) * 100) / 100
-        : 0;
-
-    const delivFee = refundDeliveryFee ? Number(sale.deliveryFee) || 0 : 0;
-
-    const net = Math.max(
-      0,
-      Math.round((grossSub - discountProrated + taxProrated + delivFee) * 100) / 100
+    // Refund financials (gross, prorated discount/tax/delivery, net) come from the
+    // ledger's refundSale so the math shared with AppContext.refundSale can only
+    // live in one place. The raw (unrounded) gross is used internally for the
+    // proration — identical to the previous inline formula.
+    const {
+      refundAmount: grossItemsSubtotal,
+      discountDeducted: proratedDiscount,
+      taxDeducted: proratedTax,
+      deliveryFeeRefunded: deliveryFeeAmount,
+      netRefundAmount: net,
+    } = computeRefundSale(
+      sale.items.map((it) => ({ productId: it.productId, quantity: Number(it.quantity) || 0, unitPrice: Number(it.unitPrice) || 0 })),
+      itemStates.map((it) => ({ productId: it.productId, quantity: it.returnQty || 0, unitPrice: it.unitPrice })),
+      {
+        saleSubtotal: saleBaseSubtotal,
+        discount: Number(sale.discount) || 0,
+        tax: Number(sale.tax) || 0,
+        deliveryFeeRefunded: refundDeliveryFee ? (Number(sale.deliveryFee) || 0) : 0,
+      }
     );
 
     const willBeFull = unitsRemainingAfter === 0 && unitsReturning > 0;
@@ -255,10 +256,10 @@ export const ProcessSaleRefundModal: React.FC<ProcessSaleRefundModalProps> = ({
     return {
       totalUnitsBeingReturned: unitsReturning,
       totalRemainingUnitsAfterThis: unitsRemainingAfter,
-      grossItemsSubtotal: grossSub,
-      proratedDiscount: discountProrated,
-      proratedTax: taxProrated,
-      deliveryFeeAmount: delivFee,
+      grossItemsSubtotal,
+      proratedDiscount,
+      proratedTax,
+      deliveryFeeAmount,
       netRefundAmount: net,
       isWillResultInFullRefund: willBeFull,
     };

@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Sale, SaleItem, PaymentMethod, SaleStatus, DeliveryStatus } from '../../types';
-import { useApp } from '../../context/AppContext';
+import { useApp, toLedgerProduct } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { useInteractions } from '../../context/InteractionContext';
 import { loyaltyPointsForAmount } from '../../shared/customerLedger';
+import { resolveUnitPrice } from '../../shared/posLedger';
 import {
   Edit3,
   ShieldCheck,
@@ -734,14 +735,15 @@ export const EditSaleModal: React.FC<EditSaleModalProps> = ({ sale, onClose, onS
                     onClick={() => {
                       const prodToAdd = products.find((p) => p.id === selectedAddProductId);
                       if (prodToAdd) {
+                        const lineUnitPrice = resolveUnitPrice(toLedgerProduct(prodToAdd), 1, editType);
                         const newItem: SaleItem = {
                           productId: prodToAdd.id,
                           productName: prodToAdd.name,
                           sku: prodToAdd.sku,
                           quantity: 1,
-                          unitPrice: editType === 'Wholesale' ? prodToAdd.wholesalePrice : prodToAdd.retailPrice,
+                          unitPrice: lineUnitPrice,
                           costPrice: prodToAdd.costPrice,
-                          total: editType === 'Wholesale' ? prodToAdd.wholesalePrice : prodToAdd.retailPrice,
+                          total: lineUnitPrice,
                           isWholesale: editType === 'Wholesale',
                         };
                         setEditingSaleItems((prev) => [newItem, ...prev]);
