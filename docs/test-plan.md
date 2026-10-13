@@ -383,17 +383,88 @@ Acceptance: mutation score meets the agreed break threshold on the money modules
 
 ---
 
+---
+
+## Regression testing — a discipline, not a phase
+
+**Do you need it? Yes — and more than usual here, because this is live money code that is
+changing fast** (the `posLedger` refactor, part-payment/customer-debt, the AI assistants).
+Three things make regressions likely and expensive:
+- One shared relational store: a change in one layer silently alters another (the audit found
+  exactly this — a refund written as the wrong movement type, an expense with no outflow).
+- Coverage ≠ correctness: a refactor can keep 100% coverage while changing behaviour.
+- Two runtimes (Node + Worker) must stay byte-for-byte in parity; parity drift is a regression.
+
+Regression testing has two distinct forms — set up both.
+
+### A. Bug-lock regression tests (process, from Phase 1 onward)
+Rule: **no bug is "fixed" until a test that fails before the fix and passes after is merged,
+and that test is never deleted or weakened.** Keep a ledger `docs/regressions.md`:
+`incident → repro test → fix commit`. Tag them (`@regression` in the name, or a
+`scripts/regression/*.test.ts` namespace) so the whole set can be run and audited on its own.
+We already have seeds from this audit — F1 (refund type), F2 (expense outflow), F3 (`Outgoing`
+type), F4 (sweep readiness), F5 (popular sort), F6 (unknown-API 404), N1 (revision monotonic),
+N2 (sync-from-pos validation). Every future production incident adds one.
+
+### B. Golden / approval regression suite (the net for *unintended* change)
+Hand-written assertions only catch what you thought to assert. A golden suite captures the
+**exact** money rows a canonical scenario produces and diffs them on every run, so any
+unintended change — a movement type, an account, an amount, a row count — shows up as a
+reviewable diff and must be explicitly approved. This is the strongest guard against a
+refactor silently changing financial behaviour.
+
+**Copy-paste prompt**
+```
+Add a regression layer to the test setup.
+
+1. Create scripts/regression/ and a ledger docs/regressions.md (incident -> repro test -> fix
+   commit). Backfill the eight seeds from the QA audit (F1-F6, N1, N2) — move/duplicate their
+   tests into scripts/regression/ and tag them @regression.
+2. Create scripts/regression/money-golden.test.ts using node:test + the harness:
+   - Define a fixed set of canonical scenarios (POS sale per payment channel, POS refund
+     full+partial, store credit, mall checkout/payment/dispatch/refund/cancel, part-payment ->
+     customer debt, expense add/delete, purchase receive, supplier payment, customer debt
+     payment, treasury transfer, owner drawing/repayment).
+   - Run each, then serialise the resulting money_movements / sales / sale_items /
+     stock_movements rows DETERMINISTICALLY (sort by a stable key; no timestamps/UUIDs — replace
+     them with stable placeholders) and compare to a committed JSON fixture under
+     scripts/regression/__golden__/.
+   - On mismatch, print a unified diff and fail. Provide `UPDATE_GOLDEN=1` to re-approve.
+   - Prefer committed, human-readable golden files over opaque inline snapshots so the diff is
+     reviewable in a PR.
+3. Run the regression set in the PR gate (fast, in-memory). Keep MALL_CONTRACT_ALLOW_LIVE unset.
+4. Note in the ledger that Phase 7's production monitor is the live regression detector, and
+   Phase 8 (mutation testing) is what proves these regression tests actually detect change.
+
+Acceptance: golden suite green; deliberately changing a movement type or amount in server code
+makes it fail with a readable diff; the regression set is runnable as one command
+(npm run test:regression).
+```
+
+### C. Where it fits
+- **A** is a rule applied from Phase 1 onward (every suite includes bug-lock tests).
+- **B** slots in as **Phase 1.5** — after the money invariants exist, before integration.
+- **C (production):** Phase 7's read-only reconciliation monitor is regression *detection* on
+  the live system for anything that escaped CI.
+
+### What NOT to rely on
+- "Full coverage" as regression protection — it says a line ran, not that behaviour is right.
+- UI/HTML snapshots as the primary money regression net.
+- Running regression tests against production (they are read-only at most).
+
+
 ## Sequencing summary
 
 1. **Phase 0** — harness + prod guard + coverage gate. *(1–2 days)*
 2. **Phase 1** — money-path invariants. *(the big one; 3–5 days)*
-3. **Phase 2** — vocabulary contract. *(half a day)*
-4. **Phase 3** — property-based money math. *(1 day)*
-5. **Phase 4** — full-flow integration + parity. *(2–3 days)*
-6. **Phase 5** — real D1/workerd preview contract. *(2 days)*
-7. **Phase 6** — frontend + browser E2E. *(2–3 days)*
-8. **Phase 7** — prod read-only monitor. *(1 day)*
-9. **Phase 8** — mutation testing. *(stretch)*
+3. **Phase 1.5** — regression lock + golden money suite. *(1–2 days)*
+4. **Phase 2** — vocabulary contract. *(half a day)*
+5. **Phase 3** — property-based money math. *(1 day)*
+6. **Phase 4** — full-flow integration + parity. *(2–3 days)*
+7. **Phase 5** — real D1/workerd preview contract. *(2 days)*
+8. **Phase 6** — frontend + browser E2E. *(2–3 days)*
+9. **Phase 7** — prod read-only monitor. *(1 day)*
+10. **Phase 8** — mutation testing. *(stretch)*
 
 **Definition of done for "money paths at full coverage":** phases 0–4 green in the PR gate,
 100% line+branch on the money modules, every `MoneyMovementType`/`MovementType`/
