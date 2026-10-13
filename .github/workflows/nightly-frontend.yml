@@ -1,0 +1,85 @@
+name: Nightly Frontend UI + E2E (PREVIEW ONLY)
+
+# Step 8 / Phase 6 of docs/test-setup-runbook.md: the vitest component suite
+# plus the Playwright browser E2E suite. Both run on a schedule against the
+# DISPOSABLE PREVIEW worker (idomall-preview) and NEVER against the deployed
+# production worker (idomall). The Playwright baseURL guard additionally throws
+# at runtime if E2E_BASE_URL ever points at production.
+
+on:
+  schedule:
+    # 03:17 UTC nightly — off the hour, after any deploy cron settles.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'PREVIEW base URL (HTTPS). Must NOT be idomall.olz.workers.dev.'
+        required: false
+        default: 'https://idomall-preview.olz.workers.dev'
+
+permissions:
+  contents: read
+
+env:
+  # The disposable preview origin. NEVER set this to idomall.olz.workers.dev.
+  # The e2e/global-setup.ts guard refuses to run when it does.
+  E2E_BASE_URL: ${{ github.event.inputs.base_url || 'https://idomall-preview.olz.workers.dev' }}
+
+jobs:
+  component-tests:
+    name: Vitest component tests (test:ui)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Run component tests
+        run: npm run test:ui
+
+  e2e-preview:
+    name: Playwright E2E against PREVIEW (test:e2e)
+    runs-on: ubuntu-latest
+    needs: component-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser (chromium)
+        run: npx playwright install --with-deps chromium
+
+      - name: Refuse to run against production
+        shell: bash
+        run: |
+          if echo "$E2E_BASE_URL" | grep -qi 'idomall\.olz\.workers\.dev'; then
+            echo "E2E_BASE_URL points at production. Aborting." >&2
+            exit 1
+          fi
+          echo "Running E2E against PREVIEW host: $E2E_BASE_URL"
+
+      - name: Run E2E suite
+        run: npm run test:e2e
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

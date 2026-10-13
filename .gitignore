@@ -17,6 +17,9 @@ coverage/
 # Scratch build output used only to smoke-test the edge worker bundle
 tmp_worker_build/
 tmp_*.txt
+# Playwright E2E artifacts (regenerated per run; never source)
+playwright-report/
+test-results/
 *.err
 # Local wrangler/miniflare dev state (recreated by `wrangler dev`)
 .wrangler/
