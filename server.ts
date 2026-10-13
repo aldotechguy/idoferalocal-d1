@@ -1189,6 +1189,10 @@ app.get("/api/storage/snapshot", async (req, res) => {
 
 app.put("/api/storage/snapshot", async (req, res) => {
   try {
+    // Parity with sites-worker.ts: a full restore needs a staff session, not just
+    // the entrance cookie that passes the private-API gate.
+    const snapshotActor = await requireAppUser(req);
+    if (!snapshotActor) return res.status(401).json({ error: "Authentication required." });
     const body = req.body;
     if (!body?.stores || typeof body.stores !== "object") {
       return res.status(400).json({ error: "A stores object is required." });
@@ -1251,6 +1255,10 @@ app.put("/api/storage/snapshot", async (req, res) => {
 
 app.patch("/api/storage/records", async (req, res) => {
   try {
+    // Parity with sites-worker.ts: the entrance cookie alone passes the private-API
+    // gate, but syncing business records requires a signed-in staff account.
+    const actor = await requireAppUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required." });
     const upserts = Array.isArray(req.body?.upserts) ? req.body.upserts : [];
     const deletes = Array.isArray(req.body?.deletes) ? req.body.deletes : [];
 

@@ -830,6 +830,10 @@ async function readJson(request: Request) {
 }
 
 async function saveSnapshot(request: Request, env: Env) {
+  // Same entrance-vs-session distinction as patchRecords: the entrance cookie
+  // passes the gate but is not an identity; a full restore needs a staff session.
+  const actor = await requireAppUser(request, env);
+  if (!actor) return json({ error: 'Authentication required.' }, 401);
   await ensureSchema(env);
   const body = await readJson(request);
   if (!body?.stores || typeof body.stores !== 'object') return json({ error: 'A stores object is required.' }, 400);
@@ -937,6 +941,11 @@ async function readSnapshot(request: Request, env: Env) {
 }
 
 async function patchRecords(request: Request, env: Env) {
+  // The entrance cookie alone passes the private-API gate (entrance OR session),
+  // but an entrance is a second factor, not an identity: syncing business records
+  // requires a signed-in staff account, like every other private handler.
+  const actor = await requireAppUser(request, env);
+  if (!actor) return json({ error: 'Authentication required.' }, 401);
   await ensureSchema(env);
   const ownerId = BUSINESS_OWNER_ID;
   const body = await readJson(request);
