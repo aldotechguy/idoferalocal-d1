@@ -1,0 +1,65 @@
+{
+  "money_movements": [
+    {
+      "id": "mm-1",
+      "type": "Sale Inflow",
+      "subtype": "Card",
+      "source_account": null,
+      "dest_account": "Biz Account",
+      "amount_kobo": 20000,
+      "ref_no": "INV-SALE-1",
+      "ref_id": "sale-1"
+    },
+    {
+      "id": "mm-2",
+      "type": "Sale Refund",
+      "subtype": "Biz Account Refund (Partial)",
+      "source_account": "Biz Account",
+      "dest_account": null,
+      "amount_kobo": 10000,
+      "ref_no": "REF-sale-1",
+      "ref_id": "sale-1"
+    }
+  ],
+  "sales": [
+    {
+      "id": "sale-1",
+      "receipt_no": "INV-SALE-1",
+      "customer_name": "Walk-in Customer",
+      "total_kobo": 20000,
+      "paid_kobo": 20000,
+      "subtotal_kobo": 20000,
+      "discount_kobo": 0,
+      "delivery_fee_kobo": 0,
+      "payment_method": "Card",
+      "status": "Refunded",
+      "is_historical": 0,
+      "total_refunded_kobo": 10000,
+      "refunds_json": "[{\"id\":\"ref-sale-1-0\",\"netRefundAmount\":100}]"
+    }
+  ],
+  "sale_items": [
+    {
+      "id": "sale-1-item-0",
+      "sale_id": "sale-1",
+      "product_id": "p",
+      "product_name": "Golden Product",
+      "qty": 2,
+      "unit_price_kobo": 10000,
+      "cost_price_kobo": 5000,
+      "total_kobo": 20000,
+      "returned_qty": 0
+    }
+  ],
+  "stock_movements": [
+    {
+      "id": "mv-1",
+      "product_id": "p",
+      "type": "Outgoing",
+      "qty": 2,
+      "prev_stock": 10,
+      "new_stock": 8,
+      "ref_id": null
+    }
+  ]
+}

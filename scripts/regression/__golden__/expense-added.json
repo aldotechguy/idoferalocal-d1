@@ -1,0 +1,17 @@
+{
+  "money_movements": [
+    {
+      "id": "mm-exp-exp-1",
+      "type": "Expense Outflow",
+      "subtype": "Logistics",
+      "source_account": "Physical Cash",
+      "dest_account": null,
+      "amount_kobo": 5000,
+      "ref_no": "Golden Logistics",
+      "ref_id": "exp-1"
+    }
+  ],
+  "sales": [],
+  "sale_items": [],
+  "stock_movements": []
+}

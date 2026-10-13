@@ -1,0 +1,34 @@
+{
+  "money_movements": [],
+  "sales": [
+    {
+      "id": "sale-1",
+      "receipt_no": "INV-SALE-1",
+      "customer_name": "Walk-in Customer",
+      "total_kobo": 20000,
+      "paid_kobo": 20000,
+      "subtotal_kobo": 20000,
+      "discount_kobo": 0,
+      "delivery_fee_kobo": 0,
+      "payment_method": "Cash",
+      "status": "Completed",
+      "is_historical": 1,
+      "total_refunded_kobo": 0,
+      "refunds_json": null
+    }
+  ],
+  "sale_items": [
+    {
+      "id": "sale-1-item-0",
+      "sale_id": "sale-1",
+      "product_id": "p",
+      "product_name": "Golden Product",
+      "qty": 2,
+      "unit_price_kobo": 10000,
+      "cost_price_kobo": 5000,
+      "total_kobo": 20000,
+      "returned_qty": 0
+    }
+  ],
+  "stock_movements": []
+}

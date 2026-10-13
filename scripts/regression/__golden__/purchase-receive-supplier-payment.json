@@ -1,0 +1,36 @@
+{
+  "money_movements": [
+    {
+      "id": "mm-sup-po-golden",
+      "type": "Supplier Payment",
+      "subtype": "PO #PO-GOLDEN",
+      "source_account": "Physical Cash",
+      "dest_account": null,
+      "amount_kobo": 60000,
+      "ref_no": "PO-GOLDEN",
+      "ref_id": "po-golden"
+    }
+  ],
+  "sales": [],
+  "sale_items": [],
+  "stock_movements": [
+    {
+      "id": "mv-grn-p",
+      "product_id": "p",
+      "type": "Incoming",
+      "qty": 10,
+      "prev_stock": 10,
+      "new_stock": 20,
+      "ref_id": null
+    },
+    {
+      "id": "mv-grn-p2",
+      "product_id": "p2",
+      "type": "Incoming",
+      "qty": 6,
+      "prev_stock": 5,
+      "new_stock": 11,
+      "ref_id": null
+    }
+  ]
+}

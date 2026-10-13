@@ -1,0 +1,84 @@
+{
+  "money_movements": [
+    {
+      "id": "mm-exp-mall-del-mo-<uuid>",
+      "type": "Expense Outflow",
+      "subtype": "Logistics",
+      "source_account": "Physical Cash",
+      "dest_account": null,
+      "amount_kobo": 0,
+      "ref_no": "DEL-<date>-<rand>",
+      "ref_id": "exp-mall-del-mo-<uuid>"
+    },
+    {
+      "id": "mm-sale-mo-<uuid>",
+      "type": "Sale Inflow",
+      "subtype": "Cash",
+      "source_account": null,
+      "dest_account": "Physical Cash",
+      "amount_kobo": 270000,
+      "ref_no": "INV-<date>-<rand>",
+      "ref_id": "sale-mo-<uuid>"
+    },
+    {
+      "id": "mm-refund-sale-mo-<uuid>",
+      "type": "Sale Refund",
+      "subtype": "Mall Cash Refund (Full)",
+      "source_account": "Physical Cash",
+      "dest_account": null,
+      "amount_kobo": 270000,
+      "ref_no": "MALL-<date>-<rand>",
+      "ref_id": "sale-mo-<uuid>"
+    }
+  ],
+  "sales": [
+    {
+      "id": "sale-mo-<uuid>",
+      "receipt_no": "INV-<date>-<rand>",
+      "customer_name": "Ada",
+      "total_kobo": 270000,
+      "paid_kobo": 270000,
+      "subtotal_kobo": 20000,
+      "discount_kobo": 0,
+      "delivery_fee_kobo": 250000,
+      "payment_method": "Cash",
+      "status": "Refunded",
+      "is_historical": 0,
+      "total_refunded_kobo": 270000,
+      "refunds_json": "[{\"id\":\"ref-mall-mo-<uuid>\",\"refundNo\":\"REF-MALL-<date>-<rand>-1\",\"refundDate\":\"<timestamp>\",\"performedBy\":\"Golden Manager\",\"reason\":\"Golden refund\",\"items\":[{\"productId\":\"p\",\"productName\":\"p\",\"sku\":\"p\",\"quantityReturned\":2,\"unitPrice\":100,\"costPrice\":50,\"condition\":\"Restock\",\"subtotal\":200}],\"itemsSubtotal\":200,\"discountDeducted\":0,\"taxDeducted\":0,\"deliveryFeeRefunded\":0,\"netRefundAmount\":2700,\"settlementMethod\":\"Biz Account\",\"notes\":\"Refunded from Mall order MALL-<date>-<rand>.\"}]"
+    }
+  ],
+  "sale_items": [
+    {
+      "id": "sale-mo-<uuid>-item-0",
+      "sale_id": "sale-mo-<uuid>",
+      "product_id": "p",
+      "product_name": "p",
+      "qty": 2,
+      "unit_price_kobo": 10000,
+      "cost_price_kobo": 5000,
+      "total_kobo": 20000,
+      "returned_qty": 2
+    }
+  ],
+  "stock_movements": [
+    {
+      "id": "mv-<uuid>",
+      "product_id": "p",
+      "type": "Outgoing",
+      "qty": -2,
+      "prev_stock": 10,
+      "new_stock": 8,
+      "ref_id": "checkout:mo-<uuid>"
+    },
+    {
+      "id": "mv-refund-mo-<uuid>-mo-<uuid>-item-0",
+      "product_id": "p",
+      "type": "Returned",
+      "qty": 2,
+      "prev_stock": 8,
+      "new_stock": 10,
+      "ref_id": "refund:mo-<uuid>"
+    }
+  ]
+}

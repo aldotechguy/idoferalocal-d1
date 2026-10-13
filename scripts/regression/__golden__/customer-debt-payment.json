@@ -1,0 +1,45 @@
+{
+  "money_movements": [
+    {
+      "id": "mm-debt-golden",
+      "type": "Customer Debt Payment",
+      "subtype": "Cash",
+      "source_account": null,
+      "dest_account": "Physical Cash",
+      "amount_kobo": 50000,
+      "ref_no": "Ada Debt",
+      "ref_id": "c1"
+    }
+  ],
+  "sales": [
+    {
+      "id": "s-debt",
+      "receipt_no": "INV-DEBT",
+      "customer_name": "Ada Debt",
+      "total_kobo": 50000,
+      "paid_kobo": 50000,
+      "subtotal_kobo": 50000,
+      "discount_kobo": 0,
+      "delivery_fee_kobo": 0,
+      "payment_method": "Cash",
+      "status": "Completed",
+      "is_historical": 0,
+      "total_refunded_kobo": 0,
+      "refunds_json": null
+    }
+  ],
+  "sale_items": [
+    {
+      "id": "s-debt-item-0",
+      "sale_id": "s-debt",
+      "product_id": "p",
+      "product_name": "Golden Product",
+      "qty": 5,
+      "unit_price_kobo": 10000,
+      "cost_price_kobo": 5000,
+      "total_kobo": 50000,
+      "returned_qty": 0
+    }
+  ],
+  "stock_movements": []
+}

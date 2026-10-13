@@ -1,0 +1,55 @@
+{
+  "money_movements": [
+    {
+      "id": "mm-storecredit",
+      "type": "Sale Inflow",
+      "subtype": "Cash Sale",
+      "source_account": null,
+      "dest_account": "Physical Cash",
+      "amount_kobo": 30000,
+      "ref_no": "INV-STORECREDIT",
+      "ref_id": "sale-storecredit"
+    }
+  ],
+  "sales": [
+    {
+      "id": "sale-storecredit",
+      "receipt_no": "INV-STORECREDIT",
+      "customer_name": "Ada Credit",
+      "total_kobo": 30000,
+      "paid_kobo": 40000,
+      "subtotal_kobo": 30000,
+      "discount_kobo": 0,
+      "delivery_fee_kobo": 0,
+      "payment_method": "Cash",
+      "status": "Completed",
+      "is_historical": 0,
+      "total_refunded_kobo": 0,
+      "refunds_json": null
+    }
+  ],
+  "sale_items": [
+    {
+      "id": "sale-storecredit-item-0",
+      "sale_id": "sale-storecredit",
+      "product_id": "p",
+      "product_name": "Golden Product",
+      "qty": 3,
+      "unit_price_kobo": 10000,
+      "cost_price_kobo": 5000,
+      "total_kobo": 30000,
+      "returned_qty": 0
+    }
+  ],
+  "stock_movements": [
+    {
+      "id": "mv-storecredit",
+      "product_id": "p",
+      "type": "Outgoing",
+      "qty": 3,
+      "prev_stock": 10,
+      "new_stock": 7,
+      "ref_id": null
+    }
+  ]
+}
