@@ -1,0 +1,68 @@
+name: Production Reconciliation (READ-ONLY)
+
+# docs/test-setup-runbook.md Step 9 — the read-only production drift monitor.
+#
+# This job runs scripts/verify-prod-reconciliation.ts against the LIVE production
+# D1 (name `idofera`) on a schedule. It NEVER writes to D1:
+#   * the CF token below must be scoped to "D1 → Read" only, and
+#   * readSelect() refuses to send anything that is not a single SELECT.
+# The only non-read side effect is the signed failure alert posted to
+# MALL_WEBHOOK_URL (the same authenticated receiver the Worker's outbox drain
+# uses). On any drift the script POSTs the alert and exits non-zero, which fails
+# this job.
+#
+# Cadence is the 15-60 minute band the runbook asks for: every 30 minutes.
+# (The alternative is a Cloudflare cron on `--env mall`; wrangler.toml already
+# runs every 10 minutes, so a scheduled Worker could share the read batch there.
+# The GitHub cron is used here because it needs no Worker code change.)
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Rehearse only (read production, print the table, no alert, exit 0)'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    name: Production reconciliation (read-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run reconciliation
+        env:
+          # Read-only token: scope "D1 → Read" on the production account only.
+          CF_API_TOKEN: ${{ secrets.RECON_CF_API_TOKEN }}
+          # The same operator receiver + signing secret the Worker uses.
+          MALL_WEBHOOK_URL: ${{ secrets.MALL_WEBHOOK_URL }}
+          MALL_WEBHOOK_SECRET: ${{ secrets.MALL_WEBHOOK_SECRET }}
+          # Optional tuning (safe defaults baked into the script).
+          RECON_DRAIN_FRESH_MIN: '30'
+          RECON_SWEEP_FRESH_MIN: '120'
+          RECON_STALE_ORDER_HOURS: '48'
+        run: |
+          set -euo pipefail
+          if [ -z "${CF_API_TOKEN:-}" ]; then
+            echo "RECON_CF_API_TOKEN secret is empty — add a 'D1 → Read'-scoped token." >&2
+            exit 1
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            npm run verify:prod-reconciliation -- --dry-run --json
+          else
+            npm run verify:prod-reconciliation -- --json
+          fi

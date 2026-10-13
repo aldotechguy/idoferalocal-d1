@@ -38,6 +38,7 @@
     "verify:mall": "npm run lint && npm run test:mall-backend",
     "verify:mall-preview": "tsx scripts/mall-preview-check.ts",
     "verify:mall-contract": "tsx scripts/verify-mall-contract.ts",
+    "verify:prod-reconciliation": "tsx scripts/verify-prod-reconciliation.ts",
     "demo:mall-cascade": "tsx scripts/mall-cascade-demo.ts",
     "mail:test": "tsx scripts/send-mall-test-emails.ts",
     "ddl:gen": "tsx scripts/etl/gen-ddl.ts",
