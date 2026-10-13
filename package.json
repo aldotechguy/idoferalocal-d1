@@ -27,6 +27,7 @@
     "coverage": "c8 --all --include=src/server/** --include=src/context/** --reporter=text --reporter=lcov --report-dir=coverage npm run test:money",
     "test:vocabulary": "tsx --test scripts/vocabulary-contract.test.ts",
     "test:money-math": "tsx --test scripts/money-math.property.test.ts",
+    "test:money-flow": "tsx --test scripts/money-flow.integration.test.ts",
     "test:ci": "npm run lint && npm run test:vocabulary && npm run test:mall-backend && npm run test:access && npm run test:frontend && npm run test:money && npm run test:regression",
     "verify:access-apps": "tsx scripts/verify-access-apps.ts",
     "verify:access-aud": "tsx scripts/verify-access-aud.ts",
