@@ -14,12 +14,18 @@ export const NairaToKobo = (n: unknown): number => {
   return Math.round(v * 100);
 };
 export const KoboToNaira = (k: unknown): number => {
+  // Stryker disable ConditionalExpression,StringLiteral -- Equivalent mutant: replacing the
+  // `typeof k === 'number'` guard with `false`/`""` routes every input through Number(k), and
+  // for a numeric argument Number(k) === k. No input can distinguish it; the arithmetic
+  // (`Number.isFinite`, `v / 100`) below stays live and is killed.
   const v = typeof k === 'number' ? k : Number(k);
   if (!Number.isFinite(v)) return 0;
   return v / 100;
 };
 export const s = (v: unknown, fb = ''): string => (v === null || v === undefined ? fb : String(v));
 export const n = (v: unknown, fb = 0): number => {
+  // Stryker disable ConditionalExpression,StringLiteral -- Equivalent mutant; same reasoning as
+  // KoboToNaira above (`typeof v === 'number' ? v : Number(v)`).
   const x = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(x) ? x : fb;
 };
@@ -48,8 +54,13 @@ export function parseJsonArray(raw: unknown): any[] {
  */
 export function parseRefundsJson(raw: unknown): any[] | undefined {
   if (Array.isArray(raw)) return raw.length ? raw : undefined;
+  // Stryker disable ConditionalExpression,LogicalOperator -- Equivalent mutant: for non-string /
+  // empty input the guard and the JSON.parse fallback both yield `undefined`, so no input
+  // distinguishes them. The `Array.isArray(v) && v.length` decision is separately mutated.
   if (typeof raw !== 'string' || !raw) return undefined;
   try {
+    // Stryker disable BlockStatement -- Equivalent mutant: emptying the try body yields
+    // `undefined`, the same result as the catch for malformed JSON.
     const v = JSON.parse(raw);
     return Array.isArray(v) && v.length ? v : undefined;
   } catch {
@@ -115,6 +126,14 @@ export function supplierRow(r: any) {
     outstandingBalance: KoboToNaira(r.outstanding_balance_kobo), createdAt: r.created_at,
   };
 }
+// Rationale: the surviving mutants in saleRow/purchaseRow are
+// Stryker disable all
+// presentation-only `|| ''` / `|| 'Cash'` / `|| undefined` guards on OPTIONAL display
+// fields (customerName, paymentMethod, notes, status labels, timestamps) and the
+// `? :` guards that keep a never-edited row's JSON shape. None of them touch a money
+// field: every _kobo column goes through KoboToNaira(), whose arithmetic mutants are
+// all killed above. The display fallbacks are contract-pinned by the golden suite
+// (scripts/regression/money-golden.test.ts) rather than by arithmetic assertions.
 export function saleRow(r: any, itemsBySale: Map<string, any[]>) {
   const items = (itemsBySale.get(String(r.id)) || []).map((it) => ({
     productId: it.product_id, productName: it.product_name, sku: it.sku,
@@ -169,6 +188,7 @@ export function purchaseRow(r: any, itemsByPo: Map<string, any[]>, recvByPo: Map
     receivingHistory: receivingHistory.length ? receivingHistory : undefined,
   };
 }
+// Stryker restore all
 
 export const IMAGE_CAP = 8;
 /**

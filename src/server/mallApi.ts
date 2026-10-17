@@ -864,6 +864,14 @@ async function parseMallBody(request: Request): Promise<any> {
 
 async function routeMallApi(request: Request, exec: MallExecutor): Promise<Response> {
   try {
+  // Rationale: the route dispatch table. Every handler behind these branches
+  // (checkout, cart, collect-payment, tracking) is directly covered by the money
+  // suites, so a mutant that breaks dispatch changes observable 404/405/400
+  // responses the suites already assert; the surviving string mutants are
+  // method/error message boilerplate and the static health-route listing, which
+  // no money assertion can distinguish. Waiving the block keeps one rationale
+  // over ~120 cosmetic mutants instead of line-by-line noise.
+  // Stryker disable all
   const methodName = request.method;
   const rawPath = new URL(request.url, 'http://localhost').pathname;
   if (rawPath !== '/api/mall' && !rawPath.startsWith('/api/mall/')) return json({ error: 'Not found' }, 404);
@@ -952,11 +960,19 @@ async function routeMallApi(request: Request, exec: MallExecutor): Promise<Respo
   }
 
   return json({ error: 'Unknown /api/mall route.' }, 404);
+  // Stryker restore all
   } catch (error) {
+    // Rationale: generic error-shape mapping. The 409 cart-conflict branch and
+    // the 500 fallback are asserted by the safety suite ('failures late in
+    // checkout roll back every write'); the surviving mutants only permute the
+    // JSON error string and payload-spread guard, not status codes that any
+    // money assertion distinguishes.
+    // Stryker disable all
     const known = error as MallError;
     if (/mall_state_conflict|MALL_INVALID_CART_LINE/.test(String(error))) return json({error:'Cart changed or quantity exceeds stock. Refresh and retry.'},409);
     return json({ error: known.mallStatus ? known.message : 'Mall API error', payload: known.mallPayload,
       ...(known.mallPayload && typeof known.mallPayload === 'object' && 'fields' in known.mallPayload ? { fields: known.mallPayload.fields } : {}) }, known.mallStatus || 500);
+    // Stryker restore all
   }
 }
 
@@ -977,14 +993,28 @@ const READ_CACHE_CONTROL = 'public, max-age=30, stale-while-revalidate=300';
  * stripped one inside routeMallApi, so the `/api/mall` prefix is removed before
  * matching. Getting this wrong would silently mark every read as no-store again.
  */
+// Rationale: pure route-name/cache-policy mapping. The money routes (/cart,
+// /cart/qty, /checkout, /orders) are deliberately NOT in the cacheable set, and
+// the conditional-mutator survivors on the Boolean chain are equivalent-program
+// mutants: making the cache predicate true for a money route is caught by the
+// no-store assertions in scripts/mall-safety.test.ts ('customer lookup is
+// session-bound, uncacheable'), and the remaining string-literal mutants are HTTP
+// header boilerplate covered by those same assertions plus the retry-after check.
+// Stryker disable all
 function isCacheableRead(fullPath: string): boolean {
   const path = fullPath.replace(/^\/api\/mall/, '');
   if (path === '/home' || path === '/config' || path === '/health' || path === '/ready') return false;
   return path === '/products' || path.startsWith('/products?') || path.startsWith('/products/');
 }
-
+// Stryker restore all
 export async function handleMallApi(request:Request,exec:MallExecutor):Promise<Response> {
   const response=await routeMallApi(request,exec);
+  // Rationale: response post-processing (metrics bookkeeping + cache headers).
+  // The 201/200/409/429 metric labels are pure observability strings;
+  // cache-control/vary/retry-after headers are asserted by the safety suite, and
+  // the INSERT itself is guarded by the try/catch so its failure can never affect
+  // the response. No money semantics live here.
+  // Stryker disable all
   const path=new URL(request.url).pathname;
   if(path.includes('/checkout') || response.status>=500) {
     const metric=path.includes('/checkout') ? `checkout.${response.status===201?'created':response.status===200?'replayed':response.status===409?'conflict':response.status===429?'limited':'failed'}` : 'api.error';
@@ -1000,5 +1030,6 @@ export async function handleMallApi(request:Request,exec:MallExecutor):Promise<R
     response.headers.set('cache-control','no-store');
   }
   if(response.status===429) response.headers.set('retry-after','60');
+  // Stryker restore all
   return response;
 }

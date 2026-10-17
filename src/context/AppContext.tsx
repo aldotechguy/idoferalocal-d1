@@ -3,6 +3,7 @@ import { useAuth } from './AuthContext';
 import { catalogStatus } from '../shared/productStatus';
 import { syncMallOrderFromPos } from '../shared/posMallSync';
 import { findExistingCustomerIndex, findExistingSupplierIndex, isDuplicateSaleInvoice } from '../shared/importGuards';
+import { computeTreasuryBalances } from './moneyLedger';
 import {
   Product,
   Customer,
@@ -596,52 +597,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [moneyMovements, setMoneyMovements] = useState<MoneyMovement[]>(() =>
     sanitizeMoneyMovements(readLegacyCollection<MoneyMovement>('idofera_moneyMovements', isClearedBoot ? [] : INITIAL_MONEY_MOVEMENTS)));
 
-  const treasuryBalances = useMemo<TreasuryBalances>(() => {
-    let biz = 0;
-    let cash = 0;
-    let grossOwnerDrawings = 0;
-    let grossOwnerLoans = 0;
-    let ownerRepayments = 0;
-
-    moneyMovements.forEach((mv) => {
-      const amt = Number(mv.amount) || 0;
-      if (mv.destinationAccount === 'Biz Account') {
-        biz += amt;
-      } else if (mv.destinationAccount === 'Physical Cash') {
-        cash += amt;
-      }
-
-      if (mv.sourceAccount === 'Biz Account') {
-        biz -= amt;
-      } else if (mv.sourceAccount === 'Physical Cash') {
-        cash -= amt;
-      }
-
-      if (mv.type === 'Owner Drawing') {
-        grossOwnerDrawings += amt;
-        if (mv.subtype === 'Owner Loan') {
-          grossOwnerLoans += amt;
-        }
-      } else if (mv.type === 'Owner Repayment') {
-        // Loan repayments reverse the drawings/loans position. Sum-then-net
-        // keeps the KPI order-independent: a repayment recorded before its
-        // originating loan (a prepay toward a loan, or movements reordered by
-        // a sync pull) can no longer floor to zero mid-walk and lose the loan.
-        ownerRepayments += amt;
-      }
-    });
-
-    const netOwnerDrawings = Math.max(0, grossOwnerDrawings - ownerRepayments);
-    const netOwnerLoans = Math.max(0, grossOwnerLoans - ownerRepayments);
-
-    return {
-      bizAccountBalance: Number(biz.toFixed(2)),
-      physicalCashBalance: Number(cash.toFixed(2)),
-      totalLiquidCash: Number((biz + cash).toFixed(2)),
-      totalOwnerDrawings: Number(netOwnerDrawings.toFixed(2)),
-      totalOwnerLoans: Number(netOwnerLoans.toFixed(2)),
-    };
-  }, [moneyMovements]);
+  const treasuryBalances = useMemo<TreasuryBalances>(
+    () => computeTreasuryBalances(moneyMovements),
+    [moneyMovements],
+  );
 
   const applyCloudData = React.useCallback((cloudData: Record<string, any[]>) => {
     if (!cloudData) return;

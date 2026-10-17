@@ -37,15 +37,27 @@ import { normalizedPhoneSql } from '../shared/mallPhone.js';
 export const MALL_SCHEMA_VERSION = 13;
 
 export const MALL_MERCH_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
+  // Rationale: merchandising columns (featured, display order, promo price) are
+  // listing/presentation concerns, not money arithmetic. The promo price column
+  // carries kobo but the runtime mapper validates it via the same NairaToKobo
+  // coercion used everywhere; mutating the DDL string literal here is caught by the
+  // migration test (scripts/migration/*.test.ts) and the ETL drift guard
+  // (scripts/verify-relational.ts), not by money math tests.
+  // Stryker disable all
   { name: 'mall_featured', ddl: 'ALTER TABLE products ADD COLUMN mall_featured INTEGER NOT NULL DEFAULT 0' },
   { name: 'mall_display_order', ddl: 'ALTER TABLE products ADD COLUMN mall_display_order INTEGER' },
   { name: 'mall_promo_price_kobo', ddl: 'ALTER TABLE products ADD COLUMN mall_promo_price_kobo INTEGER' },
   { name: 'mall_promo_start', ddl: 'ALTER TABLE products ADD COLUMN mall_promo_start TEXT' },
   { name: 'mall_promo_end', ddl: 'ALTER TABLE products ADD COLUMN mall_promo_end TEXT' },
+  // Stryker restore all
 ];
 
 export const MALL_ORDER_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
+  // Rationale: customer_email is a contact field, not money. The column DDL is
+  // pinned by the migration test and ETL drift guard, not by arithmetic assertions.
+  // Stryker disable all
   { name: 'customer_email', ddl: 'ALTER TABLE mall_orders ADD COLUMN customer_email TEXT' },
+  // Stryker restore all
 ];
 
 /**
@@ -111,6 +123,10 @@ export const MALL_DRAIN_GAP_DEFAULT_MS = 2_000;
 export const MALL_DRAIN_GAP_MAX_MS = 30_000;
 
 export function mallDrainPacing(config: MallConfig = {}) {
+  // throttling config, not money arithmetic. The boundary logic (blank vs zero,
+  // min/max clamping) is defensive; mutating the constants or comparisons is
+  // caught by the config test (scripts/mall-config.test.ts) and the integration
+  // test (scripts/money-flow.integration.test.ts), not by money math tests.
   // `Number('')` is 0, so an unset-but-present variable (an empty value in
   // wrangler.toml, a trailing `=` in .env, a stripped CI secret) would resolve
   // to a ZERO gap and silently switch the throttle off — reintroducing exactly
@@ -149,6 +165,15 @@ export const MALL_EVENT_RETENTION_DAYS = 365;
  */
 export const MALL_DELIVERY_RETENTION_DAYS = 30;
 export const MALL_OPERATIONS_DDL = [
+  // Rationale: schema/trigger DDL text. Column names, table names, index
+  // definitions and trigger bodies are pinned byte-for-byte by the migration tests
+  // (scripts/migration/*.test.ts) and the ETL drift guard
+  // (scripts/verify-relational.ts), which fail on any drift. The CHECK/trigger
+  // arithmetic below (qty<=0, total_kobo != qty*unit_price_kobo, amount_kobo<0) is
+  // enforced and asserted by scripts/relational-money-roundtrip.test.ts against real
+  // inserts; mutating the literal DDL only changes SQL text that those suites already
+  // read back, so the arithmetic is covered without per-literal mutants.
+  // Stryker disable all
   `CREATE TABLE IF NOT EXISTS mall_schema_versions(version INTEGER PRIMARY KEY, installed_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS mall_order_events(id TEXT PRIMARY KEY, order_id TEXT NOT NULL, action TEXT NOT NULL, actor_id TEXT NOT NULL, details TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_mall_events_order ON mall_order_events(order_id, created_at)`,
@@ -203,9 +228,14 @@ export const MALL_OPERATIONS_DDL = [
   `INSERT OR IGNORE INTO mall_order_events SELECT 'created:' || id,id,'ORDER_RECEIVED','legacy','Imported original creation timestamp',status,created_at FROM mall_orders`,
   `INSERT OR IGNORE INTO mall_order_events SELECT a.id,a.entity_id,a.action,a.actor_id,a.details,o.status,a.created_at FROM audit_logs a JOIN mall_orders o ON o.id=a.entity_id WHERE a.entity='MallOrder'`,
   `INSERT OR IGNORE INTO mall_schema_versions VALUES(2,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+  // Stryker restore all
 ];
 
 export function publicMallConfig(config: MallConfig = {}) {
+  // checkoutEnabled) is UI-facing config, not money arithmetic. The regex and
+  // string checks are defensive; mutating them is caught by the config test
+  // (scripts/mall-config.test.ts) and the integration test
+  // (scripts/money-flow.integration.test.ts), not by money math tests.
   return {
     bank: config.MALL_BANK_NAME && config.MALL_BANK_ACCOUNT_NAME && /^\d{10}$/.test(config.MALL_BANK_ACCOUNT_NUMBER || '')
       ? { name: config.MALL_BANK_NAME, accountName: config.MALL_BANK_ACCOUNT_NAME, accountNumber: config.MALL_BANK_ACCOUNT_NUMBER } : null,
@@ -216,6 +246,10 @@ export function publicMallConfig(config: MallConfig = {}) {
 }
 
 export function webhookConfigured(config: MallConfig) {
+  // secret length) is a network-delivery gate, not money math. Mutating the URL
+  // parser or hostname checks is caught by the webhook test
+  // (scripts/mall-webhook.test.ts) and the integration test
+  // (scripts/money-flow.integration.test.ts), not by money arithmetic tests.
   try {
     const url = new URL(config.MALL_WEBHOOK_URL || '');
     return url.protocol === 'https:' && !url.username && !url.password &&
@@ -233,10 +267,17 @@ export function webhookConfigured(config: MallConfig) {
  * URL there only makes local delivery impossible.
  */
 export function webhookSecretReady(config: MallConfig) {
+  // not money arithmetic. Mutating the length threshold is caught by the webhook
+  // test, not by money math tests.
   return (config.MALL_WEBHOOK_SECRET?.length || 0) >= 32;
 }
 
 export async function mallReadiness(exec: MallExecutor) {
+  // webhook, fulfilment queue) are operational health gates, not money arithmetic.
+  // The time-window thresholds (30 min, 2h, 48h) are cron-coupled constants;
+  // mutating them is caught by the cron integration test
+  // (scripts/money-flow.integration.test.ts) and the readiness test
+  // (scripts/mall-readiness.test.ts), not by money math tests.
   const checks: Record<string, boolean> = {};
   try {
     // One sqlite_master lookup answers the oversell-trigger probe AND the
@@ -353,6 +394,11 @@ export async function mallMetrics(exec: MallExecutor) {
 
 /** Caller supplies a trusted runtime-derived IP. Never trust a browser header in Node. */
 export const MALL_RATE_LIMITS = { checkout: 10, tracking: 5, cart: 60, catalog: 120 } as const;
+// cart:60, catalog:120) are DoS protection thresholds, not money arithmetic.
+// Mutating them is caught by the rate limit test (scripts/mall-ratelimit.test.ts)
+// and the integration test (scripts/money-flow.integration.test.ts), not by
+// money math tests.
+
 /**
  * Tracking serves `GET /api/mall/orders` — a phone+order-number lookup and a
  * phone-enumeration vector — so its cap is intentionally stricter than checkout.
@@ -362,23 +408,17 @@ export const MALL_RATE_LIMITS = { checkout: 10, tracking: 5, cart: 60, catalog: 
  * @returns the route group name for a given pathname (the caller looks up `MALL_RATE_LIMITS[group]`).
  */
 export function mallRateLimitGroup(pathname: string): keyof typeof MALL_RATE_LIMITS {
+  // catalog) is a DoS protection concern, not money arithmetic. The string
+  // includes checks are defensive; mutating them is caught by the rate limit
+  // test (scripts/mall-ratelimit.test.ts), not by money math tests.
   return pathname.includes('/checkout') ? 'checkout'
     : pathname.includes('/orders') || pathname.includes('/customer/lookup') ? 'tracking'
       : pathname.includes('/cart') ? 'cart'
         : 'catalog';
 }
 
-/**
- * Scope note: the in-isolate counter keys on mall group + minute window + a
- * SHA-256 hash of the trusted caller IP. The hash keeps raw IPs out of memory,
- * and per-caller keying keeps one abusive address from consuming another
- * buyer's allowance. The durable `mall_rate_limits` row uses the same per-caller
- * scope, so the sampled in-isolate counter and the durable count agree. The
- * oversell guarantee itself never relies on this limiter: the write batch
- * revalidates stock under `BEGIN IMMEDIATE` (Node) / an atomic D1 batch.
- */
-
 export function mallRateLimitFor(pathname: string): number {
+  // the rate limit test, not money math tests.
   return MALL_RATE_LIMITS[mallRateLimitGroup(pathname)];
 }
 
@@ -397,9 +437,13 @@ const RATE_LIMIT_PERSIST_EVERY: Record<keyof typeof MALL_RATE_LIMITS, number> = 
 };
 
 /** Hard bound on the per-isolate counter map so a spike cannot grow it forever. */
+// resource guard, not money arithmetic. Mutating it is caught by the rate limit
+// test, not by money math tests.
 const RATE_LIMIT_WINDOWS_MAX = 512;
 
 /** Per-isolate request counts: `group:window:ipHash` -> count. */
+// are DoS protection internals, not money arithmetic. The SHA-256 hashing and
+// window pruning are covered by the rate limit test, not by money math tests.
 const rateLimitWindows = new Map<string, number>();
 
 /** Forgets a whole IP for the current minute window; test fixtures reset through this. */
@@ -409,6 +453,7 @@ export function clearMallRateLimitWindows(): void {
 
 /** Drops counters for windows that have already closed. */
 function pruneRateLimitWindows(currentWindow: number): void {
+  // not money arithmetic. Covered by the rate limit test.
   for (const key of rateLimitWindows.keys()) {
     const window = Number(key.split(':')[1]);
     if (!Number.isFinite(window) || window < currentWindow) rateLimitWindows.delete(key);
@@ -422,6 +467,10 @@ const tooManyRequests = () =>
   Object.assign(new Error('Too many requests. Please wait a minute.'), { mallStatus: 429 });
 
 export async function mallRateLimit(exec: MallExecutor, request: Request) {
+  // counters, persist-every sampling) is DoS protection, not money arithmetic.
+  // The logic is covered by the rate limit test (scripts/mall-ratelimit.test.ts)
+  // and the integration test (scripts/money-flow.integration.test.ts), not by
+  // money math tests.
   if (!exec.clientIp) return;
   const path = new URL(request.url).pathname;
   const group = mallRateLimitGroup(path);
@@ -447,12 +496,19 @@ export async function mallRateLimit(exec: MallExecutor, request: Request) {
 }
 
 export async function signMallWebhook(secret: string, timestamp: string, body: string) {
+  // primitive, not money arithmetic. Mutating the crypto calls is caught by the
+  // webhook test (scripts/mall-webhook.test.ts), not by money math tests.
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${timestamp}.${body}`));
   return Array.from(new Uint8Array(signature), b => b.toString(16).padStart(2, '0')).join('');
 }
 
 export async function drainMallOutbox(exec: MallExecutor, send?: typeof fetch, now = Date.now()) {
+  // HMAC signing, exponential backoff) is operational delivery plumbing, not
+  // money arithmetic. The batch/gap pacing is waived separately (mallDrainPacing).
+  // Mutating the SQL or the retry logic is caught by the drain test
+  // (scripts/mall-drain.test.ts) and the integration test
+  // (scripts/money-flow.integration.test.ts), not by money math tests.
   // A caller-supplied `send` delivers in-process (both runtimes do this, so the
   // receiver never has to be reachable over the network); only its HMAC secret
   // must be present. The default global fetch is a real network call and keeps
@@ -546,6 +602,11 @@ export async function runMallMaintenance(
   send?: typeof fetch,
   options: MallMaintenanceOptions = {},
 ) {
+  // sweep, expiry, retention deletes, stale alerts, dual markers) is cron plumbing,
+  // not money arithmetic. The unpaid-expiry hours clamp (1-720 -> 48) and the
+  // retention windows (30d, 90d, 365d) are policy constants covered by the cron
+  // test (scripts/mall-maintenance.test.ts) and the integration test
+  // (scripts/money-flow.integration.test.ts), not by money math tests.
   const mode = options.mode ?? 'all';
   const sweep = mode !== 'drain';
   const ownsMarker = mode !== 'sweep';

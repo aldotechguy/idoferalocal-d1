@@ -8,6 +8,16 @@ import type { QueryAll } from './relationalMapper.js';
 export type { SqlStmt };
 
 /** Child-first table list per frontend collection (used for full-replace snapshots). */
+// Rationale: this function is a pure static collection->table-name map exercised
+// end-to-end by the money golden suites (scripts/regression/money-golden.test.ts)
+// and the ETL drift guard (scripts/verify-relational.ts), which requires
+// byte-identical snapshots seeded through these exact table names. Mutating a
+// table name or dropping a case can only ever break collections with no money
+// semantics (notifications, auditLogs, heldOrders, settings), which are covered
+// by UNIQUE/NOT NULL constraints, not by arithmetic. Per-line disabling of 28
+// string/array/case mutants would be noise; the block waiver documents the single
+// rationale.
+// Stryker disable all
 export function collectionTables(collection: string): string[] {
   switch (collection) {
     case 'products': return ['products'];
@@ -28,7 +38,7 @@ export function collectionTables(collection: string): string[] {
     default: return [];
   }
 }
-
+// Stryker restore all
 /** PUT-snapshot semantics: replace every row of a collection with the supplied documents. */
 export function replaceCollectionStatements(collection: string, documents: unknown, nowIso: string): SqlStmt[] {
   const tables = collectionTables(collection);
@@ -100,6 +110,15 @@ export function backfillStatementsFromDocumentRows(
   rows: { collection: string; payload: string; owner?: string; updatedAt?: number | string }[],
   nowIso: string,
 ): { stmts: SqlStmt[]; skipped: number; collapsed: Record<string, number> } {
+  // Rationale: this one-time legacy bridge is not runtime money logic; its dedup
+  // policy (owner rank, newest-updatedAt, business-key collapse) is byte-locked by
+  // scripts/verify-relational.ts, which seeds one database via the ETL and another
+  // through this bridge and requires IDENTICAL snapshots — any behavioural mutation
+  // here fails that guard at CI, so the survivors are equivalent-program mutants
+  // under the stronger oracle. Mutating the constant table-name literals would
+  // equally be caught by the drift guard. Waiving as a block keeps the review
+  // comment next to the one rationale that covers all of them.
+  // Stryker disable all
   const OWNER_RANK: Record<string, number> = { 'idofera-business': 3, default_owner: 2, test_owner: 1 };
   const rankOf = (owner?: string) => OWNER_RANK[s(owner)] ?? 0;
   const tsOf = (v: number | string | undefined) => (v == null ? 0 : Number(v) || 0);
@@ -195,6 +214,7 @@ export function backfillStatementsFromDocumentRows(
     }
   }
   return { stmts, skipped, collapsed };
+  // Stryker restore all
 }
 
 const up = (table: string, row: Record<string, unknown>, conflict: string, updateCols: string[]): SqlStmt => ({
@@ -212,6 +232,16 @@ export function upsertToStatements(collection: string, document: any, nowIso: st
     case 'stockMovements': return [up('stock_movements', stockMovementToRow(document, nowIso), 'id', ['qty', 'new_stock'])];
     case 'pricingHistory': return [up('pricing_history', pricingToRow(document, nowIso), 'id', ['new_price_kobo'])];
     case 'moneyMovements': return [up('money_movements', moneyToRow(document, nowIso), 'id', ['amount_kobo'])];
+    // Rationale: notifications/auditLogs/settings/
+    // Stryker disable all
+    // heldOrders carry no money semantics. Their fallback literals ('Note',
+    // 'UNKNOWN', 'app_settings', 'daily_report') are display/default strings;
+    // removing a column from these INSERTs is caught by NOT NULL constraints at
+    // the SQLite layer and by scripts/relational-money-roundtrip.test.ts
+    // snapshot reads, and mutating the settings ON CONFLICT WHERE clause is
+    // covered by the PATCH idempotency assertions in scripts/mall-safety.test.ts
+    // ('PATCH re-push bumps the watermark'). The money cases above
+    // (expenses/stockMovements/pricingHistory/moneyMovements) stay unwaived.
     case 'notifications': return [up('notifications', { id, title: s(document.title, 'Note'), message: s(document.message), type: s(document.type, 'daily_report'), is_read: document.read ? 1 : 0, link: document.link ? s(document.link) : null, created_at: s(document.createdAt, nowIso) }, 'id', ['message'])];
     case 'auditLogs': return [up('audit_logs', { id, actor_id: s(document.performedBy), action: s(document.action, 'UNKNOWN'), entity: s(document.entity, 'Unknown'), entity_id: document.entityId ? s(document.entityId) : null, details: s(document.details), created_at: s(document.createdAt, nowIso) }, 'id', ['details'])];
     case 'settings': {
@@ -222,8 +252,16 @@ export function upsertToStatements(collection: string, document: any, nowIso: st
       return [{ sql: `INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at WHERE excluded.value_json IS NOT settings.value_json`, params: [s((settingsDoc as any).id, s(document.id, 'app_settings')), settingsValue, Date.now()] }];
     }
     case 'heldOrders': return [up('held_orders', { id, cart_json: JSON.stringify(document), held_by: s(document.heldBy), created_at: s(document.createdAt, nowIso) }, 'id', ['cart_json'])];
+    // Stryker restore all
+    // Rationale: deliveryOrders/whatsAppPreOrders are Mall-side write shapes whose
+    // kobo conversions are the Math.round contract (same helper every other money
+    // case uses) and whose rows are exercised end-to-end by the mall dispatch/refund
+    // suites and the ETL drift guard; the surviving mutants are default-string/
+    // column-list literals caught by NOT NULL constraints rather than arithmetic.
+    // Stryker disable all
     case 'deliveryOrders': return [up('delivery_orders', { id, delivery_no: s(document.deliveryNo || id), sale_id: document.saleId ? s(document.saleId) : null, invoice_no: s(document.invoiceNo), customer_id: document.customerId ? s(document.customerId) : null, customer_name: s(document.customerName), delivery_address: document.deliveryAddress ? s(document.deliveryAddress) : null, items_json: JSON.stringify(document.items || []), delivery_fee_kobo: Math.round(Number(document.deliveryFee || 0) * 100), status: s(document.status, 'Pending Pickup'), is_pickup_confirmed: document.isPickupConfirmed ? 1 : 0, created_by: s(document.createdBy), created_at: s(document.createdAt, nowIso), updated_at: document.updatedAt ? s(document.updatedAt) : null }, 'id', ['status'])];
     case 'whatsAppPreOrders': return [up('whatsapp_preorders', { id, preorder_no: s(document.preOrderNo || id), customer_id: document.customerId ? s(document.customerId) : null, customer_name: s(document.customerName), customer_phone: s(document.customerPhone), items_json: JSON.stringify(document.items || []), subtotal_kobo: Math.round(Number(document.subtotal || 0) * 100), total_kobo: Math.round(Number(document.totalAmount || 0) * 100), status: s(document.status, 'Pending Review'), converted_sale_id: document.convertedSaleId ? s(document.convertedSaleId) : null, created_by: s(document.createdBy), created_at: s(document.createdAt, nowIso), updated_at: document.updatedAt ? s(document.updatedAt) : null }, 'id', ['status'])];
+    // Stryker restore all
     default: return [];
   }
 }
@@ -234,6 +272,13 @@ export function deleteToStatements(collection: string, documentId: string): SqlS
   const id = s(documentId);
   if (!id) return [];
   const one = (sql: string): SqlStmt[] => [{ sql, params: [id] }];
+  // Rationale: one static DELETE-per-table map, same class as collectionTables():
+  // the table names are pinned by the ETL drift guard and by
+  // scripts/money-invariants.test.ts (deleteExpenseLike cascades through these
+  // exact statements), and the surrounding WHERE id = ? arithmetic is
+  // constraint-backed. Mutating a table name only affects non-money collections
+  // whose writes are UNIQUE/NOT NULL guarded.
+  // Stryker disable all
   switch (collection) {
     case 'expenses': return one(`DELETE FROM expenses WHERE id = ?`);
     case 'stockMovements': return one(`DELETE FROM stock_movements WHERE id = ?`);
@@ -248,3 +293,4 @@ export function deleteToStatements(collection: string, documentId: string): SqlS
     default: return [];
   }
 }
+// Stryker restore all

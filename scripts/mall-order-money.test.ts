@@ -248,4 +248,138 @@ for (const runtime of ['node', 'worker'] as const) {
     assert.equal((await f.opId(thirdId, 'cancel', { reason: 'Too late' }, 'Store Manager')).status, 409, 'a delivered order cannot be cancelled');
     assert.equal(f.scalar('SELECT stock_qty FROM products'), 9, 'the refused cancel left stock at 9 (only the delivered unit out)');
   });
+
+  // --- Mutation-killing locks (Stryker Cycle 1, arithmetic/conditional survivors
+  // --- on the part-payment debt + refund unwind math. See docs/mutation-report.md.
+
+  test(`${runtime}: part-payment debt math is exact — dueKobo, inflow, loyalty and debt all keyed to cash collected`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    // Registered customer so a part payment is accepted (the debt rule).
+    f.db.prepare(`INSERT INTO customers (id, name, phone, email, address, purchase_history_count,
+      outstanding_balance_kobo, loyalty_points, lifetime_value_kobo, created_at)
+      VALUES ('cust-mut', 'Ada', '08031234567', '', '', 0, 0, 0, 0, '2026-01-01')`).run();
+    assert.equal((await f.checkout()).status, 201);
+    const id = f.id();
+    // Order total 20000; collect exactly 12000 -> debt 8000, loyalty floor(12000/10000)=1.
+    assert.equal((await f.op('collect-payment', { paymentMethod: 'Cash', amountKobo: 12000 })).status, 200);
+    const saleId = `sale-${id}`;
+    // THE LOCK (line 304 `totalKobo - amountKobo`): the debt is total minus cash
+    // collected, not cash-collected minus total or 0.
+    assert.equal(f.scalar(`SELECT outstanding_balance_kobo FROM customers WHERE id = 'cust-mut'`), 8000,
+      'the receivable is total - collected (8000), never flipped or zeroed');
+    // THE LOCK (line 353 Sale Inflow amountKobo): the treasury inflow is the cash
+    // actually received (12000), not the order total.
+    assert.equal(f.scalar(`SELECT amount_kobo FROM money_movements WHERE id = 'mm-${saleId}'`), 12000,
+      'the inflow is the cash collected, not the order total');
+    assert.equal(f.scalar("SELECT amount_kobo FROM payments WHERE order_id = '" + id + "'"), 12000);
+    assert.equal(f.scalar("SELECT status FROM payments WHERE order_id = '" + id + "'"), 'partial');
+    // THE LOCK (line 364/365 loyalty `Math.floor(amountKobo / 10_000)`): 1 point
+    // per 100 naira collected — mutating the divisor or the floor breaks this.
+    assert.equal(f.scalar(`SELECT loyalty_points FROM customers WHERE id = 'cust-mut'`), 1,
+      'loyalty = floor(collected / 100 naira)');
+    assert.equal(f.scalar(`SELECT lifetime_value_kobo FROM customers WHERE id = 'cust-mut'`), 12000,
+      'LTV is keyed to the cash collected, not the total');
+    // Notes text embeds the due amount via `dueKobo / 100` (line 353 ternary) —
+    // mutating to dueKobo*100 or dropping the branch changes this string.
+    const inflowNotes = String(f.scalar(`SELECT notes FROM money_movements WHERE id = 'mm-${saleId}'`));
+    assert.ok(inflowNotes.includes('80 due'), `the part-payment note carries the 80 naira due, got: ${inflowNotes}`);
+    assert.ok(inflowNotes.includes('part payment'), 'the note marks it as a part payment');
+  });
+
+  test(`${runtime}: refund of a part-paid order unwinds debt and loyalty with exact clamping`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    f.db.prepare(`INSERT INTO customers (id, name, phone, email, address, purchase_history_count,
+      outstanding_balance_kobo, loyalty_points, lifetime_value_kobo, overage_balance_kobo, created_at)
+      VALUES ('cust-ref', 'Ada', '08031234567', '', '', 1, 0, 2, 12000, 500, '2026-01-01')`).run();
+    assert.equal((await f.checkout()).status, 201);
+    const id = f.id();
+    await f.op('confirm', {});
+    assert.equal((await f.op('collect-payment', { paymentMethod: 'Cash', amountKobo: 12000 })).status, 200);
+    // Sanity: debt booked at settlement.
+    assert.equal(f.scalar(`SELECT outstanding_balance_kobo FROM customers WHERE id = 'cust-ref'`), 8000);
+    // THE LOCK (line 506 `Math.max(0, total - paidKobo)`): the refund clears the
+    // receivable by exactly the shortfall (8000), floored at 0.
+    assert.equal((await f.op('refund', { reason: 'Returned', returnStock: true, returnReference: 'GRN-M' })).status, 200);
+    assert.equal(f.scalar(`SELECT outstanding_balance_kobo FROM customers WHERE id = 'cust-ref'`), 0,
+      'the part-payment debt is cleared by the refund');
+    // THE LOCK (line 535 customer unwind): loyalty claws back floor(paid/10000)=1
+    // (settlement added 1 to the seeded 2, refund subtracts 1 -> 2), LTV nets to
+    // the collected amount (seed 12000 + 12000 - clawback 12000), history nets to
+    // seeded 1 (+1 at settlement, -1 at refund), and the overage clawback is the
+    // sale's overage_created (0 for a Mall order), floored at 0.
+    assert.equal(f.scalar(`SELECT loyalty_points FROM customers WHERE id = 'cust-ref'`), 2,
+      'loyalty: seed 2 +1 at settlement, -1 clawback at refund');
+    assert.equal(f.scalar(`SELECT lifetime_value_kobo FROM customers WHERE id = 'cust-ref'`), 12000,
+      'LTV: seed 12000 +12000 collected, -12000 clawback');
+    assert.equal(f.scalar(`SELECT purchase_history_count FROM customers WHERE id = 'cust-ref'`), 1,
+      'history: seed 1, +1 at settlement, -1 at refund');
+    assert.equal(f.scalar(`SELECT overage_balance_kobo FROM customers WHERE id = 'cust-ref'`), 500,
+      'the clawback removes only the credit this sale created (none for a Mall order)');
+    // THE LOCK (line 529 Sale Refund movement): the refund returns the cash
+    // actually collected (12000), leaving the correct account.
+    assert.equal(f.scalar(`SELECT amount_kobo FROM money_movements WHERE id = 'mm-refund-sale-${id}'`), 12000,
+      'the refund movement equals the cash collected');
+    assert.equal(f.scalar(`SELECT source_account FROM money_movements WHERE id = 'mm-refund-sale-${id}'`), 'Physical Cash');
+    // THE LOCK (line 512 netRefundAmount = paidKobo / 100): 120 naira in the refund record.
+    const refunds = JSON.parse(String(f.scalar(`SELECT refunds_json FROM sales WHERE id = 'sale-${id}'`)));
+    assert.equal(refunds[0].netRefundAmount, 120, 'netRefundAmount is the paid kobo converted to naira');
+  });
+
+  test(`${runtime}: collect-payment amount bounds are exact — zero/negative rejected, over-total rejected, boundary accepted`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    f.db.prepare(`INSERT INTO customers (id, name, phone, email, address, purchase_history_count,
+      outstanding_balance_kobo, loyalty_points, lifetime_value_kobo, created_at)
+      VALUES ('cust-bounds', 'Ada', '08031234567', '', '', 0, 0, 0, 0, '2026-01-01')`).run();
+    assert.equal((await f.checkout()).status, 201);
+    await f.op('confirm', {});
+    // THE LOCK (line 302 `amountKobo <= 0`): zero AND negative are both refused.
+    assert.equal((await f.op('collect-payment', { paymentMethod: 'Cash', amountKobo: 0 })).status, 400);
+    assert.equal((await f.op('collect-payment', { paymentMethod: 'Cash', amountKobo: -5000 })).status, 400);
+    // THE LOCK (line 303 `amountKobo > totalKobo`): one kobo over is refused, the
+    // exact total is accepted.
+    assert.equal((await f.op('collect-payment', { paymentMethod: 'Cash', amountKobo: 20001 })).status, 400);
+    assert.equal((await f.op('collect-payment', { paymentMethod: 'Cash', amountKobo: 20000 })).status, 200);
+    // THE LOCK (line 349 `dueKobo > 0 ? 'partial' : 'paid'`): a full settlement
+    // is 'paid', a part payment is 'partial' — flipping the comparison swaps them.
+    assert.equal(f.scalar("SELECT status FROM payments WHERE order_id = '" + f.id() + "'"), 'paid');
+    assert.equal(f.scalar("SELECT outstanding_balance_kobo FROM customers WHERE id = 'cust-bounds'"), 0,
+      'a full payment books no debt');
+    // Boundary: exactly one kobo short is still a part payment.
+    const session2 = sid('bounds-2');
+    f.fill(session2);
+    assert.equal((await f.checkout(key(), {}, session2)).status, 201);
+    const secondId = String(f.scalar("SELECT id FROM mall_orders ORDER BY rowid DESC LIMIT 1"));
+    await f.opId(secondId, 'confirm');
+    assert.equal((await f.opId(secondId, 'collect-payment', { paymentMethod: 'Cash', amountKobo: 19999 })).status, 200);
+    assert.equal(f.scalar("SELECT status FROM payments WHERE order_id = '" + secondId + "'"), 'partial');
+    assert.equal(f.scalar("SELECT outstanding_balance_kobo FROM customers WHERE id = 'cust-bounds'"), 1,
+      'one kobo of debt from the one-kobo-short settlement');
+  });
+
+  test(`${runtime}: payment method routes the treasury account and the refund reverses into the same account`, async t => {
+    const f = await fixture(runtime); t.after(() => f.db.close());
+    assert.equal((await f.checkout()).status, 201);
+    let id = f.id();
+    await f.op('confirm', {});
+    // THE LOCK (paymentDestination, line 249-251): Cash -> Physical Cash,
+    // everything else -> Biz Account.
+    assert.equal((await f.op('collect-payment', { paymentMethod: 'Cash', amountKobo: 20000 })).status, 200);
+    assert.equal(f.scalar("SELECT dest_account FROM money_movements WHERE id = 'mm-sale-" + id + "'"), 'Physical Cash',
+      'Cash settles into the till');
+    assert.equal((await f.op('refund', { reason: 'R', returnStock: false })).status, 200);
+    assert.equal(f.scalar("SELECT source_account FROM money_movements WHERE id = 'mm-refund-sale-" + id + "'"), 'Physical Cash',
+      'a Cash refund leaves the till');
+    // Card settles through the Biz Account, both ways.
+    const session3 = sid('bounds-card');
+    f.fill(session3);
+    assert.equal((await f.checkout(key(), {}, session3)).status, 201);
+    id = String(f.scalar("SELECT id FROM mall_orders ORDER BY rowid DESC LIMIT 1"));
+    await f.opId(id, 'confirm');
+    assert.equal((await f.opId(id, 'collect-payment', { paymentMethod: 'Card', amountKobo: 20000 })).status, 200);
+    assert.equal(f.scalar("SELECT dest_account FROM money_movements WHERE id = 'mm-sale-" + id + "'"), 'Biz Account',
+      'Card settles into the Biz Account');
+    assert.equal((await f.opId(id, 'refund', { reason: 'R', returnStock: false })).status, 200);
+    assert.equal(f.scalar("SELECT source_account FROM money_movements WHERE id = 'mm-refund-sale-" + id + "'"), 'Biz Account',
+      'a Card refund leaves the Biz Account');
+  });
 }

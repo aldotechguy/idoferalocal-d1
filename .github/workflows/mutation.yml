@@ -1,0 +1,56 @@
+name: Mutation Testing (weekly, money modules)
+
+# docs/test-setup-runbook.md Step 10 / Phase 8 — Stryker mutation testing, scoped
+# to the money modules only. Runs WEEKLY (not per PR): mutation testing is far
+# too slow to gate a PR, so it is a scheduled drift-detection job that FAILS when
+# the mutation score drops below the break threshold in .stryker.conf.json.
+#   test:mutate   node:test suites via the built-in command runner
+#   break threshold 80% (high 90, low 70) — see .stryker.conf.json
+# Every surviving mutant must either be killed by a test or explicitly waived
+# (an inline `// Stryker disable` comment with a rationale); see
+# docs/mutation-report.md for the running score + waiver ledger.
+
+on:
+  schedule:
+    - cron: '21 4 * * 1'   # Mondays 04:21 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutate-money-modules:
+    name: Stryker (money modules)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Green baseline (the mutation suites must pass unmutated)
+        run: >-
+          tsx --test scripts/money-ledger.test.ts scripts/mutation-killing.test.ts
+          scripts/money-invariants.test.ts
+          scripts/relational-money-roundtrip.test.ts scripts/mall-order-money.test.ts
+          scripts/mall-safety.test.ts scripts/money-flow.integration.test.ts
+          scripts/regression/mall-money-writes.test.ts scripts/regression/money-golden.test.ts
+
+      - name: Run Stryker on the money modules
+        run: npm run test:mutate
+
+      - name: Upload the mutation report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: |
+            reports/mutation/mutation.json
+            reports/mutation/index.html
+          retention-days: 30
