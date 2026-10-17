@@ -11,7 +11,7 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { makeTestDb, makeTestExecutor, seedCatalog } from './test-harness.ts';
+import { makeTestDb, makeTestExecutor, seedCatalog, seedActiveCart } from './test-harness.ts';
 import { mallMetrics } from '../src/server/mallOperations.ts';
 import { upsertToStatements, deleteToStatements } from '../src/server/relationalWrites.ts';
 
@@ -775,6 +775,13 @@ test('moneyToRow: type default, amount kobo and Owner Repayment loan link (lines
   // A non-repayment with NO referenceId leaves ref_id null (kills the `? :` -> true mutant).
   const plain = moneyToRow({ id: 'p', type: 'Sale Income', amount: 10 }, 'now');
   assert.equal(plain.ref_id, null);
+  // loanReferenceId is special ONLY for Owner Repayment; for other types the
+  // ordinary referenceId must win even if a stale loanReferenceId is present.
+  const nonRepayment = moneyToRow({ id: 'x', type: 'Owner Drawing', loanReferenceId: 'wrong-loan', referenceId: 'right-ref', amount: 10 }, 'now');
+  assert.equal(nonRepayment.ref_id, 'right-ref');
+  // A repayment without loanReferenceId falls back to referenceId.
+  const repaymentFallback = moneyToRow({ id: 'rf', type: 'Owner Repayment', referenceId: 'fallback-ref', amount: 2 }, 'now');
+  assert.equal(repaymentFallback.ref_id, 'fallback-ref');
 });
 
 test('saleToRows: header money fields, payment/status defaults and item lines (lines 314-359)', async () => {
@@ -982,4 +989,112 @@ test('businessKeyOf: non-string business-key values are stringified safely', asy
   const r = backfillStatementsFromDocumentRows([mk('num-a', 123), mk('num-b', '123')], now);
   assert.equal(r.stmts.filter((s) => /INSERT INTO products /.test(s.sql)).length, 1,
     's() normalizes numeric and string SKU values to the same business key');
+});
+
+test('s(): only null and undefined use the fallback; empty string is preserved', async () => {
+  const { s } = await import('../src/server/relationalMapper.ts');
+  assert.equal(s(null, 'fallback'), 'fallback');
+  assert.equal(s(undefined, 'fallback'), 'fallback');
+  assert.equal(s('', 'fallback'), '', 'empty string is a real value, not nullish');
+  assert.equal(s(0 as any, 'fallback'), '0');
+});
+
+// --- mallApi.ts: checkout money-path validation boundaries --------------------
+// Focused API-level assertions kill survivors in idempotency, amount, quantity,
+// total-cap, delivery-address, email and item guards without mutating file-based DBs.
+
+test('mall checkout: idempotency key length/charset is enforced at both bounds', async () => {
+  const { handleMallApi } = await import('../src/server/mallApi.ts');
+  const body = { customerName: 'Ada', customerPhone: '08031234567', paymentMethod: 'pay_on_pickup' };
+  const invalidKeys = ['', 'short-key-12345', 'bad-key-1234567!', 'a'.repeat(129)];
+  for (const key of invalidKeys) {
+    const db = makeTestDb();
+    const exec = makeTestExecutor(db);
+    const response = await handleMallApi(new Request('http://test/api/mall/checkout', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-mall-session': 'mutation-session-123', 'idempotency-key': key }, body: JSON.stringify(body),
+    }), exec);
+    assert.equal(response.status, 400, `invalid idempotency key length=${key.length}`);
+    db.close();
+  }
+});
+
+test('mall checkout: required fields, max text lengths, email and control characters are validated', async () => {
+  const { handleMallApi } = await import('../src/server/mallApi.ts');
+  const invalidBodies = [
+    { customerName: '' },
+    { customerName: 'a'.repeat(121) },
+    { customerPhone: '123' },
+    { customerEmail: 'not-an-email' },
+    { customerEmail: 'a'.repeat(250) + '@b.com' },
+    { note: 'bad\u0000control' },
+    { paymentMethod: 'unsupported' },
+  ];
+  for (const override of invalidBodies) {
+    const db = makeTestDb();
+    const exec = makeTestExecutor(db);
+    const body = { customerName: 'Ada', customerPhone: '08031234567', paymentMethod: 'pay_on_pickup', ...override };
+    const response = await handleMallApi(new Request('http://test/api/mall/checkout', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-mall-session': 'mutation-session-123', 'idempotency-key': 'valid-attempt-key-1234' }, body: JSON.stringify(body),
+    }), exec);
+    assert.equal(response.status, 400, `invalid checkout payload ${Object.keys(override)[0]}`);
+    const data: any = await response.json();
+    assert.ok(data.fields, 'validation response carries per-field errors');
+    assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM mall_orders').get()?.n), 0, 'invalid input writes no order');
+    db.close();
+  }
+});
+
+test('mall checkout: delivery-zone/address lower bound and client fee cannot alter server price', async () => {
+  const { handleMallApi } = await import('../src/server/mallApi.ts');
+  const db = makeTestDb();
+  const exec = makeTestExecutor(db);
+  const session = 'mutation-delivery-123';
+  seedCatalog(db, { id: 'delivery-p', sku: 'DELIVERY-P', name: 'Delivery Product', stockQty: 5, retailPriceKobo: 10000 });
+  seedActiveCart(db, session, [{ productId: 'delivery-p', qty: 1, unitPriceKobo: 1 }]);
+  const send = (deliveryAddress: string, deliveryZone = 'uyo_central') => handleMallApi(new Request('http://test/api/mall/checkout', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-mall-session': session, 'idempotency-key': `delivery-key-${deliveryAddress.length}-123` },
+    body: JSON.stringify({ customerName: 'Ada', customerPhone: '08031234567', paymentMethod: 'pay_on_pickup', deliveryZone, deliveryAddress, deliveryFeeNaira: 1 }),
+  }), exec);
+  assert.equal((await send('123456789')).status, 400, '9-char delivery address is rejected');
+  const ok = await send('1234567890');
+  assert.equal(ok.status, 201, '10-char delivery address meets the lower bound');
+  const receipt: any = await ok.json();
+  assert.equal(receipt.deliveryFeeKobo, 150000, 'server zone fee overrides client-supplied fee');
+  assert.equal(receipt.totalKobo, 160000);
+  db.close();
+});
+
+test('mall checkout: empty cart is rejected without creating an order or moving stock', async () => {
+  const { handleMallApi } = await import('../src/server/mallApi.ts');
+  const db = makeTestDb();
+  const exec = makeTestExecutor(db);
+  const response = await handleMallApi(new Request('http://test/api/mall/checkout', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-mall-session': 'empty-cart-session', 'idempotency-key': 'empty-cart-attempt-123' },
+    body: JSON.stringify({ customerName: 'Ada', customerPhone: '08031234567', paymentMethod: 'pay_on_pickup' }),
+  }), exec);
+  assert.equal(response.status, 400);
+  assert.match((await response.json() as any).error, /cart is empty/i);
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM mall_orders').get()?.n), 0);
+  db.close();
+});
+
+test('Mall public product only exposes a genuine, floor-respecting wholesale discount', async () => {
+  const { handleMallApi } = await import('../src/server/mallApi.ts');
+  const db = makeTestDb();
+  const exec = makeTestExecutor(db);
+  seedCatalog(db, { id: 'wholesale-p', sku: 'WHOLESALE-P', name: 'Wholesale Product', stockQty: 10, retailPriceKobo: 10000 });
+  db.prepare('UPDATE products SET wholesale_price_kobo = 8000, min_wholesale_qty = 5, min_selling_price_kobo = 5000 WHERE id = ?').run('wholesale-p');
+  const get = async () => {
+    const response = await handleMallApi(new Request('http://test/api/mall/products/wholesale-p'), exec);
+    assert.equal(response.status, 200);
+    return (await response.json() as any).product;
+  };
+  assert.deepEqual((await get()).wholesaleOffer, { price: 8000, minQty: 5 });
+  db.prepare('UPDATE products SET min_wholesale_qty = 1 WHERE id = ?').run('wholesale-p');
+  assert.equal((await get()).wholesaleOffer, null, 'minimum quantity must be > 1');
+  db.prepare('UPDATE products SET min_wholesale_qty = 5, min_selling_price_kobo = 9000 WHERE id = ?').run('wholesale-p');
+  assert.equal((await get()).wholesaleOffer, null, 'wholesale must respect the floor');
+  db.prepare('UPDATE products SET min_selling_price_kobo = 5000, wholesale_price_kobo = 10000 WHERE id = ?').run('wholesale-p');
+  assert.equal((await get()).wholesaleOffer, null, 'a tier equal to listed price is not a discount');
+  db.close();
 });
