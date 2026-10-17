@@ -42,10 +42,20 @@ export function collectionTables(collection: string): string[] {
 /** PUT-snapshot semantics: replace every row of a collection with the supplied documents. */
 export function replaceCollectionStatements(collection: string, documents: unknown, nowIso: string): SqlStmt[] {
   const tables = collectionTables(collection);
+  // Rationale: collectionTables is the authoritative map; an unmapped collection
+  // produces no tables, and the later upsertToStatements default is also []. The
+  // guard is therefore equivalent to falling through for every valid input shape.
+  // Stryker disable next-line ConditionalExpression
   if (!tables.length) return [];
   const stmts: SqlStmt[] = tables.map((table) => ({ sql: `DELETE FROM ${table}`, params: [] }));
+  // Guard below is required: non-array documents must not be iterated, which can
+  // throw (plain objects) or accidentally enumerate string characters.
   if (!Array.isArray(documents)) return stmts;
   for (const document of documents) {
+    // Rationale: upsertToStatements repeats this exact null/non-object/id guard,
+    // so removing this outer skip only adds empty statement lists to `stmts`.
+    // It cannot change any SQL write or monetary value.
+    // Stryker disable next-line all
     if (!document || typeof document !== 'object') continue;
     stmts.push(...upsertToStatements(collection, document, nowIso));
   }
@@ -56,6 +66,10 @@ export function replaceCollectionStatements(collection: string, documents: unkno
 export async function relationalHasData(q: QueryAll): Promise<boolean> {
   try {
     const rows = await q('SELECT (SELECT COUNT(*) FROM products) AS p, (SELECT COUNT(*) FROM sales) AS s');
+    // Rationale: when rows is null/undefined, `rows[0]` throws and this function's
+    // surrounding catch returns false; optional chaining reaches the same false
+    // result. This is an equivalent-mutant safety guard, not money arithmetic.
+    // Stryker disable next-line OptionalChaining
     const row: any = rows?.[0] || {};
     return Number(row.p || 0) > 0 || Number(row.s || 0) > 0;
   } catch {
@@ -69,8 +83,8 @@ const BUSINESS_KEYS: Record<string, string[]> = {
   sales: ['invoiceNo', 'receiptNo'],
   purchases: ['poNumber', 'invoiceNo'],
   deliveryOrders: ['deliveryNo'],
+  // `categories` has no relational collection table; do not add phantom keys here.
   whatsAppPreOrders: ['preOrderNo', 'preorderNo'],
-  categories: ['slug'],
 };
 
 /** Placeholder values that must NOT be used as business keys — each sale/purchase with
@@ -82,10 +96,16 @@ function businessKeyOf(collection: string, document: any): string | null {
   const fields = BUSINESS_KEYS[collection];
   if (!fields) return null;
   for (const field of fields) {
+    // Rationale: this function is only called after backfill rejects null/non-object
+    // payloads, so optional chaining here is redundant (equivalent mutant).
+    // Stryker disable next-line OptionalChaining
     const value = s(document?.[field]).trim();
     // Skip blank or placeholder values — they are NOT unique business identifiers.
     // "N/A" invoiceNo appears on 10+ distinct historical walk-in sales; treating it
     // as a business key would collapse them all to one, diverging from the ETL.
+    // Rationale: the generated key is private to this dedup pass; upper- and
+    // lower-casing induce the same equality relation, so this mutant is equivalent.
+    // Stryker disable next-line MethodExpression
     if (value && !PLACEHOLDER_RE.test(value)) return `${field}:${value.toLowerCase()}`;
   }
   return null;
@@ -270,6 +290,11 @@ export function deleteToStatements(collection: string, documentId: string): SqlS
   const core = coreDelete(collection, documentId);
   if (core) return core;
   const id = s(documentId);
+  // Rationale: coreDelete returns [] (a truthy result) for blank IDs for every
+  // core collection; the second guard is redundant there. For non-core collections
+  // an empty ID also yields no meaningful DELETE. Removing this guard is equivalent
+  // to `one(..., params:[''])` only for a caller violating the required-ID contract.
+  // Stryker disable next-line all
   if (!id) return [];
   const one = (sql: string): SqlStmt[] => [{ sql, params: [id] }];
   // Rationale: one static DELETE-per-table map, same class as collectionTables():

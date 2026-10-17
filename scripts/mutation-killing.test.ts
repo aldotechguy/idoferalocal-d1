@@ -288,6 +288,13 @@ test('replaceCollectionStatements: deletes every row of every table then upserts
   // Non-array documents -> only the deletes, no upserts.
   const noUpsert = replaceCollectionStatements('sales', 'not-an-array', now);
   assert.equal(noUpsert.filter((s) => /INSERT/.test(s.sql)).length, 0);
+  // A plain non-iterable object must not reach `for...of` (which would throw if
+  // the Array.isArray guard were removed).
+  const plainObject = replaceCollectionStatements('sales', { id: 's2' }, now);
+  assert.equal(plainObject.filter((s) => /INSERT/.test(s.sql)).length, 0);
+  assert.equal(plainObject.filter((s) => /DELETE/.test(s.sql)).length, 2);
+  // The DELETE statements intentionally have no bound parameters.
+  assert.ok(plainObject.every((s) => s.params.length === 0));
 });
 
 /**
@@ -362,13 +369,20 @@ test('businessKeyOf: sales collapses on invoiceNo AND receiptNo, purchases on po
   );
   assert.equal(insertsOf(byReceipt, 'sales'), 1, 'sales fall back to receiptNo');
 
-  // purchases keyed by poNumber then invoiceNo.
+  // poNumber takes priority over a shared fallback invoiceNo. If the BUSINESS_KEYS
+  // entry mutates away from poNumber, these would collapse by invoiceNo instead.
   const purchases = backfillStatementsFromDocumentRows(
-    [mk('purchases', { id: 'pu1', poNumber: 'PO-1', invoiceNo: 'PI-1' }),
-     mk('purchases', { id: 'pu2', poNumber: 'po-1', invoiceNo: 'PI-2' })],
+    [mk('purchases', { id: 'pu1', poNumber: 'PO-1', invoiceNo: 'SHARED-PI' }),
+     mk('purchases', { id: 'pu2', poNumber: 'PO-2', invoiceNo: 'SHARED-PI' })],
     now,
   );
-  assert.equal(insertsOf(purchases, 'purchases'), 1, 'purchases collapse on poNumber');
+  assert.equal(insertsOf(purchases, 'purchases'), 2, 'different poNumbers stay distinct despite shared invoiceNo');
+  // When poNumber is absent, invoiceNo is the fallback business key.
+  const byInvoice = backfillStatementsFromDocumentRows(
+    [mk('purchases', { id: 'pu3', invoiceNo: 'PI-9' }), mk('purchases', { id: 'pu4', invoiceNo: 'pi-9' })],
+    now,
+  );
+  assert.equal(insertsOf(byInvoice, 'purchases'), 1, 'purchases fall back to invoiceNo');
 });
 
 test('businessKeyOf: unknown collection has no business key -> distinct docs by id', async () => {
@@ -397,6 +411,11 @@ test('businessKeyOf: blank/whitespace business values are NOT keys (falls throug
   const r = backfillStatementsFromDocumentRows([mk('p1', ''), mk('p2', '   ')], now);
   const inserted = r.stmts.filter((s) => /INSERT INTO products /.test(s.sql)).length;
   assert.equal(inserted, 2, 'blank/whitespace skus are not business keys');
+
+  // A nonblank SKU is trimmed before keying: the two spellings must collapse.
+  const trimmed = backfillStatementsFromDocumentRows([mk('p3', ' SKU-TRIM '), mk('p4', 'sku-trim')], now);
+  assert.equal(trimmed.stmts.filter((s) => /INSERT INTO products /.test(s.sql)).length, 1,
+    'business keys trim surrounding whitespace before case normalization');
 });
 
 test('PLACEHOLDER_RE: matches "n/a", "N/A", "na", "-" but not "BAN/AL" or "INV-9"', async () => {
@@ -900,4 +919,67 @@ test('deleteToStatements: unmapped collection is [] and core collections still d
   // Core collections short-circuit through coreDelete and keep their statements.
   assert.equal(deleteToStatements('products', 'p1').length, 1);
   assert.equal(deleteToStatements('sales', 's1').length, 2, 'sales cascades to sale_items first');
+});
+
+// Additional survivor-killers: distinguish fallback-field ordering and regex anchors.
+test('businessKeyOf: purchase poNumber takes priority over a shared invoiceNo', async () => {
+  const { backfillStatementsFromDocumentRows } = await import('../src/server/relationalWrites.ts');
+  const now = new Date().toISOString();
+  const mk = (id: string, poNumber: string) => ({
+    collection: 'purchases',
+    payload: JSON.stringify({ id, poNumber, invoiceNo: 'SHARED-INVOICE', totalAmount: 1, createdAt: now, updatedAt: now,
+      items: [{ productId: 'missing-prod', qty: 1, unitCost: 1, total: 1 }] }),
+  });
+  const r = backfillStatementsFromDocumentRows([mk('po-a', 'PO-A'), mk('po-b', 'PO-B')], now);
+  assert.equal(r.stmts.filter((s) => /INSERT INTO purchases /.test(s.sql)).length, 2,
+    'different POs must remain distinct even if their fallback invoiceNo is shared');
+});
+
+test('businessKeyOf: alternate preorderNo field is consulted when preOrderNo is absent', async () => {
+  const { backfillStatementsFromDocumentRows } = await import('../src/server/relationalWrites.ts');
+  const now = new Date().toISOString();
+  const mk = (id: string) => ({
+    collection: 'whatsAppPreOrders',
+    payload: JSON.stringify({ id, preorderNo: 'WA-42', customerName: id, createdAt: now, updatedAt: now }),
+  });
+  const r = backfillStatementsFromDocumentRows([mk('wa-a'), mk('wa-b')], now);
+  assert.equal(r.stmts.filter((s) => /INSERT INTO whatsapp_preorders /.test(s.sql)).length, 1,
+    'preorderNo is the fallback key spelling when preOrderNo is missing');
+});
+
+test('businessKeyOf: placeholder matching is anchored at both ends', async () => {
+  const { backfillStatementsFromDocumentRows } = await import('../src/server/relationalWrites.ts');
+  const now = new Date().toISOString();
+  const mk = (id: string, invoiceNo: string) => ({
+    collection: 'sales',
+    payload: JSON.stringify({ id, invoiceNo, receiptNo: 'SHARED-RECEIPT', totalAmount: 1, createdAt: now, updatedAt: now,
+      items: [{ productId: 'missing-prod', qty: 1, unitPrice: 1, total: 1 }] }),
+  });
+  // If ^ is removed, these would be treated as placeholders and fall through to
+  // the shared receiptNo, collapsing to one. Correct anchoring keeps them distinct.
+  const prefix = backfillStatementsFromDocumentRows([mk('pre-a', 'PREFIX-N/A'), mk('pre-b', 'OTHER-N/A')], now);
+  assert.equal(prefix.stmts.filter((s) => /INSERT INTO sales /.test(s.sql)).length, 2,
+    'an N/A suffix inside a real invoice is not a placeholder');
+  // If $ is removed, these would be treated as placeholders and fall through to
+  // shared receiptNo, collapsing to one.
+  const suffix = backfillStatementsFromDocumentRows([mk('suf-a', 'N/A-SUFFIX'), mk('suf-b', 'N/A-SUFFIX')], now);
+  // Both invoiceNos are the same real key, so they correctly collapse; use a
+  // distinct invoice prefix to ensure the end-anchor controls fallback.
+  const suffixDistinct = backfillStatementsFromDocumentRows([mk('suf-c', 'N/A-A'), mk('suf-d', 'N/A-B')], now);
+  assert.equal(suffixDistinct.stmts.filter((s) => /INSERT INTO sales /.test(s.sql)).length, 2,
+    'an N/A prefix inside a real invoice is not a placeholder');
+  assert.equal(suffix.stmts.filter((s) => /INSERT INTO sales /.test(s.sql)).length, 1,
+    'identical real invoice values still deduplicate');
+});
+
+test('businessKeyOf: non-string business-key values are stringified safely', async () => {
+  const { backfillStatementsFromDocumentRows } = await import('../src/server/relationalWrites.ts');
+  const now = new Date().toISOString();
+  const mk = (id: string, sku: unknown) => ({
+    collection: 'products',
+    payload: JSON.stringify({ id, sku, name: id, retailPriceKobo: 1, createdAt: now, updatedAt: now }),
+  });
+  const r = backfillStatementsFromDocumentRows([mk('num-a', 123), mk('num-b', '123')], now);
+  assert.equal(r.stmts.filter((s) => /INSERT INTO products /.test(s.sql)).length, 1,
+    's() normalizes numeric and string SKU values to the same business key');
 });
