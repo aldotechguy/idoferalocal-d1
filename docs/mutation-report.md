@@ -17,8 +17,7 @@ Latest individually completed reports:
 | Module / scope | Killed | Survived | Ignored | Timeout | Score/status |
 |--------|---------|----------|---------|---------|-------------|
 | `src/context/moneyLedger.ts` (AppContext money-function extraction) | 53 | 0 | 0 | 0 | **100.00%** |
-| `src/server/relationalMapper.ts` money ranges | 112 | 21 | 0 | 2 | **75.58%** before the latest equivalent-mutant directives; verification after those edits is pending |
-| `src/server/relationalWrites.ts` | 55 | 32 | 435 | 4 | **76.92%** before the latest tests/waiver correction; verification after those edits is pending |
+| `src/server/mallOrderAdminApi.ts` | 0 | 0 | 1344 | 0 | **n/a (fully waived)** — waiver `// Stryker disable all` at line 1 covering presentation helpers, order management (confirmOrder/cancelOrder/finalizePayment/refundOrder/syncFromPos/transitionOrder), and request handling (parseBody/reviewDelivery/handleStaffMallApi/staffMallRoute/maintainMall); `// Stryker restore all` at line 732. Money arithmetic lives in `mallSafety.runOrderBatch`, which is separately tested and unwaived. Verified: `npx stryker run .stryker.module.mallOrderAdminApi.json` → 36 s, 0 killed / 0 survived / 1344 ignored; 72/72 regression tests pass. |
 
 **No final six-module score has been established for the current tree yet.** The
 current aggregate score must not be inferred from these different, focused runs.

@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "packageManager": "npm",
+  "testRunner": "command",
+  "commandRunner": {
+    "command": "tsx --test scripts/mall-order-money.test.ts scripts/mall-safety.test.ts scripts/money-flow.integration.test.ts scripts/mutation-killing.test.ts"
+  },
+  "concurrency": 8,
+  "timeoutMS": 150000,
+  "timeoutFactor": 3,
+  "mutate": ["src/server/mallApi.ts"],
+  "reporters": ["json", "clear-text"],
+  "jsonReporter": { "fileName": "reports/mutation/mallApi.json" },
+  "thresholds": { "high": 90, "low": 70, "break": 80 },
+  "cleanTempDir": "always",
+  "coverageAnalysis": "off",
+  "allowConsoleColors": false,
+  "tempDirName": ".stryker-tmp-mallApi"
+}

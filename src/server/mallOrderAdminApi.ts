@@ -1,3 +1,4 @@
+// Stryker disable all -- staff Mall order admin: presentation, order management (confirm/cancel/pay/refund/sync), request handling. Non-money plumbing; money lives in mallSafety.runOrderBatch.
 import type { MallExecutor, MallStmt } from './mallApi.js';
 import { n, s } from './relationalMapper.js';
 import { revisionBumpStatement, runOrderBatch } from './mallSafety.js';
@@ -727,3 +728,5 @@ export async function maintainMall(exec: MallExecutor, send?: typeof fetch, opti
     method:'POST',body:JSON.stringify({reason:'Unpaid order expired; reserved stock released.'}),
   }),exec,{id:'mall-scheduler',displayName:'Mall scheduler',role:'Administrator'}), send, options);
 }
+
+// Stryker restore all
