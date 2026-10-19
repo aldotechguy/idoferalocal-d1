@@ -6,6 +6,7 @@ import { normalizedPhoneSql, normalizeMallPhone } from '../shared/mallPhone.js';
 import { mallMetrics, runMallMaintenance, type MallMaintenanceOptions } from './mallOperations.js';
 import { registerMallCacheInvalidator } from './mallApi.js';
 import { MAX_MALL_SEARCH_CHARS } from '../shared/mallSearch.js';
+import { calculateAmountDueKobo, validateOrderTransition } from '../native-bridge/mallBridge.js';
 
 export type StaffActor = { id: string; displayName: string; role: string };
 
@@ -50,12 +51,13 @@ function publicOrder(row: any, items: any[] = []) {
   const settled = ['paid', 'partial'].includes(payment.status);
   const paidKobo = settled ? payment.amountKobo : 0;
   const totalKobo = n(row.total_kobo);
+  const amountDueKobo = calculateAmountDueKobo(totalKobo, paidKobo, s(row.status));
   return {
     id: s(row.id), orderNo: s(row.order_no), customerId: s(row.customer_id) || undefined,
     customerName: s(row.customer_name), customerPhone: s(row.customer_phone), customerEmail: s(row.customer_email) || undefined, status: s(row.status, 'pending'),
     subtotalKobo: n(row.subtotal_kobo), deliveryFeeKobo: n(row.delivery_fee_kobo),
     discountKobo: n(row.discount_kobo), totalKobo, linkedSaleId: s(row.linked_sale_id) || undefined,
-    paidKobo, amountDueKobo: ['cancelled', 'refunded'].includes(s(row.status)) ? 0 : totalKobo - paidKobo,
+    paidKobo, amountDueKobo,
     delivery, payment, createdAt: s(row.created_at), itemCount: n(row.item_count),
     items: items.map((item) => ({
       id: s(item.id), productId: s(item.product_id), name: s(item.product_name), sku: s(item.sku),
@@ -195,7 +197,9 @@ async function confirmOrder(exec: MallExecutor, id: string, actor: StaffActor) {
   if (delivery.quoteRequired === true && delivery.quoteConfirmed !== true) fail(409, 'Set the delivery quote before confirming this order.');
   const status = s(row.status);
   if (status === 'confirmed') return detail(exec, id);
-  if (status !== 'pending') fail(409, `An order in ${status} state cannot be confirmed.`);
+  if (!validateOrderTransition(status, 'confirmed').allowed) {
+    fail(409, `An order in ${status} state cannot be confirmed.`);
+  }
   const at = nowIso();
   await runOrderBatch(exec, row, [
     { sql: `UPDATE mall_orders SET status = 'confirmed' WHERE id = ? AND status = 'pending'`, params: [id] },
@@ -211,7 +215,9 @@ async function cancelOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
   const status = s(row.status);
   if (status === 'cancelled') return detail(exec, id);
   if (s(row.linked_sale_id) || ['completed', 'refunded'].includes(status)) fail(409, 'Paid or completed orders must use the refund workflow.');
-  if (!['pending','confirmed'].includes(status)) fail(409, `An order in ${status} state cannot be cancelled.`);
+  if (!validateOrderTransition(status, 'cancelled').allowed) {
+    fail(409, `An order in ${status} state cannot be cancelled.`);
+  }
   const items = await getOrderItems(exec, id);
   const reason = s(body?.reason, 'Cancelled by staff').trim().slice(0, 300);
   const at = nowIso();
@@ -302,7 +308,7 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
   const amountKobo = Math.round(n(body?.amountKobo, totalKobo));
   if (!Number.isSafeInteger(body?.amountKobo) || amountKobo <= 0) fail(400, 'Enter the amount received in whole kobo.');
   if (amountKobo > totalKobo) fail(400, 'The payment amount cannot exceed the order total.');
-  const dueKobo = totalKobo - amountKobo;
+  const dueKobo = calculateAmountDueKobo(totalKobo, amountKobo, s(row.status));
   const at = nowIso();
   // Deterministic identities make concurrent/retried settlement physically unable to create duplicate Sales.
   const saleId = `sale-${id}`;
@@ -400,7 +406,9 @@ async function transitionOrder(exec: MallExecutor, id: string, actor: StaffActor
   if (action === 'mark-out-for-delivery' && (typeof body?.courier !== 'string' || !body.courier.trim() || body.courier.length>120)) fail(400,'Assign a courier before dispatch.');
   const status = s(row.status);
   if (status === transition.to) return detail(exec, id);
-  if (!transition.from.includes(status)) fail(409, `An order in ${status} state cannot move to ${transition.to}.`);
+  if (!transition.from.includes(status) || !validateOrderTransition(status, transition.to).allowed) {
+    fail(409, `An order in ${status} state cannot move to ${transition.to}.`);
+  }
   if (!s(row.linked_sale_id)) fail(409, 'Payment must be recorded before fulfilment continues.');
   const at = nowIso();
   const stmts: MallStmt[] = [

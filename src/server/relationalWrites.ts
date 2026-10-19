@@ -1,7 +1,8 @@
 /** Phase 4 — write router part 2: finance + ops + misc collections. */
 import { s, expenseToRow, stockMovementToRow, pricingToRow, moneyToRow, unwrapSettings } from './relationalMapper.js';
 import { isClearanceItem } from '../shared/productStatus.js';
-import { coreUpsert, coreDelete } from './relationalWritesCore.js';
+import { coreUpsert as coreUpsertTs, coreDelete as coreDeleteTs } from './relationalWritesCore.js';
+import { planCoreUpsert, planCoreDelete } from '../native-bridge/relationalBridge.js';
 import type { SqlStmt } from './relationalWritesCore.js';
 import type { QueryAll } from './relationalMapper.js';
 
@@ -243,7 +244,7 @@ const up = (table: string, row: Record<string, unknown>, conflict: string, updat
 });
 
 export function upsertToStatements(collection: string, document: any, nowIso: string): SqlStmt[] {
-  const core = coreUpsert(collection, document);
+  const core = planCoreUpsert(collection, document, nowIso) ?? coreUpsertTs(collection, document);
   if (core) return core;
   if (!document || typeof document !== 'object' || !document.id) return [];
   const id = s(document.id);
@@ -287,7 +288,7 @@ export function upsertToStatements(collection: string, document: any, nowIso: st
 }
 
 export function deleteToStatements(collection: string, documentId: string): SqlStmt[] {
-  const core = coreDelete(collection, documentId);
+  const core = planCoreDelete(collection, documentId) ?? coreDeleteTs(collection, documentId);
   if (core) return core;
   const id = s(documentId);
   // Rationale: coreDelete returns [] (a truthy result) for blank IDs for every

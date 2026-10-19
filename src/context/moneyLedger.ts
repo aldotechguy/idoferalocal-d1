@@ -12,6 +12,7 @@
  * money-invariants / money-flow suites.
  */
 import type { MoneyMovement, TreasuryBalances } from '../types';
+import { computeTreasuryBalances as computeTreasuryBalancesRust } from '../native-bridge/ledgerBridge.js';
 
 /**
  * Derive the treasury balances and owner position from the full money-movement
@@ -19,48 +20,10 @@ import type { MoneyMovement, TreasuryBalances } from '../types';
  * debited from its source account. Owner Drawing increases drawings (and loans
  * when its subtype is 'Owner Loan'); Owner Repayment nets off those positions.
  * Balances are rounded to 2dp exactly as the AppContext ledger does.
+ *
+ * Uses Rust when the native rollout flag is enabled; TypeScript remains active
+ * by default as the compatibility path.
  */
 export const computeTreasuryBalances = (
   moneyMovements: MoneyMovement[],
-): TreasuryBalances => {
-  let biz = 0;
-  let cash = 0;
-  let grossOwnerDrawings = 0;
-  let grossOwnerLoans = 0;
-  let ownerRepayments = 0;
-
-  moneyMovements.forEach((mv) => {
-    const amt = Number(mv.amount) || 0;
-    if (mv.destinationAccount === 'Biz Account') {
-      biz += amt;
-    } else if (mv.destinationAccount === 'Physical Cash') {
-      cash += amt;
-    }
-
-    if (mv.sourceAccount === 'Biz Account') {
-      biz -= amt;
-    } else if (mv.sourceAccount === 'Physical Cash') {
-      cash -= amt;
-    }
-
-    if (mv.type === 'Owner Drawing') {
-      grossOwnerDrawings += amt;
-      if (mv.subtype === 'Owner Loan') {
-        grossOwnerLoans += amt;
-      }
-    } else if (mv.type === 'Owner Repayment') {
-      ownerRepayments += amt;
-    }
-  });
-
-  const netOwnerDrawings = Math.max(0, grossOwnerDrawings - ownerRepayments);
-  const netOwnerLoans = Math.max(0, grossOwnerLoans - ownerRepayments);
-
-  return {
-    bizAccountBalance: Number(biz.toFixed(2)),
-    physicalCashBalance: Number(cash.toFixed(2)),
-    totalLiquidCash: Number((biz + cash).toFixed(2)),
-    totalOwnerDrawings: Number(netOwnerDrawings.toFixed(2)),
-    totalOwnerLoans: Number(netOwnerLoans.toFixed(2)),
-  };
-};
+): TreasuryBalances => computeTreasuryBalancesRust(moneyMovements);
