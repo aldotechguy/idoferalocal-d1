@@ -51,10 +51,9 @@ export interface OrderTransitionResult {
 // Lazy native module loader
 // ---------------------------------------------------------------------------
 
-const _native = loadNativeModule();
-
 function native(): Record<string, (...args: unknown[]) => unknown> {
-  if (_native) return _native;
+  const loaded = loadNativeModule();
+  if (loaded) return loaded;
   throw new Error(
     '[native/index.ts] Rust addon not found. Run `npm run build:native` or set IDOFERA_NATIVE_ADDON.',
   );

@@ -101,7 +101,7 @@ binding = "MALL_IMAGES"
 bucket_name = "idomall"
 
 [env.mall.vars]
-# The production Mall worker is Cloudflare Workers/D1, not a Node addon host.
+# Cloudflare Workers cannot load native Node addons; Rust bridge uses TS fallback there.
 IDOFERA_NATIVE_ENABLED = "false"
 # Display-only: the health endpoint reports which bound D1 database answered.
 D1_DATABASE_ID = "3a3eb157-5aa5-419a-a8ce-2eade2afc436"

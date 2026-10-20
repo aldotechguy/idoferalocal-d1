@@ -57,9 +57,9 @@
     "verify": "tsx scripts/verify-relational.ts && tsx scripts/verify-relational-writes.ts",
     "build:native": "node scripts/build-native.mjs",
     "test:rust": "cargo test --manifest-path native/Cargo.toml --workspace",
-    "test:native": "tsx --test scripts/native-bridge.test.ts",
+    "test:native": "npm run build:native && node --import tsx --test scripts/native-bridge.test.ts",
     "test:native-parity": "tsx --test scripts/mall-bridge-parity.test.ts scripts/relational-bridge-parity.test.ts scripts/ledger-bridge-parity.test.ts",
-    "test:native-rollout": "node --env-file-if-exists=.env.native-rollout --import tsx --test scripts/native-bridge.test.ts scripts/mall-bridge-parity.test.ts scripts/relational-bridge-parity.test.ts scripts/ledger-bridge-parity.test.ts"
+    "test:native-rollout": "npm run build:native && node --env-file-if-exists=.env.native-rollout --import tsx --test scripts/native-bridge.test.ts scripts/mall-bridge-parity.test.ts scripts/relational-bridge-parity.test.ts scripts/ledger-bridge-parity.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

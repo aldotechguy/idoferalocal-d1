@@ -16,7 +16,14 @@ const libraryName = process.platform === 'win32' ? 'binding_napi' : 'libbinding_
 const target = process.env.CARGO_BUILD_TARGET;
 const targetDir = process.env.CARGO_TARGET_DIR || path.join(root, 'native', 'target');
 const source = path.join(targetDir, ...(target ? [target] : []), 'release', `${libraryName}.${extension}`);
-const destination = path.join(root, 'src', 'native-bridge', 'native.node');
-mkdirSync(path.dirname(destination), { recursive: true });
-copyFileSync(source, destination);
-console.log(`Native addon copied to ${path.relative(root, destination)}`);
+// The native bridge resolves this file relative to the bundled test/runtime module.
+// Keep the legacy src/native copy in sync for the standalone native/index API.
+const destinations = [
+  path.join(root, 'src', 'native-bridge', 'native.node'),
+  path.join(root, 'src', 'native', 'binding_napi.node'),
+];
+for (const destination of destinations) {
+  mkdirSync(path.dirname(destination), { recursive: true });
+  copyFileSync(source, destination);
+  console.log(`Native addon copied to ${path.relative(root, destination)}`);
+}
