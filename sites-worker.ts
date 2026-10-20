@@ -33,6 +33,21 @@ interface Env extends MallConfig {
   CF_SESSION_IDLE_SECONDS?: string;
   /** Bound D1 database ID, set per environment in wrangler.toml (display-only). */
   D1_DATABASE_ID?: string;
+  /**
+   * Remote Rust engine kill switch. Independent of IDOFERA_NATIVE_ENABLED:
+   * off keeps every money check on the TypeScript implementation.
+   */
+  IDOFERA_NATIVE_ENABLED?: string;
+  /**
+   * Remote Rust money engine (native/crates/money_engine_server). Empty =
+   * disabled and every money check runs the TypeScript implementation.
+   * MONEY_ENGINE_TOKEN is a secret, never committed.
+   */
+  MONEY_ENGINE_URL?: string;
+  MONEY_ENGINE_TOKEN?: string;
+  MONEY_ENGINE_TIMEOUT_MS?: string;
+  /** Kill switch, separate from the native addon rollout flag. */
+  MONEY_ENGINE_ENABLED?: string;
 }
 
 interface D1PreparedStatement {
@@ -51,6 +66,13 @@ interface D1Database {
 // SAME modules server.ts uses (no more duplicated inline logic).
 // Money is INTEGER kobo in D1, naira floats on the wire; frontend contract unchanged.
 import { RELATIONAL_DDL, RELATIONAL_INDEXES } from './src/server/relationalDdl.js';
+import {
+  configureRemoteMoneyEngine,
+  getRemoteEngineStatus,
+  getRemoteMoneyEngineConfig,
+  markRemoteEngineReachable,
+} from './src/native-bridge/mallBridge.js';
+import { probeRemoteEngine, remoteEngineConfigFrom } from './src/native-bridge/remoteEngine.js';
 import { buildSnapshot, SNAPSHOT_PUSH_DOC_LIMIT } from './src/server/relationalSnapshot.js';
 import {
   upsertToStatements,
@@ -1174,6 +1196,10 @@ export default {
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    // The Worker cannot load a native addon, so a configured remote engine is
+    // where Rust money math actually runs in production. Unconfigured (or the
+    // kill switch off) leaves every bridge on the TypeScript implementation.
+    configureRemoteMoneyEngine(remoteEngineConfigFrom(env as unknown as Record<string, unknown>));
     try {
       const query = makeD1QueryAll(env);
       const cookie = request.headers.get('cookie') || '';
@@ -1221,6 +1247,21 @@ export default {
         }
       }
       if (url.pathname === '/api/health') return json({ status: 'ok', app: 'IdoferaLabs API', timestamp: new Date().toISOString() });
+      if (url.pathname === '/api/money-engine/health') {
+        // Public proof of which implementation answers money checks. Reports
+        // names and versions only — never the URL, token, or fallback reasons.
+        const config = getRemoteMoneyEngineConfig();
+        const identity = await probeRemoteEngine(config);
+        if (identity) markRemoteEngineReachable();
+        return json({
+          status: identity ? 'ok' : (config ? 'unreachable' : 'disabled'),
+          mode: identity ? 'rust-remote' : 'typescript',
+          engine: identity,
+          configured: Boolean(config),
+          bridgeState: getRemoteEngineStatus(),
+          timestamp: new Date().toISOString(),
+        }, identity ? 200 : (config ? 503 : 200));
+      }
       if (url.pathname === '/api/storage/d1/health') {
         const healthStart = performance.now();
         await ensureSchema(env);

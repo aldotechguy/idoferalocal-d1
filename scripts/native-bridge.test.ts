@@ -20,7 +20,7 @@ import { planCoreUpsert as bridgeUpsert } from '../src/native-bridge/relationalB
 import { calculateAmountDueKobo as bridgeAmountDue } from '../src/native-bridge/mallBridge.js';
 
 describe('controlled native rollout', () => {
-  it('defaults to TypeScript until explicitly enabled and records fallback counts', () => {
+  it('defaults to TypeScript until explicitly enabled and records fallback counts', async () => {
     resetNativeBridgeEventCounts();
     const events: unknown[] = [];
     setNativeBridgeTelemetry((event) => events.push(event));
@@ -28,8 +28,8 @@ describe('controlled native rollout', () => {
       if (process.env.IDOFERA_NATIVE_ENABLED !== 'true') {
         assert.equal(isNativeBridgeEnabled(), false);
         bridgeLedger([]);
-        bridgeUpsert('customers', { id: 'rollout-customer' }, '2026-10-19T00:00:00Z');
-        bridgeAmountDue(100, 20, 'processing');
+        await bridgeUpsert('customers', { id: 'rollout-customer' }, '2026-10-19T00:00:00Z');
+        await bridgeAmountDue(100, 20, 'processing');
         assert.ok(events.length >= 3);
         assert.ok(Object.values(getNativeBridgeEventCounts()).some((count) => count > 0));
       }

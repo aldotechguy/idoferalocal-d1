@@ -1,9 +1,10 @@
-﻿[workspace]
+[workspace]
 members = [
     "crates/money_ledger",
     "crates/relational_core",
     "crates/mall_engine",
     "crates/binding_napi",
+    "crates/money_engine_server",
 ]
 resolver = "2"
 

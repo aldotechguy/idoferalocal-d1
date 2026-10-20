@@ -40,47 +40,47 @@ import {
 } from '../src/native-bridge/telemetry.js';
 import type { MoneyMovement } from '../src/types/index.js';
 
-type Check = { name: string; run: () => void };
+type Check = { name: string; run: () => void | Promise<void> };
 
 const checks: Check[] = [];
-function check(name: string, run: () => void): void {
+function check(name: string, run: () => void | Promise<void>): void {
   checks.push({ name, run });
 }
 
 /** Real checkout invariants, in exact integer kobo. */
-check('order totals invariant matches subtotal - discount + delivery', () => {
+check('order totals invariant matches subtotal - discount + delivery', async () => {
   const cases = [
     [10_000, 0, 1_500, 11_500],
     [250_000, 25_000, 0, 225_000],
     [1_000, 1_000, 0, 0],
   ] as const;
   for (const [subtotal, discount, delivery, total] of cases) {
-    assert.equal(verifyOrderTotals(subtotal, discount, delivery, total), true);
+    assert.equal(await verifyOrderTotals(subtotal, discount, delivery, total), true);
   }
 });
 
-check('rejects a total that is off by one kobo or over-discounted', () => {
-  assert.equal(verifyOrderTotals(10_000, 0, 1_500, 11_501), false);
-  assert.equal(verifyOrderTotals(1_000, 2_000, 0, 0), false);
+check('rejects a total that is off by one kobo or over-discounted', async () => {
+  assert.equal(await verifyOrderTotals(10_000, 0, 1_500, 11_501), false);
+  assert.equal(await verifyOrderTotals(1_000, 2_000, 0, 0), false);
 });
 
-check('amount due clamps part payments and terminates cancelled orders', () => {
-  assert.equal(calculateAmountDueKobo(50_000, 20_000, 'processing'), 30_000);
-  assert.equal(calculateAmountDueKobo(50_000, 50_000, 'processing'), 0);
-  assert.equal(calculateAmountDueKobo(50_000, 70_000, 'processing'), 0, 'overpayment clamps to zero');
-  assert.equal(calculateAmountDueKobo(50_000, 10_000, 'cancelled'), 0);
-  assert.equal(calculateAmountDueKobo(50_000, 10_000, 'refunded'), 0);
-  assert.throws(() => calculateAmountDueKobo(-1, 0, 'pending'), RangeError);
+check('amount due clamps part payments and terminates cancelled orders', async () => {
+  assert.equal(await calculateAmountDueKobo(50_000, 20_000, 'processing'), 30_000);
+  assert.equal(await calculateAmountDueKobo(50_000, 50_000, 'processing'), 0);
+  assert.equal(await calculateAmountDueKobo(50_000, 70_000, 'processing'), 0, 'overpayment clamps to zero');
+  assert.equal(await calculateAmountDueKobo(50_000, 10_000, 'cancelled'), 0);
+  assert.equal(await calculateAmountDueKobo(50_000, 10_000, 'refunded'), 0);
+  await assert.rejects(() => calculateAmountDueKobo(-1, 0, 'pending'), RangeError);
 });
 
-check('order state machine rejects illegal jumps', () => {
-  assert.equal(validateOrderTransition('pending', 'confirmed').allowed, true);
-  assert.equal(validateOrderTransition('confirmed', 'processing').allowed, true);
-  assert.equal(validateOrderTransition('processing', 'completed').allowed, true);
-  assert.equal(validateOrderTransition('packed', 'out_for_delivery').allowed, true);
-  assert.equal(validateOrderTransition('completed', 'pending').allowed, false);
-  assert.equal(validateOrderTransition('pending', 'completed').allowed, false);
-  assert.equal(validateOrderTransition('confirmed', 'confirmed').isIdempotent, true);
+check('order state machine rejects illegal jumps', async () => {
+  assert.equal((await validateOrderTransition('pending', 'confirmed')).allowed, true);
+  assert.equal((await validateOrderTransition('confirmed', 'processing')).allowed, true);
+  assert.equal((await validateOrderTransition('processing', 'completed')).allowed, true);
+  assert.equal((await validateOrderTransition('packed', 'out_for_delivery')).allowed, true);
+  assert.equal((await validateOrderTransition('completed', 'pending')).allowed, false);
+  assert.equal((await validateOrderTransition('pending', 'completed')).allowed, false);
+  assert.equal((await validateOrderTransition('confirmed', 'confirmed')).isIdempotent, true);
 });
 
 check('ledger treasury balances use exact kobo arithmetic', () => {
@@ -105,15 +105,15 @@ check('ledger treasury balances use exact kobo arithmetic', () => {
   assert.equal(balances.totalOwnerLoans, 2_000);
 });
 
-check('relational planner emits SQL for supported collections only', () => {
-  const sale = planCoreUpsert('sales', { id: 'sale-ev-1', items: [{ productName: 'One', quantity: 1 }] }, '2026-10-20T00:00:00Z');
+check('relational planner emits SQL for supported collections only', async () => {
+  const sale = await planCoreUpsert('sales', { id: 'sale-ev-1', items: [{ productName: 'One', quantity: 1 }] }, '2026-10-20T00:00:00Z');
   assert.ok(sale && sale.length >= 2, 'sale upsert must emit child statements');
-  assert.ok(planCoreUpsert('customers', { id: 'c-ev-1', name: 'Verification' }, '2026-10-20T00:00:00Z'));
-  assert.equal(planCoreUpsert('widgets', { id: 'x' }, '2026-10-20T00:00:00Z'), null);
-  assert.equal(planCoreDelete('widgets', 'x'), null);
+  assert.ok(await planCoreUpsert('customers', { id: 'c-ev-1', name: 'Verification' }, '2026-10-20T00:00:00Z'));
+  assert.equal(await planCoreUpsert('widgets', { id: 'x' }, '2026-10-20T00:00:00Z'), null);
+  assert.equal(await planCoreDelete('widgets', 'x'), null);
 });
 
-function run(): void {
+async function run(): Promise<void> {
   const engines = {
     rolloutEnabled: isNativeBridgeEnabled(),
     ledger: isNativeLedgerAvailable(),
@@ -135,7 +135,7 @@ function run(): void {
   let failures = 0;
   for (const { name, run: body } of checks) {
     try {
-      body();
+      await body();
       console.log(`  PASS  ${name}`);
     } catch (error) {
       failures += 1;
@@ -156,10 +156,12 @@ function run(): void {
 function probeCleanProcess(): void {
   const probe = [
     "const { isNativeMallEngineAvailable, calculateAmountDueKobo } = require('./src/native-bridge/mallBridge.ts');",
+    "const { remoteCheckRemote } = require('./src/native-bridge/remoteEngine.ts');",
     "if (!isNativeMallEngineAvailable()) { console.error('addon not loaded'); process.exit(3); }",
-    "const due = calculateAmountDueKobo(50000, 20000, 'processing');",
-    "if (due !== 30000) { console.error('unexpected due', due); process.exit(4); }",
-    "console.log('clean-process native check ok');",
+    "calculateAmountDueKobo(50000, 20000, 'processing').then((due) => {",
+    "  if (due !== 30000) { console.error('unexpected due', due); process.exit(4); }",
+    "  console.log('clean-process native check ok');",
+    "});",
   ].join('\n');
   const result = spawnSync(process.execPath, ['--import', 'tsx', '-e', probe], {
     cwd: process.cwd(),
@@ -180,4 +182,4 @@ if (process.argv.includes('--help')) {
 }
 
 probeCleanProcess();
-run();
+await run();

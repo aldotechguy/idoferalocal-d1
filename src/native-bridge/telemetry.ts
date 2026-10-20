@@ -1,11 +1,13 @@
 export type NativeBridgeName = 'ledger' | 'relational-upsert' | 'relational-delete' | 'mall-transition' | 'mall-amount-due' | 'mall-total-check';
 export type NativeBridgeOutcome = 'native' | 'fallback' | 'error';
 
-export interface NativeBridgeEvent {
+export type NativeBridgeEvent = {
   bridge: NativeBridgeName;
   outcome: NativeBridgeOutcome;
   reason?: string;
-}
+};
+
+export type EngineTarget = 'local-addon' | 'remote-service';
 
 export type NativeBridgeTelemetry = (event: NativeBridgeEvent) => void;
 

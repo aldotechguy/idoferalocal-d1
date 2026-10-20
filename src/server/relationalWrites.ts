@@ -244,7 +244,7 @@ const up = (table: string, row: Record<string, unknown>, conflict: string, updat
 });
 
 export function upsertToStatements(collection: string, document: any, nowIso: string): SqlStmt[] {
-  const core = planCoreUpsert(collection, document, nowIso) ?? coreUpsertTs(collection, document);
+  const core = coreUpsertTs(collection, document);
   if (core) return core;
   if (!document || typeof document !== 'object' || !document.id) return [];
   const id = s(document.id);
@@ -288,7 +288,7 @@ export function upsertToStatements(collection: string, document: any, nowIso: st
 }
 
 export function deleteToStatements(collection: string, documentId: string): SqlStmt[] {
-  const core = planCoreDelete(collection, documentId) ?? coreDeleteTs(collection, documentId);
+  const core = coreDeleteTs(collection, documentId);
   if (core) return core;
   const id = s(documentId);
   // Rationale: coreDelete returns [] (a truthy result) for blank IDs for every

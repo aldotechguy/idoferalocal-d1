@@ -242,6 +242,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "money_engine_server"
+version = "0.1.0"
+dependencies = [
+ "mall_engine",
+ "money_ledger",
+ "relational_core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "money_ledger"
 version = "0.1.0"
 dependencies = [

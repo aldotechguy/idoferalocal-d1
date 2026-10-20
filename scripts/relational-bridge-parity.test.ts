@@ -1,4 +1,4 @@
-﻿import test from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isNativeRelationalAvailable, planCoreUpsert, planCoreDelete } from '../src/native-bridge';
 import { coreDelete as coreDeleteTS, coreUpsert as coreUpsertTS } from '../src/server/relationalWritesCore';
@@ -9,7 +9,7 @@ test('native relational planner is built and active when rollout is enabled', ()
   }
 });
 
-test('planCoreUpsert generates correct statements for customers', () => {
+test('planCoreUpsert generates correct statements for customers', async () => {
   const customerDoc = {
     id: 'cust-parity-1',
     name: 'Ada Lovelace',
@@ -21,7 +21,7 @@ test('planCoreUpsert generates correct statements for customers', () => {
     createdAt: '2026-10-19T00:00:00.000Z',
   };
 
-  const stmts = planCoreUpsert('customers', customerDoc, '2026-10-19T00:00:00.000Z');
+  const stmts = await planCoreUpsert('customers', customerDoc, '2026-10-19T00:00:00.000Z');
   assert.ok(stmts && stmts.length === 1);
   assert.ok(stmts[0].sql.includes('INSERT INTO customers'));
   assert.ok(stmts[0].sql.includes('ON CONFLICT(id) DO UPDATE SET'));
@@ -65,11 +65,11 @@ test('sales and purchases use native planner with TypeScript-identical SQL and p
   }
 });
 
-test('planCoreDelete matches TypeScript cascade delete SQL', () => {
+test('planCoreDelete matches TypeScript cascade delete SQL', async () => {
   const collections = ['products', 'customers', 'suppliers', 'sales', 'purchases'];
   for (const col of collections) {
     const tsStmts = coreDeleteTS(col, 'test-id-123');
-    const nativeStmts = planCoreDelete(col, 'test-id-123');
+    const nativeStmts = await planCoreDelete(col, 'test-id-123');
     assert.deepEqual(nativeStmts, tsStmts, `Delete statement mismatch for collection: ${col}`);
   }
   console.log('All delete cascades verified with 100% parity across products, customers, suppliers, sales, purchases!');

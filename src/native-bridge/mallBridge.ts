@@ -1,7 +1,49 @@
 ﻿import { loadNativeModule } from './nativeLoader.js';
 import { isNativeBridgeEnabled, reportNativeBridgeEvent } from './telemetry.js';
+import {
+  isRemoteEngineConfigured,
+  remoteCalculateAmountDueKobo,
+  remoteValidateOrderTransition,
+  remoteVerifyOrderTotals,
+  type RemoteEngineConfig,
+} from './remoteEngine.js';
 
 const nativeModule = loadNativeModule();
+
+let remoteConfig: RemoteEngineConfig | null = null;
+
+/**
+ * Whether the remote engine is currently believed to answer. Configured is
+ * optimistic: a failed call marks it 'unreachable' and the bridge stays on the
+ * TypeScript path until /api/health probes it again. This avoids paying a
+ * network timeout on every staff action while the service is down.
+ */
+let remoteStatus: 'unconfigured' | 'configured' | 'unreachable' = 'unconfigured';
+
+/**
+ * Point the bridge at the Rust HTTP service (the Worker's production path).
+ * Passing null disables delegation and restores the TypeScript implementation.
+ */
+export function configureRemoteMoneyEngine(config: RemoteEngineConfig | null | undefined): void {
+  remoteConfig = isRemoteEngineConfigured(config) ? config! : null;
+  remoteStatus = remoteConfig ? 'configured' : 'unconfigured';
+}
+
+export const getRemoteMoneyEngineConfig = (): RemoteEngineConfig | null => remoteConfig;
+export const getRemoteEngineStatus = (): typeof remoteStatus => remoteStatus;
+
+/** Health probes call this after a successful round-trip. */
+export function markRemoteEngineReachable(): void {
+  if (remoteConfig) remoteStatus = 'configured';
+}
+
+/** A failed call marks the engine down so later requests use TypeScript directly. */
+export function markRemoteEngineUnreachable(): void {
+  if (remoteConfig) remoteStatus = 'unreachable';
+}
+
+export const isRemoteMoneyEngineAvailable = (): boolean =>
+  isNativeBridgeEnabled() && isRemoteEngineConfigured(remoteConfig) && remoteStatus === 'configured';
 
 export const isNativeMallEngineAvailable = (): boolean =>
   nativeModule !== null
@@ -15,10 +57,75 @@ export interface OrderTransitionResult {
   errorMessage?: string;
 }
 
-export function validateOrderTransition(
+// --- Synchronous, TypeScript-only variants (Workers prohibit I/O after await) ---
+// The async functions below call the remote engine. Cloudflare Workers forbid a
+// subrequest after any `await`, so code that must write to D1 afterwards uses
+// the pure-TS helpers instead of awaiting the engine mid-transaction.
+
+export const validateOrderTransitionSync = (from: string, to: string): OrderTransitionResult =>
+  fallbackTransition(from, to);
+
+export const calculateAmountDueKoboPure = (totalKobo: number, paidKobo: number, status: string): number => {
+  if (!Number.isSafeInteger(totalKobo) || !Number.isSafeInteger(paidKobo)
+    || totalKobo < 0 || paidKobo < 0) {
+    throw new RangeError('Order amounts must be non-negative safe integer kobo values.');
+  }
+  return fallbackAmountDue(totalKobo, paidKobo, status);
+};
+
+export const verifyOrderTotalsSync = (
+  subtotalKobo: number,
+  discountKobo: number,
+  deliveryFeeKobo: number,
+  totalKobo: number,
+): boolean => {
+  if (![subtotalKobo, discountKobo, deliveryFeeKobo, totalKobo].every(Number.isSafeInteger)
+    || subtotalKobo < 0 || discountKobo < 0 || deliveryFeeKobo < 0 || totalKobo < 0
+    || discountKobo > subtotalKobo) return false;
+  return (subtotalKobo - discountKobo + deliveryFeeKobo) === totalKobo;
+};
+
+function fallbackReason(): string {
+  if (!isNativeBridgeEnabled()) return 'native rollout disabled';
+  if (nativeModule) return 'native addon unavailable';
+  if (!remoteConfig) return 'no native engine configured';
+  return 'remote engine unavailable';
+}
+
+async function useRemote(): Promise<RemoteEngineConfig | null> {
+  if (!isNativeBridgeEnabled() || !isRemoteEngineConfigured(remoteConfig)) return null;
+  if (remoteStatus === 'unreachable') return null;
+  return remoteConfig;
+}
+
+/** Record the outcome of a remote call so a dead service stops costing latency. */
+function noteRemoteOutcome(answered: boolean): void {
+  if (answered) markRemoteEngineReachable();
+  else markRemoteEngineUnreachable();
+}
+
+
+export async function validateOrderTransition(
   from: string,
   to: string
-): OrderTransitionResult {
+): Promise<OrderTransitionResult> {
+  const remote = await useRemote();
+  if (remote) {
+    const result = await remoteValidateOrderTransition(remote, from, to);
+    if (result) {
+      noteRemoteOutcome(true);
+      reportNativeBridgeEvent({ bridge: 'mall-transition', outcome: 'native', reason: 'remote-service' });
+      return {
+        allowed: result.allowed,
+        isIdempotent: result.isIdempotent,
+        errorMessage: result.errorMessage ?? undefined,
+      };
+    }
+    noteRemoteOutcome(false);
+    reportNativeBridgeEvent({ bridge: 'mall-transition', outcome: 'fallback', reason: 'remote engine failed' });
+    return fallbackTransition(from, to);
+  }
+
   if (isNativeMallEngineAvailable() && isNativeBridgeEnabled()) {
     try {
       const res = nativeModule.nativeValidateOrderTransition(from, to);
@@ -32,9 +139,13 @@ export function validateOrderTransition(
       reportNativeBridgeEvent({ bridge: 'mall-transition', outcome: 'fallback', reason: error instanceof Error ? error.message : 'native call failed' });
     }
   } else {
-    reportNativeBridgeEvent({ bridge: 'mall-transition', outcome: 'fallback', reason: isNativeBridgeEnabled() ? 'native addon unavailable' : 'native rollout disabled' });
+    reportNativeBridgeEvent({ bridge: 'mall-transition', outcome: 'fallback', reason: fallbackReason() });
   }
-  // TypeScript fallback
+  return fallbackTransition(from, to);
+}
+
+function fallbackTransition(from: string, to: string): OrderTransitionResult {
+  // TypeScript fallback (parity-tested against the Rust engine)
   if (from === to) return { allowed: true, isIdempotent: true };
   const allowed = (from === 'pending' && to === 'confirmed') ||
     (['pending', 'confirmed'].includes(from) && to === 'processing') ||
@@ -51,15 +162,28 @@ export function validateOrderTransition(
   };
 }
 
-export function calculateAmountDueKobo(
+export async function calculateAmountDueKobo(
   totalKobo: number,
   paidKobo: number,
   status: string
-): number {
+): Promise<number> {
   if (!Number.isSafeInteger(totalKobo) || !Number.isSafeInteger(paidKobo)
     || totalKobo < 0 || paidKobo < 0) {
     throw new RangeError('Order amounts must be non-negative safe integer kobo values.');
   }
+  const remote = await useRemote();
+  if (remote) {
+    const due = await remoteCalculateAmountDueKobo(remote, totalKobo, paidKobo, status);
+    if (due !== null) {
+      noteRemoteOutcome(true);
+      reportNativeBridgeEvent({ bridge: 'mall-amount-due', outcome: 'native', reason: 'remote-service' });
+      return due;
+    }
+    noteRemoteOutcome(false);
+    reportNativeBridgeEvent({ bridge: 'mall-amount-due', outcome: 'fallback', reason: 'remote engine failed' });
+    return fallbackAmountDue(totalKobo, paidKobo, status);
+  }
+
   if (isNativeMallEngineAvailable() && isNativeBridgeEnabled()) {
     try {
       const due = Number(nativeModule.nativeCalculateAmountDue(totalKobo, paidKobo, status));
@@ -69,8 +193,12 @@ export function calculateAmountDueKobo(
       reportNativeBridgeEvent({ bridge: 'mall-amount-due', outcome: 'fallback', reason: error instanceof Error ? error.message : 'native call failed' });
     }
   } else {
-    reportNativeBridgeEvent({ bridge: 'mall-amount-due', outcome: 'fallback', reason: isNativeBridgeEnabled() ? 'native addon unavailable' : 'native rollout disabled' });
+    reportNativeBridgeEvent({ bridge: 'mall-amount-due', outcome: 'fallback', reason: fallbackReason() });
   }
+  return fallbackAmountDue(totalKobo, paidKobo, status);
+}
+
+function fallbackAmountDue(totalKobo: number, paidKobo: number, status: string): number {
   if (['cancelled', 'refunded'].includes(status)) return 0;
   if (!['pending', 'confirmed', 'processing', 'packed', 'ready_for_pickup', 'out_for_delivery', 'completed'].includes(status)) {
     throw new RangeError(`Unknown order status: ${status}`);
@@ -78,18 +206,31 @@ export function calculateAmountDueKobo(
   return Math.max(0, totalKobo - paidKobo);
 }
 
-export function verifyOrderTotals(
+export async function verifyOrderTotals(
   subtotalKobo: number,
   discountKobo: number,
   deliveryFeeKobo: number,
   totalKobo: number
-): boolean {
+): Promise<boolean> {
   if (![subtotalKobo, discountKobo, deliveryFeeKobo, totalKobo].every(Number.isSafeInteger)
     || subtotalKobo < 0 || discountKobo < 0 || deliveryFeeKobo < 0 || totalKobo < 0
     || discountKobo > subtotalKobo) {
     reportNativeBridgeEvent({ bridge: 'mall-total-check', outcome: 'error', reason: 'invalid monetary invariant input' });
     return false;
   }
+  const remote = await useRemote();
+  if (remote) {
+    const valid = await remoteVerifyOrderTotals(remote, subtotalKobo, discountKobo, deliveryFeeKobo, totalKobo);
+    if (valid !== null) {
+      noteRemoteOutcome(true);
+      reportNativeBridgeEvent({ bridge: 'mall-total-check', outcome: 'native', reason: 'remote-service' });
+      return valid;
+    }
+    noteRemoteOutcome(false);
+    reportNativeBridgeEvent({ bridge: 'mall-total-check', outcome: 'fallback', reason: 'remote engine failed' });
+    return (subtotalKobo - discountKobo + deliveryFeeKobo) === totalKobo;
+  }
+
   if (isNativeMallEngineAvailable() && isNativeBridgeEnabled()) {
     try {
       const valid = nativeModule.nativeVerifyOrderTotals(
@@ -104,7 +245,7 @@ export function verifyOrderTotals(
       reportNativeBridgeEvent({ bridge: 'mall-total-check', outcome: 'fallback', reason: error instanceof Error ? error.message : 'native call failed' });
     }
   } else {
-    reportNativeBridgeEvent({ bridge: 'mall-total-check', outcome: 'fallback', reason: isNativeBridgeEnabled() ? 'native addon unavailable' : 'native rollout disabled' });
+    reportNativeBridgeEvent({ bridge: 'mall-total-check', outcome: 'fallback', reason: fallbackReason() });
   }
   return (subtotalKobo - discountKobo + deliveryFeeKobo) === totalKobo;
 }

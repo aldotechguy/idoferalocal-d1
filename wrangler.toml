@@ -101,8 +101,15 @@ binding = "MALL_IMAGES"
 bucket_name = "idomall"
 
 [env.mall.vars]
-# Cloudflare Workers cannot load native Node addons; Rust bridge uses TS fallback there.
-IDOFERA_NATIVE_ENABLED = "false"
+# Cloudflare Workers cannot load native Node addons, so the Rust engine runs as
+# the separate HTTP service (native/crates/money_engine_server).
+IDOFERA_NATIVE_ENABLED = "true"
+# Remote Rust money engine. Set MONEY_ENGINE_URL to the service's https origin to
+# put Rust on the production money path; while empty, /api/money-engine/health
+# reports mode=typescript and every bridge uses the parity-tested TS code.
+# MONEY_ENGINE_TOKEN is a secret: `npx wrangler secret put --env mall MONEY_ENGINE_TOKEN`.
+MONEY_ENGINE_URL = ""
+MONEY_ENGINE_TIMEOUT_MS = "800"
 # Display-only: the health endpoint reports which bound D1 database answered.
 D1_DATABASE_ID = "3a3eb157-5aa5-419a-a8ce-2eade2afc436"
 # Kill-switch for honoring the product-level POS promotional price on the Mall.

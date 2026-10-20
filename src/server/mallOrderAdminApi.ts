@@ -6,7 +6,7 @@ import { normalizedPhoneSql, normalizeMallPhone } from '../shared/mallPhone.js';
 import { mallMetrics, runMallMaintenance, type MallMaintenanceOptions } from './mallOperations.js';
 import { registerMallCacheInvalidator } from './mallApi.js';
 import { MAX_MALL_SEARCH_CHARS } from '../shared/mallSearch.js';
-import { calculateAmountDueKobo, validateOrderTransition } from '../native-bridge/mallBridge.js';
+import { calculateAmountDueKoboPure, validateOrderTransitionSync } from '../native-bridge/mallBridge.js';
 
 export type StaffActor = { id: string; displayName: string; role: string };
 
@@ -51,7 +51,7 @@ function publicOrder(row: any, items: any[] = []) {
   const settled = ['paid', 'partial'].includes(payment.status);
   const paidKobo = settled ? payment.amountKobo : 0;
   const totalKobo = n(row.total_kobo);
-  const amountDueKobo = calculateAmountDueKobo(totalKobo, paidKobo, s(row.status));
+  const amountDueKobo = calculateAmountDueKoboPure(totalKobo, paidKobo, s(row.status));
   return {
     id: s(row.id), orderNo: s(row.order_no), customerId: s(row.customer_id) || undefined,
     customerName: s(row.customer_name), customerPhone: s(row.customer_phone), customerEmail: s(row.customer_email) || undefined, status: s(row.status, 'pending'),
@@ -178,26 +178,29 @@ async function detail(exec: MallExecutor, id: string) {
   const row = await getOrderRow(exec, id);
   const [items, timeline, returnRecord, dispatch] = await Promise.all([
     getOrderItems(exec, id),
-    exec.queryAll('SELECT action,actor_id AS actorId,details,status,created_at AS createdAt FROM mall_order_events WHERE order_id=? ORDER BY created_at,rowid',[id]),
-    exec.queryAll('SELECT * FROM mall_returns WHERE order_id=?',[id]),
-    exec.queryAll('SELECT courier_notes AS courier,notes,status,updated_at AS updatedAt FROM delivery_orders WHERE sale_id=?',[row.linked_sale_id]),
+    exec.queryAll('SELECT action,actor_id AS actorId,details,status,created_at AS createdAt FROM mall_order_events WHERE order_id=? ORDER BY created_at,rowid', [id]),
+    exec.queryAll('SELECT * FROM mall_returns WHERE order_id=?', [id]),
+    exec.queryAll('SELECT courier_notes AS courier,notes,status,updated_at AS updatedAt FROM delivery_orders WHERE sale_id=?', [row.linked_sale_id]),
   ]);
-  return json({ order: { ...publicOrder(row, items),
-    timeline,
-    returnRecord: returnRecord[0] || null,
-    dispatch: dispatch[0] || null,
-  }});
+  return json({
+    order: {
+      ...publicOrder(row, items),
+      timeline,
+      returnRecord: returnRecord[0] || null,
+      dispatch: dispatch[0] || null,
+    }
+  });
 }
 
 async function confirmOrder(exec: MallExecutor, id: string, actor: StaffActor) {
   if (!canOperate(actor)) fail(403, 'You do not have permission to confirm Mall orders.');
   const row = await getOrderRow(exec, id);
   const delivery = deliveryData(row);
-  if (delivery.zone && delivery.zone !== 'pickup' && delivery.addressVerified !== true) fail(409,'Review the delivery address and zone before confirmation.');
+  if (delivery.zone && delivery.zone !== 'pickup' && delivery.addressVerified !== true) fail(409, 'Review the delivery address and zone before confirmation.');
   if (delivery.quoteRequired === true && delivery.quoteConfirmed !== true) fail(409, 'Set the delivery quote before confirming this order.');
   const status = s(row.status);
   if (status === 'confirmed') return detail(exec, id);
-  if (!validateOrderTransition(status, 'confirmed').allowed) {
+  if (!validateOrderTransitionSync(status, 'confirmed').allowed) {
     fail(409, `An order in ${status} state cannot be confirmed.`);
   }
   const at = nowIso();
@@ -215,13 +218,13 @@ async function cancelOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
   const status = s(row.status);
   if (status === 'cancelled') return detail(exec, id);
   if (s(row.linked_sale_id) || ['completed', 'refunded'].includes(status)) fail(409, 'Paid or completed orders must use the refund workflow.');
-  if (!validateOrderTransition(status, 'cancelled').allowed) {
+  if (!validateOrderTransitionSync(status, 'cancelled').allowed) {
     fail(409, `An order in ${status} state cannot be cancelled.`);
   }
   const items = await getOrderItems(exec, id);
   const reason = s(body?.reason, 'Cancelled by staff').trim().slice(0, 300);
   const at = nowIso();
-  const stmts: MallStmt[] = [{sql:`UPDATE mall_orders SET status='cancelled' WHERE id=?`,params:[id]}, {
+  const stmts: MallStmt[] = [{ sql: `UPDATE mall_orders SET status='cancelled' WHERE id=?`, params: [id] }, {
     sql: `INSERT INTO audit_logs (id, actor_id, action, entity, entity_id, details, created_at) VALUES (?, ?, 'CANCEL_MALL_ORDER', 'MallOrder', ?, ?, ?)`,
     params: [`audit-cancel-${id}`, actor.id, id, `${actor.displayName} cancelled ${s(row.order_no)} and restored committed stock. Reason: ${reason}`, at],
   }];
@@ -291,7 +294,7 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
   const status = s(row.status);
   const delivery = deliveryData(row);
   if (delivery.quoteRequired === true && delivery.quoteConfirmed !== true) fail(409, 'Set the delivery quote before recording payment.');
-  if (delivery.zone && delivery.zone !== 'pickup' && delivery.addressVerified !== true) fail(409,'Review the delivery address and zone before recording payment.');
+  if (delivery.zone && delivery.zone !== 'pickup' && delivery.addressVerified !== true) fail(409, 'Review the delivery address and zone before recording payment.');
   if (status === 'cancelled') fail(409, 'Cancelled orders cannot be paid.');
   if (!['pending', 'confirmed'].includes(status)) fail(409, `An order in ${status} state cannot be paid.`);
   const items = await getOrderItems(exec, id);
@@ -299,7 +302,7 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
   const method = transferOnly ? 'Bank Transfer' : s(body?.paymentMethod, 'Cash');
   if (!['Cash', 'Card', 'Mobile Transfer', 'Bank Transfer'].includes(method)) fail(400, 'Unsupported payment method.');
   if (method === 'Bank Transfer' && !['Administrator', 'Store Manager', 'Accountant'].includes(actor.role)) fail(403, 'You do not have permission to verify bank transfers.');
-  if (method === 'Bank Transfer' && (typeof body?.reference !== 'string' || !body.reference.trim() || body.reference.length>120)) fail(400,'A bank receipt/reference is required.');
+  if (method === 'Bank Transfer' && (typeof body?.reference !== 'string' || !body.reference.trim() || body.reference.length > 120)) fail(400, 'A bank receipt/reference is required.');
   const totalKobo = n(row.total_kobo);
   // Part payment (docs/mall-part-payment.md): the amount collected may be less
   // than the total, in which case the shortfall is booked as customer debt.
@@ -308,7 +311,7 @@ async function finalizePayment(exec: MallExecutor, id: string, actor: StaffActor
   const amountKobo = Math.round(n(body?.amountKobo, totalKobo));
   if (!Number.isSafeInteger(body?.amountKobo) || amountKobo <= 0) fail(400, 'Enter the amount received in whole kobo.');
   if (amountKobo > totalKobo) fail(400, 'The payment amount cannot exceed the order total.');
-  const dueKobo = calculateAmountDueKobo(totalKobo, amountKobo, s(row.status));
+  const dueKobo = calculateAmountDueKoboPure(totalKobo, amountKobo, s(row.status));
   const at = nowIso();
   // Deterministic identities make concurrent/retried settlement physically unable to create duplicate Sales.
   const saleId = `sale-${id}`;
@@ -401,12 +404,12 @@ async function transitionOrder(exec: MallExecutor, id: string, actor: StaffActor
   if (!transition) fail(404, 'Unknown Mall order action.');
   const row = await getOrderRow(exec, id);
   const zone = deliveryData(row).zone || 'pickup';
-  if (action === 'mark-ready' && zone !== 'pickup') fail(409,'Delivery orders cannot enter the pickup branch.');
-  if (action === 'mark-out-for-delivery' && zone === 'pickup') fail(409,'Pickup orders cannot be dispatched.');
-  if (action === 'mark-out-for-delivery' && (typeof body?.courier !== 'string' || !body.courier.trim() || body.courier.length>120)) fail(400,'Assign a courier before dispatch.');
+  if (action === 'mark-ready' && zone !== 'pickup') fail(409, 'Delivery orders cannot enter the pickup branch.');
+  if (action === 'mark-out-for-delivery' && zone === 'pickup') fail(409, 'Pickup orders cannot be dispatched.');
+  if (action === 'mark-out-for-delivery' && (typeof body?.courier !== 'string' || !body.courier.trim() || body.courier.length > 120)) fail(400, 'Assign a courier before dispatch.');
   const status = s(row.status);
   if (status === transition.to) return detail(exec, id);
-  if (!transition.from.includes(status) || !validateOrderTransition(status, transition.to).allowed) {
+  if (!transition.from.includes(status) || !validateOrderTransitionSync(status, transition.to).allowed) {
     fail(409, `An order in ${status} state cannot move to ${transition.to}.`);
   }
   if (!s(row.linked_sale_id)) fail(409, 'Payment must be recorded before fulfilment continues.');
@@ -462,8 +465,8 @@ async function transitionOrder(exec: MallExecutor, id: string, actor: StaffActor
       });
     }
   }
-  if (action === 'mark-out-for-delivery') stmts.push({sql:"UPDATE delivery_orders SET status='Out for Delivery',courier_notes=?,updated_at=? WHERE sale_id=?",params:[body.courier.trim(),at,row.linked_sale_id]});
-  if (action === 'complete' && zone !== 'pickup') stmts.push({sql:"UPDATE delivery_orders SET status='Delivered',updated_at=? WHERE sale_id=?",params:[at,row.linked_sale_id]});
+  if (action === 'mark-out-for-delivery') stmts.push({ sql: "UPDATE delivery_orders SET status='Out for Delivery',courier_notes=?,updated_at=? WHERE sale_id=?", params: [body.courier.trim(), at, row.linked_sale_id] });
+  if (action === 'complete' && zone !== 'pickup') stmts.push({ sql: "UPDATE delivery_orders SET status='Delivered',updated_at=? WHERE sale_id=?", params: [at, row.linked_sale_id] });
   // Transitions write audit_logs and (on dispatch) a delivery_order — both
   // client-visible stores: bump the revision.
   stmts.push(revisionBumpStatement());
@@ -479,21 +482,21 @@ async function refundOrder(exec: MallExecutor, id: string, actor: StaffActor, bo
   const items = await getOrderItems(exec, id);
   if (typeof body?.returnStock !== 'boolean') fail(400, 'Explicitly choose whether goods were returned to stock.');
   const returnStock = body.returnStock;
-  const dispatched = ['out_for_delivery','completed'].includes(s(row.status));
-  if (returnStock && dispatched && (typeof body?.returnReference !== 'string' || !body.returnReference.trim())) fail(400,'A goods-received reference is required to restock dispatched goods.');
+  const dispatched = ['out_for_delivery', 'completed'].includes(s(row.status));
+  if (returnStock && dispatched && (typeof body?.returnReference !== 'string' || !body.returnReference.trim())) fail(400, 'A goods-received reference is required to restock dispatched goods.');
   if (typeof body?.reason !== 'string' || !body.reason.trim()) fail(400, 'A refund reason is required.');
   const reason = s(body?.reason, 'Customer refund').trim().slice(0, 300);
   const at = nowIso();
   const stmts: MallStmt[] = [{ sql: `UPDATE mall_orders SET status = 'refunded' WHERE id = ?`, params: [id] }];
-  stmts.push({sql:'INSERT INTO mall_returns(order_id,disposition,receipt_reference,reason,actor_id,created_at) VALUES (?,?,?,?,?,?)',params:[id,returnStock?'restocked':'not_restocked',s(body?.returnReference).trim().slice(0,120),reason,actor.id,at]});
-  stmts.push({sql:"UPDATE delivery_orders SET status='Cancelled',updated_at=?,notes=COALESCE(notes,'') || ? WHERE sale_id=?",params:[at,` | Mall refund: ${reason}${returnStock ? ' | Returned' : ''}`,row.linked_sale_id]});
+  stmts.push({ sql: 'INSERT INTO mall_returns(order_id,disposition,receipt_reference,reason,actor_id,created_at) VALUES (?,?,?,?,?,?)', params: [id, returnStock ? 'restocked' : 'not_restocked', s(body?.returnReference).trim().slice(0, 120), reason, actor.id, at] });
+  stmts.push({ sql: "UPDATE delivery_orders SET status='Cancelled',updated_at=?,notes=COALESCE(notes,'') || ? WHERE sale_id=?", params: [at, ` | Mall refund: ${reason}${returnStock ? ' | Returned' : ''}`, row.linked_sale_id] });
   // Void the Logistics expense booked at dispatch (kept, not deleted, so the
   // audit trail survives); annotate it with the refund reason.
-  stmts.push({sql:"UPDATE expenses SET amount_kobo = 0, description = COALESCE(description,'') || ? WHERE id = ?",params:[` | Voided on Mall refund: ${reason}`,`exp-mall-del-${id}`]});
+  stmts.push({ sql: "UPDATE expenses SET amount_kobo = 0, description = COALESCE(description,'') || ? WHERE id = ?", params: [` | Voided on Mall refund: ${reason}`, `exp-mall-del-${id}`] });
   // The delivery-fee cash outflow must unwind with the expense, or the refund's
   // full Sale Refund inflow reversal would still leave the courier cost as a
   // permanent outflow on the ledger.
-  stmts.push({sql:"UPDATE money_movements SET amount_kobo = 0, notes = COALESCE(notes,'') || ? WHERE id = ?",params:[` | Voided on Mall refund: ${reason}`,`mm-exp-mall-del-${id}`]});
+  stmts.push({ sql: "UPDATE money_movements SET amount_kobo = 0, notes = COALESCE(notes,'') || ? WHERE id = ?", params: [` | Voided on Mall refund: ${reason}`, `mm-exp-mall-del-${id}`] });
   stmts.push({ sql: `UPDATE payments SET status = 'refunded', raw_json = ? WHERE order_id = ?`, params: [JSON.stringify({ orderNo: row.order_no, refundedBy: actor.displayName, refundedAt: at, reason, returnStock }), id] });
   // Parity with the client-side refundSale(). A Mall refund is a FULL refund, so it
   // has to settle the relational finance fields too: writing only `status` left
@@ -646,29 +649,29 @@ async function syncFromPos(exec: MallExecutor, id: string, actor: StaffActor, bo
 }
 
 async function parseBody(request: Request) {
-  const text=await request.text();
-  if(text.length>16_384) fail(413,'Request body is too large.');
+  const text = await request.text();
+  if (text.length > 16_384) fail(413, 'Request body is too large.');
   try {
-    const body=text?JSON.parse(text):{};
-    if(!body || typeof body!=='object' || Array.isArray(body)) fail(400,'Expected a JSON object.');
+    const body = text ? JSON.parse(text) : {};
+    if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'Expected a JSON object.');
     return body;
-  } catch { fail(400,'Invalid JSON request body.'); }
+  } catch { fail(400, 'Invalid JSON request body.'); }
 }
 
-async function reviewDelivery(exec:MallExecutor,id:string,actor:StaffActor,body:any) {
-  if (!['Administrator','Store Manager'].includes(actor.role)) fail(403,'Manager access required to verify delivery serviceability.');
-  const row=await getOrderRow(exec,id);
-  if (!['pending','confirmed'].includes(row.status) || row.linked_sale_id) fail(409,'Only unpaid orders can be reviewed.');
-  const delivery=deliveryData(row);
-  if (!delivery.zone || delivery.zone==='pickup') fail(409,'Pickup orders do not need delivery review.');
-  if(body?.confirmed!==true) fail(400,'Explicitly confirm the address is serviceable in the selected delivery zone.');
-  const at=nowIso();
-  await runOrderBatch(exec,row,[
-    {sql:'UPDATE mall_orders SET delivery_address_json=? WHERE id=?',params:[JSON.stringify({...delivery,addressVerified:true,addressVerifiedBy:actor.id,addressVerifiedAt:at}),id]},
-    {sql:"INSERT INTO audit_logs(id,actor_id,action,entity,entity_id,details,created_at) VALUES (?,?,'VERIFY_MALL_DELIVERY','MallOrder',?,?,?)",params:[crypto.randomUUID(),actor.id,id,`Address and ${delivery.zone} serviceability verified`,at]},
+async function reviewDelivery(exec: MallExecutor, id: string, actor: StaffActor, body: any) {
+  if (!['Administrator', 'Store Manager'].includes(actor.role)) fail(403, 'Manager access required to verify delivery serviceability.');
+  const row = await getOrderRow(exec, id);
+  if (!['pending', 'confirmed'].includes(row.status) || row.linked_sale_id) fail(409, 'Only unpaid orders can be reviewed.');
+  const delivery = deliveryData(row);
+  if (!delivery.zone || delivery.zone === 'pickup') fail(409, 'Pickup orders do not need delivery review.');
+  if (body?.confirmed !== true) fail(400, 'Explicitly confirm the address is serviceable in the selected delivery zone.');
+  const at = nowIso();
+  await runOrderBatch(exec, row, [
+    { sql: 'UPDATE mall_orders SET delivery_address_json=? WHERE id=?', params: [JSON.stringify({ ...delivery, addressVerified: true, addressVerifiedBy: actor.id, addressVerifiedAt: at }), id] },
+    { sql: "INSERT INTO audit_logs(id,actor_id,action,entity,entity_id,details,created_at) VALUES (?,?,'VERIFY_MALL_DELIVERY','MallOrder',?,?,?)", params: [crypto.randomUUID(), actor.id, id, `Address and ${delivery.zone} serviceability verified`, at] },
     revisionBumpStatement(),
   ]);
-  return detail(exec,id);
+  return detail(exec, id);
 }
 
 export async function handleStaffMallApi(request: Request, exec: MallExecutor, actor: StaffActor): Promise<Response> {
@@ -694,7 +697,7 @@ async function staffMallRoute(request: Request, exec: MallExecutor, actor: Staff
     const tail = url.pathname.slice(prefix.length).replace(/^\//, '');
     const parts = tail ? tail.split('/') : [];
     if (request.method === 'GET' && tail === 'operations') {
-      if (!['Administrator','Store Manager','Accountant'].includes(actor.role)) fail(403,'Management access required.');
+      if (!['Administrator', 'Store Manager', 'Accountant'].includes(actor.role)) fail(403, 'Management access required.');
       // ~15 statements per poll from every open staff tab; the payload only
       // moves when an order or its outbox row changes, so it is cached briefly.
       if (cachedOperations && cachedOperations.expiresAt > Date.now()) return json(cachedOperations.payload);
@@ -703,9 +706,9 @@ async function staffMallRoute(request: Request, exec: MallExecutor, actor: Staff
       return json(payload);
     }
     if (request.method === 'POST' && tail === 'retry-notifications') {
-      if (!['Administrator','Store Manager'].includes(actor.role)) fail(403,'Management access required.');
-      await exec.runBatch([{sql:"UPDATE mall_outbox SET status='pending',attempts=0,next_attempt_at=0 WHERE status='dead'"}]);
-      return json({ok:true});
+      if (!['Administrator', 'Store Manager'].includes(actor.role)) fail(403, 'Management access required.');
+      await exec.runBatch([{ sql: "UPDATE mall_outbox SET status='pending',attempts=0,next_attempt_at=0 WHERE status='dead'" }]);
+      return json({ ok: true });
     }
     if (request.method === 'GET' && parts.length === 0) return await listOrders(exec, url);
     if (request.method === 'GET' && parts[0] === 'counts') return await counts(exec);
@@ -714,10 +717,10 @@ async function staffMallRoute(request: Request, exec: MallExecutor, actor: Staff
       const id = decodeURIComponent(parts[0]);
       const body = await parseBody(request);
       if (parts[1] === 'confirm') return await confirmOrder(exec, id, actor);
-      if (parts[1] === 'review-delivery') return await reviewDelivery(exec,id,actor,body);
+      if (parts[1] === 'review-delivery') return await reviewDelivery(exec, id, actor, body);
       if (parts[1] === 'reject-payment') {
-        if(!['Administrator','Store Manager'].includes(actor.role)) fail(403,'Manager access required.');
-        return await cancelOrder(exec,id,actor,{reason:`Payment rejected: ${s(body?.reason,'Receipt could not be verified')}`});
+        if (!['Administrator', 'Store Manager'].includes(actor.role)) fail(403, 'Manager access required.');
+        return await cancelOrder(exec, id, actor, { reason: `Payment rejected: ${s(body?.reason, 'Receipt could not be verified')}` });
       }
       if (parts[1] === 'quote-delivery') return await quoteDelivery(exec, id, actor, body);
       if (parts[1] === 'cancel') return await cancelOrder(exec, id, actor, body);
@@ -732,9 +735,9 @@ async function staffMallRoute(request: Request, exec: MallExecutor, actor: Staff
 }
 
 export async function maintainMall(exec: MallExecutor, send?: typeof fetch, options?: MallMaintenanceOptions) {
-  return runMallMaintenance(exec, id => handleStaffMallApi(new Request(`https://internal/api/staff/mall-orders/${encodeURIComponent(id)}/cancel`,{
-    method:'POST',body:JSON.stringify({reason:'Unpaid order expired; reserved stock released.'}),
-  }),exec,{id:'mall-scheduler',displayName:'Mall scheduler',role:'Administrator'}), send, options);
+  return runMallMaintenance(exec, id => handleStaffMallApi(new Request(`https://internal/api/staff/mall-orders/${encodeURIComponent(id)}/cancel`, {
+    method: 'POST', body: JSON.stringify({ reason: 'Unpaid order expired; reserved stock released.' }),
+  }), exec, { id: 'mall-scheduler', displayName: 'Mall scheduler', role: 'Administrator' }), send, options);
 }
 
 // Stryker restore all

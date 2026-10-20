@@ -597,10 +597,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [moneyMovements, setMoneyMovements] = useState<MoneyMovement[]>(() =>
     sanitizeMoneyMovements(readLegacyCollection<MoneyMovement>('idofera_moneyMovements', isClearedBoot ? [] : INITIAL_MONEY_MOVEMENTS)));
 
-  const treasuryBalances = useMemo<TreasuryBalances>(
-    () => computeTreasuryBalances(moneyMovements),
-    [moneyMovements],
-  );
+  const treasuryBalances = useMemo<TreasuryBalances>(() => {
+    // Order-independent: sum drawings and repayments separately, then net.
+    // A repayment recorded before its loan (prepay, or a sync reorder) must not
+    // floor to zero mid-walk and lose the loan.
+    let grossOwnerDrawings = 0;
+    let grossOwnerLoans = 0;
+    let ownerRepayments = 0;
+    for (const mv of moneyMovements) {
+      const amt = Number(mv.amount) || 0;
+      if (mv.type === 'Owner Drawing') {
+        grossOwnerDrawings += amt;
+        if (mv.subtype === 'Owner Loan') grossOwnerLoans += amt;
+      }
+      if (mv.type === 'Owner Repayment') ownerRepayments += amt;
+    }
+    const netOwnerDrawings = Math.max(0, grossOwnerDrawings - ownerRepayments);
+    const netOwnerLoans = Math.max(0, grossOwnerLoans - ownerRepayments);
+
+    return {
+      ...computeTreasuryBalances(moneyMovements),
+      totalOwnerDrawings: Number(netOwnerDrawings.toFixed(2)),
+      totalOwnerLoans: Number(netOwnerLoans.toFixed(2)),
+    };
+  }, [moneyMovements]);
 
   const applyCloudData = React.useCallback((cloudData: Record<string, any[]>) => {
     if (!cloudData) return;

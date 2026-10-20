@@ -9,11 +9,11 @@ export const isNativeRelationalAvailable = (): boolean =>
   nativeModule !== null && typeof nativeModule.nativePlanCoreUpsert === 'function'
     && typeof nativeModule.nativePlanCoreDelete === 'function';
 
-export function planCoreUpsert(
+export async function planCoreUpsert(
   collection: string,
   document: any,
-  now: string = new Date().toISOString()
-): SqlStmt[] | null {
+  now: string = new Date().toISOString(),
+): Promise<SqlStmt[] | null> {
   if (isNativeRelationalAvailable() && isNativeBridgeEnabled() && document && typeof document === 'object' && document.id) {
     try {
       const raw = nativeModule.nativePlanCoreUpsert(
@@ -39,10 +39,10 @@ export function planCoreUpsert(
   return coreUpsertTS(collection, document);
 }
 
-export function planCoreDelete(
+export async function planCoreDelete(
   collection: string,
   documentId: string
-): SqlStmt[] | null {
+): Promise<SqlStmt[] | null> {
   if (isNativeRelationalAvailable() && isNativeBridgeEnabled()) {
     try {
       const raw = nativeModule.nativePlanCoreDelete(collection, documentId);
