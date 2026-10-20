@@ -31,35 +31,39 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { accessHeaders } from './access-probe.ts';
 
-const LIVE_HOST = 'idomall.olz.workers.dev';
-const LIVE_DB = 'idofera';
 const LINES = 100;
 const UNITS_PER_LINE = 1000;
 const UNIT_PRICE_KOBO = 100;
 const MAX_TOTAL_KOBO = 1_000_000_000;
 const WRANGLER = process.platform === 'win32' ? 'node_modules\\.bin\\wrangler.cmd' : 'node_modules/.bin/wrangler';
 
-const allowLive = process.env.MALL_CONTRACT_ALLOW_LIVE === '1';
-
 function requireConfig() {
+  if (process.env.MALL_CONTRACT_ALLOW_LIVE !== undefined) {
+    throw new Error('MALL_CONTRACT_ALLOW_LIVE must not be set; this runner is strictly Preview-only.');
+  }
+  if (process.env.MALL_CONTRACT_BASE_URL !== 'https://idomall-preview.olz.workers.dev') {
+    throw new Error('Set MALL_CONTRACT_BASE_URL=https://idomall-preview.olz.workers.dev; other targets are forbidden.');
+  }
   const raw = process.env.MALL_CONTRACT_BASE_URL;
   if (!raw) throw new Error('Set MALL_CONTRACT_BASE_URL to the disposable preview origin. No requests were made.');
   const base = new URL(raw);
   if (base.protocol !== 'https:' || base.username || base.password || base.pathname !== '/') {
     throw new Error('Use an HTTPS origin without credentials or a path.');
   }
-  if (base.hostname === LIVE_HOST && !allowLive) {
-    throw new Error(`${LIVE_HOST} is the live store. This check writes orders; set MALL_CONTRACT_ALLOW_LIVE=1 to override.`);
+  if (base.hostname !== 'idomall-preview.olz.workers.dev') {
+    throw new Error(`Refusing target ${base.hostname}; contract writes are allowed only against idomall-preview.olz.workers.dev.`);
   }
   const database = process.env.MALL_CONTRACT_D1;
   if (!database) throw new Error('Set MALL_CONTRACT_D1 to the disposable D1 database name used for seeding.');
-  if (database === LIVE_DB && !allowLive) {
-    throw new Error(`Refusing to seed the live database "${LIVE_DB}". Set MALL_CONTRACT_ALLOW_LIVE=1 to override.`);
+  if (database !== 'idofera-preview') {
+    throw new Error(`Refusing to seed ${database}; contract writes require the disposable idofera-preview database.`);
   }
+  const env = process.env.MALL_CONTRACT_WRANGLER_ENV || 'preview';
+  if (env !== 'preview') throw new Error(`Refusing Wrangler environment ${env}; only preview is allowed.`);
   return {
     base,
     database,
-    env: process.env.MALL_CONTRACT_WRANGLER_ENV || 'preview',
+    env,
   };
 }
 
@@ -108,6 +112,28 @@ async function main() {
   const sessionQty = `contract-d-${run}`;
   const now = Date.now();
   const failures: string[] = [];
+  let cleanupRun = false;
+  const cleanup = () => {
+    if (cleanupRun) return;
+    cleanupRun = true;
+    const statements = [
+      `DELETE FROM mall_order_items WHERE id LIKE 'pv-ci-%';`,
+      `DELETE FROM mall_cart_items WHERE id LIKE 'pv-ci-%';`,
+      `DELETE FROM mall_carts WHERE session_id LIKE 'contract-%';`,
+      `DELETE FROM mall_checkout_attempts WHERE attempt_key LIKE 'contract-%';`,
+      `DELETE FROM mall_order_events WHERE order_id IN (SELECT id FROM mall_orders WHERE customer_phone='+2348000000');`,
+      `DELETE FROM mall_outbox WHERE order_id IN (SELECT id FROM mall_orders WHERE customer_phone='+2348000000');`,
+      `DELETE FROM mall_order_items WHERE mall_order_id IN (SELECT id FROM mall_orders WHERE customer_phone='+2348000000');`,
+      `DELETE FROM payments WHERE order_id IN (SELECT id FROM mall_orders WHERE customer_phone='+2348000000');`,
+      `DELETE FROM mall_orders WHERE customer_phone='+2348000000';`,
+      `DELETE FROM products WHERE id LIKE 'pv-%' OR id='pv-big';`,
+      `UPDATE settings SET value_json='\"false\"',updated_at=unixepoch()*1000 WHERE key='MALL_CHECKOUT_ENABLED';`,
+    ];
+    for (const statement of statements) {
+      try { runSql(config, statement); } catch (error) { console.warn('Preview cleanup statement failed:', error instanceof Error ? error.message : String(error)); }
+    }
+  };
+  process.once('exit', cleanup);
 
   const check = (ok: boolean, label: string, detail = '') => {
     console.log(`${ok ? 'PASS' : 'FAIL'} ${label}${detail ? ` — ${detail}` : ''}`);
@@ -230,6 +256,21 @@ async function main() {
     'line cap: an order with more than 100 items is rejected',
     `status ${tooManyLines.status} ${typeof tooManyLines.body === 'object' ? tooManyLines.body?.error : ''}`,
   );
+
+  const finalCleanup = [
+    `DELETE FROM mall_checkout_attempts WHERE attempt_key LIKE 'contract-${run}-%';`,
+    `DELETE FROM mall_order_items WHERE mall_order_id IN (SELECT id FROM mall_orders WHERE order_no LIKE 'MALL-%' AND customer_phone='+2348000000');`,
+    `DELETE FROM payments WHERE order_id IN (SELECT id FROM mall_orders WHERE order_no LIKE 'MALL-%' AND customer_phone='+2348000000');`,
+    `DELETE FROM mall_order_events WHERE order_id IN (SELECT id FROM mall_orders WHERE order_no LIKE 'MALL-%' AND customer_phone='+2348000000');`,
+    `DELETE FROM mall_outbox WHERE order_id IN (SELECT id FROM mall_orders WHERE order_no LIKE 'MALL-%' AND customer_phone='+2348000000');`,
+    `DELETE FROM mall_orders WHERE order_no LIKE 'MALL-%' AND customer_phone='+2348000000';`,
+    `DELETE FROM mall_carts WHERE session_id IN ('${sessionMax}','${sessionTotal}','${sessionLines}','${sessionQty}');`,
+    `DELETE FROM mall_cart_items WHERE id LIKE 'pv-ci-%';`,
+    `DELETE FROM products WHERE id LIKE 'pv-%' OR id='pv-big';`,
+  ];
+  for (const statement of finalCleanup) runSql(config, statement);
+  cleanupRun = true;
+  process.removeListener('exit', cleanup);
 
   if (failures.length) throw new Error(`${failures.length} contract check(s) failed: ${failures.join('; ')}`);
   console.log(`\nAll contract checks passed on ${config.base.origin}. This does not verify payment settlement, courier handoff or notification-provider delivery.`);

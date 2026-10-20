@@ -3,6 +3,10 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
 
+// The Rust N-API bridge is a Node/server-only dependency. Frontend code must
+// use the web-safe TypeScript implementation rather than bundle Node built-ins.
+const isFrontendBuild = process.argv.some((arg) => arg === 'build');
+
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
@@ -10,9 +14,10 @@ export default defineConfig(() => {
       // React and the renderer must always share one module instance. This is
       // especially important after Vite re-optimizes dependencies during dev.
       dedupe: ['react', 'react-dom'],
-      alias: {
-        '@': path.resolve(__dirname, '.'),
-      },
+      alias: [
+        ...(isFrontendBuild ? [{ find: /\.\/native-bridge\/ledgerBridge\.js$/, replacement: '/src/native-bridge/ledgerFallback.ts' }] : []),
+        { find: '@', replacement: path.resolve(__dirname, '.') },
+      ],
     },
     optimizeDeps: {
       include: ['react', 'react-dom', 'react-dom/client'],

@@ -231,11 +231,28 @@ async function main() {
   const config = requireConfig();
   const api = makeApi(config.base);
   const run = randomUUID().slice(0, 8);
-  const session = `verify-${run}`;
   const now = Date.now();
 
   console.log(`\nTarget: ${config.base.origin} (D1 ${config.database} via wrangler env "${config.env ?? config.env}")`);
   console.log(`Hard rule: preview-only — worker ${PREVIEW_HOST}, D1 ${PREVIEW_DB_NAME} (${PREVIEW_DB_ID}), R2 ${PREVIEW_R2}. Live is hard-denied.\n`);
+  let orderId: string | undefined;
+  let cleanupRun = false;
+  const session = `verify-${run}`;
+  const sessionsToClean = new Set<string>([session, `contract-a-${run}`, `contract-b-${run}`, `contract-c-${run}`, `contract-d-${run}`]);
+  let checkoutTemporarilyEnabled = false;
+  const cleanup = () => {
+    if (cleanupRun) return;
+    cleanupRun = true;
+    try {
+      cleanupContractPreview(config, { session, orderId, run, sessions: [...sessionsToClean] });
+      if (checkoutTemporarilyEnabled) {
+        runSql(config, "UPDATE settings SET value_json='\"false\"',updated_at=unixepoch()*1000 WHERE key='MALL_CHECKOUT_ENABLED';");
+      }
+    } catch (error) {
+      console.error('[preview-contract] artifact cleanup failed:', error instanceof Error ? error.message : String(error));
+    }
+  };
+  process.once('exit', cleanup);
 
   // ------------------------------------------------------------------
   // Step 1: backup the preview database BEFORE writing anything
@@ -264,6 +281,7 @@ async function main() {
     MALL_CONTRACT_BASE_URL: config.base.origin,
     MALL_CONTRACT_D1: config.database,
     MALL_CONTRACT_WRANGLER_ENV: config.env ?? 'preview',
+    MALL_CONTRACT_ALLOW_LIVE: undefined,
   };
   try {
     execFileSync(process.execPath, ['node_modules/tsx/dist/cli.mjs', 'scripts/mall-contract-check.ts'], {
@@ -282,8 +300,9 @@ async function main() {
 
   // Seed preview-only rows (pv-* prefix, cleaned up at the end).
   const seed = [
-    "DELETE FROM mall_carts WHERE session_id LIKE 'verify-%';",
-    "DELETE FROM products WHERE id LIKE 'pv-%';",
+    `DELETE FROM mall_carts WHERE session_id IN (${[...sessionsToClean].map((staleSession) => `'${staleSession}'`).join(',')});`,
+    `DELETE FROM mall_cart_items WHERE id IN ('pv-fci-1','pv-fci-2');`,
+    `DELETE FROM products WHERE id IN ('pv-f-1','pv-f-2','pv-f-3');`,
     `WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 3) INSERT OR REPLACE INTO products
       (id, sku, name, status, stock_qty, cost_price_kobo, retail_price_kobo, mall_price_kobo, min_selling_price_kobo, created_at, updated_at)
       SELECT 'pv-f-' || n, 'PV-F-' || n, 'Verify product ' || n, 'Active', 100, 5000, 10000, 10000, 5000,
@@ -316,6 +335,16 @@ async function main() {
     note: `verify run ${run}`,
   };
   const checkoutKey = `verify-${run}-0001`;
+  const checkoutAvailability = await api('/api/mall/config', session);
+  if (checkoutAvailability.status !== 200 || checkoutAvailability.body?.checkoutEnabled !== true) {
+    skip('checkout and money-flow phases', 'Preview checkout is disabled for public traffic; temporarily enable it only for this hard-guarded test.');
+    checkoutTemporarilyEnabled = true;
+    runSql(config, "UPDATE settings SET value_json='\"true\"',updated_at=unixepoch()*1000 WHERE key='MALL_CHECKOUT_ENABLED';");
+    const enabledConfig = await api('/api/mall/config', session);
+    if (enabledConfig.status !== 200 || enabledConfig.body?.checkoutEnabled !== true) {
+      throw new Error('Could not enable checkout on isolated Preview for contract run.');
+    }
+  }
   const placed = await api('/api/mall/checkout', session, {
     method: 'POST', headers: { 'Idempotency-Key': checkoutKey }, body: JSON.stringify(checkoutBody),
   });
@@ -329,7 +358,7 @@ async function main() {
     `status ${placed.status}, total ${order?.totalKobo} (expected ${expectedTotal})`,
   );
 
-  const orderId: string | undefined = order?.id ?? order?.orderNo;
+  orderId = order?.id ?? order?.orderNo;
   check(Boolean(orderId), 'checkout: order id is available for the staff flow', `id ${orderId}`);
 
   // --- stock decrement + Outgoing movement (read from remote D1)
@@ -349,6 +378,8 @@ async function main() {
     skip('dispatch -> Logistics expense + Expense Outflow', 'requires the staff phase');
     skip('refund -> Sale Refund + stock restore + expense void', 'requires the staff phase');
     skip('reconciliation snapshot of the staff-driven lifecycle', 'requires the staff phase');
+    cleanup();
+    process.removeListener('exit', cleanup);
     printTable();
     return;
   }
@@ -458,7 +489,7 @@ async function main() {
   // ------------------------------------------------------------------
   // Cleanup: delete the pv-* rows this run created
   // ------------------------------------------------------------------
-  const cleanup = [
+  const finalCleanup = [
     `DELETE FROM mall_order_items WHERE mall_order_id = '${orderId}';`,
     `DELETE FROM payments WHERE order_id = '${orderId}';`,
     `DELETE FROM mall_order_events WHERE order_id = '${orderId}';`,
@@ -470,15 +501,17 @@ async function main() {
     `DELETE FROM stock_movements WHERE ref_id IN ('checkout:${orderId}', 'refund:${orderId}');`,
     `DELETE FROM mall_returns WHERE order_id = '${orderId}';`,
     `DELETE FROM mall_checkout_attempts WHERE order_id = '${orderId}';`,
-    `DELETE FROM app_sessions WHERE user_id LIKE 'contract-user-%';`,
-    `DELETE FROM app_users WHERE id LIKE 'contract-user-%';`,
+    `DELETE FROM app_sessions WHERE user_id='contract-user-${run}';`,
+    `DELETE FROM app_users WHERE id='contract-user-${run}';`,
     `DELETE FROM mall_orders WHERE id = '${orderId}';`,
     `DELETE FROM mall_carts WHERE session_id = '${session}';`,
     `DELETE FROM mall_cart_items WHERE cart_id = 'mc-${session}';`,
     "DELETE FROM products WHERE id LIKE 'pv-f-%';",
     "DELETE FROM audit_logs WHERE entity_id = '" + orderId + "';",
   ];
-  for (const statement of cleanup) runSql(config, statement);
+  for (const statement of finalCleanup) runSql(config, statement);
+  cleanup();
+  process.removeListener('exit', cleanup);
   console.log('cleanup: preview-only rows removed (pv-f-* and this run order)');
 
   printTable();
@@ -512,3 +545,38 @@ main().catch((error) => {
   console.error(`\nContract verification failed: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 });
+
+
+/** Clean both contract suites' deterministic preview-only fixtures after any exit path. */
+function cleanupContractPreview(
+  config: { database: string; env: string },
+  run: { session: string; orderId?: string; run: string; sessions: string[] },
+): void {
+  const orderId = run.orderId;
+  const statements = [
+    ...(orderId ? [
+      `DELETE FROM mall_order_items WHERE mall_order_id='${orderId}';`,
+      `DELETE FROM payments WHERE order_id='${orderId}';`,
+      `DELETE FROM mall_order_events WHERE order_id='${orderId}';`,
+      `DELETE FROM sales WHERE id='sale-${orderId}';`,
+      `DELETE FROM sale_items WHERE sale_id='sale-${orderId}';`,
+      `DELETE FROM delivery_orders WHERE sale_id='sale-${orderId}';`,
+      `DELETE FROM expenses WHERE id='exp-mall-del-${orderId}';`,
+      `DELETE FROM money_movements WHERE ref_id IN ('sale-${orderId}','${orderId}','refund:${orderId}');`,
+      `DELETE FROM stock_movements WHERE ref_id IN ('checkout:${orderId}','refund:${orderId}');`,
+      `DELETE FROM mall_returns WHERE order_id='${orderId}';`,
+      `DELETE FROM mall_checkout_attempts WHERE attempt_key='verify-${run.run}-0001';`,
+      `DELETE FROM audit_logs WHERE entity_id='${orderId}';`,
+      `DELETE FROM mall_orders WHERE id='${orderId}';`,
+    ] : []),
+    `DELETE FROM mall_carts WHERE session_id IN (${run.sessions.map((session) => `'${session}'`).join(',')}) OR session_id LIKE 'contract-a-${run.run}' OR session_id LIKE 'contract-b-${run.run}' OR session_id LIKE 'contract-c-${run.run}' OR session_id LIKE 'contract-d-${run.run}';`,
+    `DELETE FROM mall_checkout_attempts WHERE attempt_key LIKE 'verify-%' OR attempt_key LIKE 'contract-%';`,
+    `DELETE FROM mall_order_items WHERE id LIKE 'pv-fci-%';`,
+    `DELETE FROM mall_cart_items WHERE id LIKE 'pv-fci-%' OR id LIKE 'pv-ci-a-%' OR id LIKE 'pv-ci-b-%' OR id LIKE 'pv-ci-c-%';`,
+    "DELETE FROM products WHERE id LIKE 'pv-f-%' OR id LIKE 'pv-%' OR id='pv-big';",
+    `DELETE FROM mall_outbox WHERE id LIKE 'created:${orderId || 'no-order'}' OR id LIKE 'heartbeat:%' AND order_id IS NULL;`,
+    `DELETE FROM mall_outbox WHERE order_id='${orderId || ''}' AND order_id IS NOT NULL;`,
+    `DELETE FROM mall_webhook_deliveries WHERE event_id LIKE 'created:${orderId || 'no-order'}';`,
+  ];
+  for (const statement of statements) runSql(config, statement);
+}

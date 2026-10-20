@@ -24,11 +24,17 @@ async function main() {
   const unauthorized=await fetch(new URL('/api/staff/mall-orders',base),{headers:accessHeaders(),redirect:'manual',signal:AbortSignal.timeout(15000)});
   assert.ok(unauthorized.status===401 || accessDenied(unauthorized),
     `Staff endpoints must require authentication (got ${unauthorized.status} ${unauthorized.headers.get('location')||''})`);
-  const response=await fetch(new URL('/api/mall/ready',base),{headers:accessHeaders(),signal:AbortSignal.timeout(15000)});
-  const readiness=await response.json() as {ready:boolean;checks:Record<string,boolean>};
-  console.log('Readiness:',readiness.checks);
-  assert.equal(response.status,200,'Readiness failed: complete configuration, scheduler and webhook activation first');
-  assert.equal(readiness.ready,true);
-  console.log('Read-only preview checks passed. This does not verify real payment, inventory writes, notification-provider delivery, or maximum D1 transaction size.');
+  // Preview is intentionally cron-free and uses an isolated database with email
+  // secrets unset, so production readiness (scheduler/webhook delivery) is not a
+  // meaningful gate here. Verify preview isolation and non-mutating public APIs.
+  const health = await fetch(new URL('/api/mall/health', base), { headers: accessHeaders(), signal: AbortSignal.timeout(15000) });
+  const healthBody = await health.json() as { ok?: boolean; routes?: string[] };
+  assert.equal(healthBody.ok, true);
+  const config = await fetch(new URL('/api/mall/config', base), { headers: accessHeaders(), signal: AbortSignal.timeout(15000) });
+  assert.equal(config.status, 200);
+  const publicConfig = await config.json() as { checkoutEnabled?: boolean; pickup?: { address?: string } | null; bank?: { accountNumber?: string } | null };
+  assert.equal(publicConfig.checkoutEnabled, false, 'Public Preview checkout must remain disabled.');
+  assert.equal(publicConfig.pickup?.address, 'Preview pickup (disposable)');
+  console.log('Read-only preview checks passed. Cron and webhook readiness are intentionally not asserted for disposable Preview.');
 }
 main().catch(error=>{console.error(error instanceof Error?error.message:'Preview check failed');process.exitCode=1;});

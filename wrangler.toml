@@ -101,6 +101,8 @@ binding = "MALL_IMAGES"
 bucket_name = "idomall"
 
 [env.mall.vars]
+# The production Mall worker is Cloudflare Workers/D1, not a Node addon host.
+IDOFERA_NATIVE_ENABLED = "false"
 # Display-only: the health endpoint reports which bound D1 database answered.
 D1_DATABASE_ID = "3a3eb157-5aa5-419a-a8ce-2eade2afc436"
 # Kill-switch for honoring the product-level POS promotional price on the Mall.
@@ -198,9 +200,12 @@ binding = "MALL_IMAGES"
 bucket_name = "idomall-preview"
 
 [env.preview.vars]
+# Mall Preview executes in the Cloudflare Worker/D1 runtime; native Node addons are disabled.
+IDOFERA_NATIVE_ENABLED = "false"
 D1_DATABASE_ID = "647becf9-e665-4a85-9fa5-dbb5dedbcefa"
 MALL_HONOR_POS_PROMOS = "false"
-MALL_CHECKOUT_ENABLED = "true"
+# Public disposable Preview keeps checkout disabled; test-runner opt-in is separate.
+MALL_CHECKOUT_ENABLED = "false"
 # Cloudflare Access staff gate (docs/staff-access.md). The preview is covered by
 # the same Access applications as the live Worker, so a preview deployment is
 # never an unguarded copy of the staff workspace. Access already sits in front of
