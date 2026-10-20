@@ -39,6 +39,11 @@ interface Env extends MallConfig {
    */
   IDOFERA_NATIVE_ENABLED?: string;
   /**
+   * Cloudflare Container binding for the Rust money engine (production path).
+   * Present only when wrangler.toml declares the container + DO binding.
+   */
+  MONEY_ENGINE_CONTAINER?: { getByName(name: string): { fetch(input: Request): Promise<Response> } };
+  /**
    * Remote Rust money engine (native/crates/money_engine_server). Empty =
    * disabled and every money check runs the TypeScript implementation.
    * MONEY_ENGINE_TOKEN is a secret, never committed.
@@ -1156,6 +1161,12 @@ async function serveAsset(request: Request, env: Env) {
   }
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
+
+// The container class is only needed once container hosting is enabled in
+// wrangler.toml. It imports `cloudflare:workers`, which does not resolve under
+// Node (tests, build tooling), so a static export would break the whole bundle.
+// Uncomment together with the container block in wrangler.toml (docs/containers.md).
+// export { MoneyEngineContainer } from './src/container/moneyEngineContainer.js';
 
 export default {
   async scheduled(controller: unknown, env: Env): Promise<void> {

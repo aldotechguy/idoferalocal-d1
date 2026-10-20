@@ -100,13 +100,40 @@ database_id = "3a3eb157-5aa5-419a-a8ce-2eade2afc436"
 binding = "MALL_IMAGES"
 bucket_name = "idomall"
 
+# ---------------------------------------------------------------------------
+# Rust money engine as a Cloudflare Container — DISABLED.
+#
+# Ready to enable, but not active: this machine has no Docker CLI, and wrangler
+# builds the image during deploy, so an active block makes every production
+# release fail before it reaches Cloudflare. Enable it with the steps in
+# docs/containers.md (uncomment here AND the export in sites-worker.ts, then
+# `npx wrangler deploy --env mall`).
+#
+# Rollback: re-comment both; /api/money-engine/health then reports
+# mode=typescript and every bridge uses the parity-tested TypeScript code.
+# ---------------------------------------------------------------------------
+# [[env.mall.containers]]
+# class_name = "MoneyEngineContainer"
+# image = "./Dockerfile"
+# instance_type = "dev"
+# max_instances = 1
+#
+# [[env.mall.durable_objects.bindings]]
+# name = "MONEY_ENGINE_CONTAINER"
+# class_name = "MoneyEngineContainer"
+#
+# [[env.mall.migrations]]
+# tag = "v1"
+# new_sqlite_classes = ["MoneyEngineContainer"]
+
 [env.mall.vars]
 # Cloudflare Workers cannot load native Node addons, so the Rust engine runs as
 # the separate HTTP service (native/crates/money_engine_server).
 IDOFERA_NATIVE_ENABLED = "true"
-# Remote Rust money engine. Set MONEY_ENGINE_URL to the service's https origin to
-# put Rust on the production money path; while empty, /api/money-engine/health
-# reports mode=typescript and every bridge uses the parity-tested TS code.
+# Remote Rust money engine. The Engine runs as a Cloudflare Container (see the
+# published image and the bindings below); a container binding, not MONEY_ENGINE_URL,
+# is what makes it reachable, so the Worker is never pointed at a third party.
+# MONEY_ENGINE_URL is only for a self-hosted origin and may stay empty.
 # MONEY_ENGINE_TOKEN is a secret: `npx wrangler secret put --env mall MONEY_ENGINE_TOKEN`.
 MONEY_ENGINE_URL = ""
 MONEY_ENGINE_TIMEOUT_MS = "800"

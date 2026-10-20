@@ -17,11 +17,28 @@
  */
 
 export type RemoteEngineConfig = {
+  /** Public https origin of a self-hosted engine. Empty when using a container. */
   url: string;
   token?: string;
   /** Milliseconds before a call is abandoned and the TS fallback takes over. */
   timeoutMs?: number;
+  /**
+   * Container mode. When present, requests go to the container through this
+   * Durable Object binding instead of the public URL — no ingress, no token.
+   */
+  container?: ContainerBinding;
 };
+
+/**
+ * The slice of the @cloudflare/containers binding this module needs. Typed
+ * structurally so the shared bridge never imports Worker-only globals.
+ */
+export type ContainerBinding = {
+  getByName(name: string): { fetch(input: Request): Promise<Response> };
+};
+
+/** A single named instance: the engine is stateless, so one is enough. */
+const CONTAINER_INSTANCE = 'money-engine';
 
 export type RemoteOrderTransition = {
   allowed: boolean;
@@ -49,18 +66,55 @@ export function normalizeEngineUrl(raw: string | undefined | null): string | nul
 /** Read config from a Worker `env` object; returns null when unconfigured. */
 export function remoteEngineConfigFrom(env: Record<string, unknown> | undefined | null): RemoteEngineConfig | null {
   if (!env) return null;
+  const timeout = Number(env.MONEY_ENGINE_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, 5_000) : DEFAULT_TIMEOUT_MS;
+  const container = env.MONEY_ENGINE_CONTAINER as ContainerBinding | undefined;
+  if (container && typeof container.getByName === 'function') {
+    return { url: '', container, timeoutMs };
+  }
   const url = normalizeEngineUrl(typeof env.MONEY_ENGINE_URL === 'string' ? env.MONEY_ENGINE_URL : null);
   if (!url) return null;
   const token = typeof env.MONEY_ENGINE_TOKEN === 'string' && env.MONEY_ENGINE_TOKEN ? env.MONEY_ENGINE_TOKEN : undefined;
-  const parsedTimeout = Number(env.MONEY_ENGINE_TIMEOUT_MS);
-  const timeoutMs = Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? Math.min(parsedTimeout, 5_000) : DEFAULT_TIMEOUT_MS;
   return { url, token, timeoutMs };
 }
 
 export const isRemoteEngineConfigured = (config: RemoteEngineConfig | null | undefined): boolean =>
-  Boolean(config && normalizeEngineUrl(config.url));
+  Boolean(config && (config.container || normalizeEngineUrl(config.url)));
 
 type CallResult = { ok: true; result: unknown } | { ok: false; error: string };
+
+/**
+ * Send one request to whichever transport the config names: the container
+ * binding (production) or a public https origin (self-hosted). Returns null on
+ * any failure so the caller can fall back to TypeScript.
+ */
+async function send(
+  config: RemoteEngineConfig,
+  method: 'GET' | 'POST',
+  route: string,
+  body: unknown,
+  fetchImpl: typeof fetch,
+): Promise<CallResult | null> {
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers['content-type'] = 'application/json';
+  if (config.token) headers.authorization = `Bearer ${config.token}`;
+  const init: RequestInit = { method, headers };
+  if (body !== undefined) init.body = JSON.stringify(body);
+  let response: Response;
+  if (config.container) {
+    // Container requests go through the Durable Object; the URL host is only
+    // used for routing inside the container runtime.
+    const instance = config.container.getByName(CONTAINER_INSTANCE);
+    response = await instance.fetch(new Request(`http://money-engine${route}`, init));
+  } else {
+    const base = normalizeEngineUrl(config.url);
+    if (!base) return null;
+    response = await fetchImpl(`${base}${route}`, init);
+  }
+  if (!response.ok) return null;
+  const payload = (await response.json()) as CallResult;
+  return payload && payload.ok === true ? payload : null;
+}
 
 /** POST a JSON body; resolves to the parsed `result` or null on any failure. */
 export async function callRemoteEngine(
@@ -69,23 +123,12 @@ export async function callRemoteEngine(
   body: unknown,
   fetchImpl: typeof fetch = fetch,
 ): Promise<unknown | null> {
-  const base = normalizeEngineUrl(config.url);
-  if (!base) return null;
+  if (!isRemoteEngineConfigured(config)) return null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   try {
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (config.token) headers.authorization = `Bearer ${config.token}`;
-    const response = await fetchImpl(`${base}${route}`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!response.ok) return null;
-    const payload = (await response.json()) as CallResult;
-    if (!payload || payload.ok !== true) return null;
-    return payload.result;
+    const payload = await send(config, 'POST', route, body, fetchImpl);
+    return payload?.ok === true ? payload.result : null;
   } catch {
     return null;
   } finally {
@@ -188,18 +231,12 @@ export async function probeRemoteEngine(
   config: RemoteEngineConfig | null | undefined,
   fetchImpl: typeof fetch = fetch,
 ): Promise<EngineIdentity | null> {
-  const base = normalizeEngineUrl(config?.url);
-  if (!base) return null;
+  if (!isRemoteEngineConfigured(config)) return null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   try {
-    const headers: Record<string, string> = {};
-    if (config?.token) headers.authorization = `Bearer ${config.token}`;
-    const response = await fetchImpl(`${base}/health`, { method: 'GET', headers, signal: controller.signal });
-    if (!response.ok) return null;
-    const payload = (await response.json()) as CallResult;
-    if (!payload || payload.ok !== true) return null;
-    const identity = payload.result as Partial<EngineIdentity> | null;
+    const payload = await send(config!, 'GET', '/health', undefined, fetchImpl);
+    const identity = (payload?.ok === true ? payload.result : null) as Partial<EngineIdentity> | null;
     if (!identity || typeof identity.engine !== 'string' || typeof identity.version !== 'string') return null;
     return { engine: identity.engine, version: identity.version, runtime: String(identity.runtime ?? 'rust') };
   } catch {

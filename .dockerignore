@@ -1,0 +1,15 @@
+# Keep the image build context small: the Rust service only needs the crates.
+node_modules
+dist
+.git
+backups
+native/target
+coverage
+playwright-report
+test-results
+.wrangler
+.stryker-tmp*
+.data
+*.db
+*.sqlite*
+.env*
