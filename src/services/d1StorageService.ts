@@ -379,7 +379,17 @@ export async function syncLocalRecordsToD1(snapshot: D1Snapshot, requestedDeleti
     credentials: 'include',
     body: JSON.stringify({upserts, deletes}),
   });
-  if (!response.ok) throw Object.assign(new Error(`D1 record sync failed (${response.status})`), {status: response.status});
+  if (!response.ok) {
+    // The server names the real D1 failure (unique index, NOT NULL, CHECK) in
+    // `relationalError`; carry it so the console line identifies the record
+    // instead of only the status.
+    const detail = await response.json().catch(() => null) as {error?: string; relationalError?: string} | null;
+    const reason = detail?.relationalError || detail?.error;
+    throw Object.assign(
+      new Error(`D1 record sync failed (${response.status})${reason ? `: ${reason}` : ''}`),
+      {status: response.status, relationalError: detail?.relationalError},
+    );
+  }
   const result = await response.json() as {revision: number; upserted: number; deleted: number; skippedUnchanged?: number; relationalSynced?: boolean};
   if (result.relationalSynced === false) {
     throw new Error('Records reached storage, but the live catalog update failed. Pending changes have been retained. Retry Sync Now; if it fails again, contact support.');
@@ -475,6 +485,48 @@ export interface AutoSyncResult {
   changedCount: number;
   pushed: boolean;
   skipped?: 'no-changes' | 'not-newer';
+  /** Keys the server accepted during a per-record retry of a failed batch. */
+  accepted?: string[];
+}
+
+/**
+ * Push a set of records, and if the batch is rejected by the relational store,
+ * retry each record on its own so one bad row cannot block the rest.
+ *
+ * Returns the set of accepted `collection:documentId` keys, or `null` when the
+ * whole batch was accepted as one request. Throws the original error when the
+ * batch fails and nothing at all could be written.
+ */
+export async function pushStoreOrIsolate(
+  snapshot: D1Snapshot,
+  deletions?: D1Deletion[],
+): Promise<Set<string> | null> {
+  try {
+    await syncLocalRecordsToD1(snapshot, deletions);
+    return null;
+  } catch (error) {
+    const status = (error as {status?: number})?.status;
+    // 409 is a conflict resolution outcome, not a rejected record: let the
+    // caller answer it. Retrying one-by-one would only reproduce it.
+    if (status === 409) throw error;
+    const records = Object.entries(snapshot).flatMap(([collection, list]) =>
+      (list || []).map((document) => ({collection, document})),
+    );
+    if (records.length <= 1) throw error;
+    const accepted = new Set<string>();
+    for (const {collection, document} of records) {
+      const key = `${collection}:${document.id}`;
+      if (accepted.has(key)) continue;
+      try {
+        await syncLocalRecordsToD1({[collection]: [document]});
+        accepted.add(key);
+      } catch (recordError) {
+        console.warn(`D1 rejected ${key}; it stays pending:`, recordError);
+      }
+    }
+    if (!accepted.size) throw error;
+    return accepted;
+  }
 }
 
 /**
@@ -528,10 +580,32 @@ async function pushChangedRecords(
     await syncLocalRecordsToD1(grouped);
     return {changedCount: unique.length, pushed: true};
   } catch (error) {
-    if ((error as {status?: number})?.status !== 409) throw error;
-    // Another device already stored a newer copy; do not overwrite it. Option B
-    // has no delta pull here — the next guarded full read converges this device.
-    return {changedCount: unique.length, pushed: false, skipped: 'not-newer'};
+    if ((error as {status?: number})?.status === 409) {
+      // Another device already stored a newer copy; do not overwrite it. Option B
+      // has no delta pull here — the next guarded full read converges this device.
+      return {changedCount: unique.length, pushed: false, skipped: 'not-newer'};
+    }
+    // One record the relational store refuses (a UNIQUE index collision, a
+    // NOT NULL column) rejects the WHOLE batch, so every healthy edit queued
+    // behind it fails on every retry and the device never converges. Isolate
+    // the failure: write each record alone, acknowledge the ones D1 accepts,
+    // and leave only the genuinely rejected key pending (the server returns 5xx
+    // without moving the revision, so that one keeps retrying and gets reported).
+    if ((error as {status?: number})?.status !== 409 && upserts.length > 1) {
+      const accepted: string[] = [];
+      let rejected: unknown = error;
+      for (const {collection, document} of upserts) {
+        try {
+          await syncLocalRecordsToD1({[collection]: [document]});
+          accepted.push(`${collection}:${document.id}`);
+        } catch (recordError) {
+          if ((recordError as {status?: number})?.status !== 409) rejected = recordError;
+        }
+      }
+      if (accepted.length) return {changedCount: unique.length, pushed: true, accepted};
+      throw rejected;
+    }
+    throw error;
   }
 }
 

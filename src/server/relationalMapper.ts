@@ -229,7 +229,10 @@ export function productToRow(p: any, now: string) {
   const catName = s(p.category, '').trim() || 'Uncategorized';
   const images = cleanImageList(p.images);
   return {
-    id: s(p.id), sku: s(p.sku || p.id), barcode: s(p.barcode), qr_code: p.qrCode ? s(p.qrCode) : null,
+    // `products.sku` is UNIQUE, so a blank SKU must not collapse to one shared
+    // value: fall back to the id when there is one, and only then to an empty
+    // string (a row with no id is skipped entirely by coreUpsert).
+    id: s(p.id), sku: s(p.sku) || s(p.id), barcode: s(p.barcode), qr_code: p.qrCode ? s(p.qrCode) : null,
     name: s(p.name, 'Unnamed Product'), description: s(p.description),
     category_id: `cat-${slugifyName(catName)}`, category_name: catName, brand: s(p.brand, 'Unbranded'),
     supplier_id: p.supplierId ? s(p.supplierId) : null, supplier_name: s(p.supplierName, 'General Supplier'),

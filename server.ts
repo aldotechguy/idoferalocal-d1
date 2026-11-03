@@ -112,6 +112,7 @@ import {
   deleteToStatements,
   replaceCollectionStatements,
 } from "./src/server/relationalWrites.js";
+import { chunkStatement } from "./src/server/d1StatementLimits.js";
 import { currentRevision, bumpWatermark } from "./src/server/syncWatermark.js";
 const USE_RELATIONAL = process.env.VITE_USE_RELATIONAL !== "false";
 try {
@@ -1277,8 +1278,12 @@ app.patch("/api/storage/records", async (req, res) => {
       const document = item?.document;
       if (!ALLOWED_STORES.has(collection) || !document || typeof document !== "object") continue;
       for (const st of upsertToStatements(collection, document, nowIso)) {
-        tx.run(st.sql, st.params);
-        relStatements.push(st);
+        // Same per-statement shape the Worker writes: D1 caps a statement at
+        // 100 bound parameters, so a wide record is split rather than 500-ing.
+        for (const chunk of chunkStatement(st)) {
+          tx.run(chunk.sql, chunk.params);
+          relStatements.push(chunk);
+        }
       }
     }
 
@@ -1287,8 +1292,10 @@ app.patch("/api/storage/records", async (req, res) => {
       const documentId = String(item?.documentId || "");
       if (!ALLOWED_STORES.has(collection) || !documentId) continue;
       for (const st of deleteToStatements(collection, documentId)) {
-        tx.run(st.sql, st.params);
-        relStatements.push(st);
+        for (const chunk of chunkStatement(st)) {
+          tx.run(chunk.sql, chunk.params);
+          relStatements.push(chunk);
+        }
       }
     }
 

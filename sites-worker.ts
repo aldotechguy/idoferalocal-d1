@@ -1,4 +1,4 @@
-interface R2ObjectBody {
+﻿interface R2ObjectBody {
   arrayBuffer(): Promise<ArrayBuffer>;
   httpMetadata?: { contentType?: string };
 }
@@ -21,7 +21,7 @@ interface Env extends MallConfig {
   MALL_EMAIL_FROM?: string;
   /** Cloudflare Access staff gate. 'true' enables the SSO session bootstrap. */
   CF_ACCESS_SSO?: string;
-  /** https://<team-name>.cloudflareaccess.com — the JWKS URL and `iss` check. */
+  /** https://<team-name>.cloudflareaccess.com â€” the JWKS URL and `iss` check. */
   CF_ACCESS_TEAM_DOMAIN?: string;
   /** Audience (AUD) tag(s) of the Access applications, comma-separated. */
   CF_ACCESS_AUD?: string;
@@ -66,7 +66,7 @@ interface D1Database {
   batch(statements: D1PreparedStatement[]): Promise<unknown[]>;
 }
 
-// Phase 4 — relational backend for the edge worker. Wrangler bundles this entry
+// Phase 4 â€” relational backend for the edge worker. Wrangler bundles this entry
 // with esbuild, which follows imports, so the mapper/DDL/write builders are the
 // SAME modules server.ts uses (no more duplicated inline logic).
 // Money is INTEGER kobo in D1, naira floats on the wire; frontend contract unchanged.
@@ -95,6 +95,7 @@ import { MALL_SAFETY_DDL, MALL_CATALOG_INDEX_COLUMNS, MALL_CATALOG_INDEXES } fro
 import { bootstrapAdmin } from './src/server/adminBootstrap.js';
 import { handleMallWebhook } from './src/server/mallWebhook.js';
 import type { QueryAll } from './src/server/relationalMapper.js';
+import { chunkStatements } from './src/server/d1StatementLimits.js';
 import { isStaffPage, isPrivateApi, issueEntrance, hasEntrance, revokeEntrance, entranceCookie } from './src/server/staffEntrance.js';
 import { readAccessIdentity, ACCESS_JWT_HEADER, type AccessIdentity } from './src/server/accessJwt.js';
 import { staffSuperAdminSession, staffPrivilegeCheck, staffEditorCheck } from './src/server/staffPrivileges.js';
@@ -110,7 +111,7 @@ function makeD1QueryAll(env: Env): QueryAll {
   };
 }
 
-/** #14 — R2-backed image store for the edge runtime. */
+/** #14 â€” R2-backed image store for the edge runtime. */
 function makeR2ImageStore(env: Env): ImageStore | undefined {
   const bucket = env.MALL_IMAGES;
   if (!bucket) return undefined;
@@ -151,7 +152,7 @@ async function currentWatermark(env: Env): Promise<number> {
       if (Number.isFinite(value)) return value;
     }
   } catch {
-    // settings table absent on a brand-new database — treat as revision 0.
+    // settings table absent on a brand-new database â€” treat as revision 0.
   }
   return 0;
 }
@@ -396,7 +397,7 @@ async function requireAppUser(request: Request, env: Env): Promise<AppUserRow | 
   // An abandoned terminal must stop authorizing private APIs even though the
   // absolute expiry has not passed (docs/staff-access.md). A null/zero
   // `last_seen_at` means the row predates idle tracking, so the mint time is the
-  // baseline — never a fresh full window handed to a session nobody has touched.
+  // baseline â€” never a fresh full window handed to a session nobody has touched.
   const lastSeen = Number(user.session_last_seen || 0) || Number(user.session_created || 0);
   if (lastSeen && sessionIdleExpired(lastSeen, now, idleSeconds)) return null;
   // Touch the row so the next request measures idleness from THIS request. Written
@@ -444,9 +445,9 @@ async function accessIdentityFor(request: Request, env: Env): Promise<AccessIden
 /**
  * True when Cloudflare Access clearly authenticated this request (it injected its
  * signed-assertion header) yet this deployment still cannot read an identity
- * from it. That combination is always a deployment bug — a stale/absent
+ * from it. That combination is always a deployment bug â€” a stale/absent
  * `CF_ACCESS_AUD` tag for THIS hostname, or the gate left disabled on an
- * environment Access still sits in front of — because the only way the header
+ * environment Access still sits in front of â€” because the only way the header
  * reaches the Worker is through an Access application that covers the path.
  *
  * It never means "anonymous": an unauthenticated browser is redirected by the
@@ -463,7 +464,7 @@ function accessGateMisconfigured(request: Request, env: Env) {
 /**
  * Reads the `aud` claim out of the unverified Access assertion, purely to NAME
  * the expected Audience tag in the misconfiguration page above. This value is
- * NEVER used for an authentication decision — `readAccessIdentity` does that, and
+ * NEVER used for an authentication decision â€” `readAccessIdentity` does that, and
  * it verifies the signature, issuer, expiry and audience before anything is
  * trusted. A misleading string here can only produce a misleading error message.
  */
@@ -484,11 +485,11 @@ function accessAudienceFromAssertion(request: Request): string {
 
 /**
  * The operator-facing answer for the state above. A staff PAGE cannot be served
- * (the entrance gate is intact and correct — the identity, not the gate, is
+ * (the entrance gate is intact and correct â€” the identity, not the gate, is
  * misconfigured), so it returns an explicit 503 page naming the hostname and the
  * Audience tag Access is actually minting for it, plus the exact command to fix
  * it. That tag is delivered by the edge inside the JWT `aud` claim, which is why
- * this response — unlike a redirect — makes the broken configuration legible
+ * this response â€” unlike a redirect â€” makes the broken configuration legible
  * without any dashboard access.
  */
 function accessGateMisconfiguredResponse(request: Request) {
@@ -501,7 +502,7 @@ function accessGateMisconfiguredResponse(request: Request) {
     `<main style="max-width:44rem;margin:0 auto">` +
     `<h1 style="font-size:1.5rem;color:#fbbf24">Cloudflare Access is configured, but this deployment of the Worker is not</h1>` +
     `<p>Access authenticated you for <strong>${hostname}</strong>, and then handed the Worker a signed identity it could not verify. ` +
-    `This is a <strong>deployment configuration</strong> problem — your OTP was accepted; the staff gate for this hostname has not been granted the Audience tag Access uses.</p>` +
+    `This is a <strong>deployment configuration</strong> problem â€” your OTP was accepted; the staff gate for this hostname has not been granted the Audience tag Access uses.</p>` +
     `<p>Access is minting this Audience tag for <strong>${hostname}</strong>:</p>` +
     `<pre style="background:#1e293b;padding:.75rem;border-radius:.5rem;overflow-wrap:anywhere;white-space:pre-wrap">${tag}</pre>` +
     `<p>Add it to <code>CF_ACCESS_AUD</code> (comma-separated) in <code>wrangler.toml</code> for whichever environment serves this hostname, ` +
@@ -679,7 +680,7 @@ async function authLogout(request: Request, env: Env) {
  * Lock the workspace: a deliberate AFK action that is NOT a sign-out.
  *
  * The app session stays valid, so unlocking is immediate and needs no password
- * and no second OTP — but the step-up proof is revoked, so the terminal that was
+ * and no second OTP â€” but the step-up proof is revoked, so the terminal that was
  * left unattended cannot be used to change users, roles or passwords without a
  * fresh password. The caller clears its own client state and returns to the
  * staff entrance; nothing here needs a new session.
@@ -699,7 +700,7 @@ async function authLock(request: Request, env: Env) {
  * Where the browser must go to end the CLOUDFLARE ACCESS session, not just the
  * app session. Sign-out is incomplete without it: Access keeps its own
  * `CF_AppSession` cookie, so a 3-second cart hold would walk straight back into
- * the workspace with no OTP at all — which defeats the gate on a shared device.
+ * the workspace with no OTP at all â€” which defeats the gate on a shared device.
  *
  * The team domain lives only on the server, so the client asks rather than
  * hardcoding it. `url: null` means the gate is off (local development), where
@@ -733,7 +734,7 @@ async function upsertAuthUser(request: Request, env: Env) {
   const existingRows = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(id).all<AppUserRow>();
   const existing = existingRows.results?.[0];
   // Same guard as changeAuthPassword: a regular Administrator must never be able
-  // to rewrite the super administrator's profile — the upsert would otherwise
+  // to rewrite the super administrator's profile â€” the upsert would otherwise
   // let them reset the super-admin password (and with it take over the account)
   // or point the protected identity at their own email.
   if (existing?.is_super_admin && !await superAdminSession(request, env, actor)) return json({ error: 'Only the super administrator can modify this account.' }, 403);
@@ -751,7 +752,7 @@ async function upsertAuthUser(request: Request, env: Env) {
     'INSERT INTO app_users (id, email, username, display_name, role, status, avatar_url, password_hash, password_salt, password_iterations, is_super_admin, is_protected, created_at, last_login, password_last_changed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, username=excluded.username, display_name=excluded.display_name, role=excluded.role, status=excluded.status, avatar_url=excluded.avatar_url, password_hash=excluded.password_hash, password_salt=excluded.password_salt, password_iterations=excluded.password_iterations, last_login=excluded.last_login, password_last_changed=excluded.password_last_changed',
   ).bind(id, String(input.email).toLowerCase(), input.username || null, input.displayName, input.role || 'Sales Staff', input.status || 'Active', input.avatarUrl || null, hash, salt, PASSWORD_ITERATIONS, existing?.is_super_admin || 0, existing?.is_protected || 0, input.createdAt || existing?.created_at || new Date().toISOString(), input.lastLogin || existing?.last_login || null, changedAt).run();
   // A password change on another account must revoke that account's sessions,
-  // exactly like changeAuthPassword does — otherwise the old sessions survive
+  // exactly like changeAuthPassword does â€” otherwise the old sessions survive
   // the reset and the takeover is never fully revoked.
   if (password && existing && id !== actor.id) {
     await env.DB.prepare('DELETE FROM app_sessions WHERE user_id = ?').bind(id).run();
@@ -810,14 +811,14 @@ async function changeAuthPassword(request: Request, env: Env) {
 async function verifyAuthPassword(request: Request, env: Env) {
   await ensureAuthSeed(env);
   const actor = await requireAppUser(request, env);
-  if (!actor) return json({error: 'Authentication required.'}, 401);
+  if (!actor) return json({ error: 'Authentication required.' }, 401);
   const body = await readJson(request);
   const targetUser = actor;
   const password = String(body?.password || '');
-  if (!password) return json({error: 'Password is required.'}, 400);
+  if (!password) return json({ error: 'Password is required.' }, 400);
   const candidate = await hashPassword(password, targetUser.password_salt, targetUser.password_iterations);
-  if (!safeEqual(candidate, targetUser.password_hash)) return json({error: 'Incorrect password.'}, 401);
-  return json({ok: true});
+  if (!safeEqual(candidate, targetUser.password_hash)) return json({ error: 'Incorrect password.' }, 401);
+  return json({ ok: true });
 }
 
 /**
@@ -826,7 +827,7 @@ async function verifyAuthPassword(request: Request, env: Env) {
  * (the same bar as deleting a protected account), because the trail is the
  * only record of who did what. The previous client-only `clearAuditLogs`
  * emptied the local IndexedDB copy and left the D1/Drive copy intact, so the
- * "cleared" trail reappeared on the next sync — a silent audit-cover-up.
+ * "cleared" trail reappeared on the next sync â€” a silent audit-cover-up.
  */
 async function clearAuditLogs(request: Request, env: Env) {
   const privileged = await requireSuperAdmin(request, env);
@@ -882,7 +883,7 @@ async function saveSnapshot(request: Request, env: Env) {
   const nowIso = new Date().toISOString();
   const relationalStmts: { sql: string; params: any[] }[] = [];
   // 100% relational full replace: child-first DELETE + upsert per collection.
-  // No document mirror is written — there is nothing to mirror into.
+  // No document mirror is written â€” there is nothing to mirror into.
   for (const [collection, documents] of Object.entries(body.stores)) {
     if (!ALLOWED_STORES.has(collection) || !Array.isArray(documents)) continue;
     relationalStmts.push(...replaceCollectionStatements(collection, documents, nowIso));
@@ -927,6 +928,82 @@ async function runStatements(env: Env, statements: D1PreparedStatement[]) {
 }
 
 /**
+ * Prepared-statement dispatch for mapper output. Statements over D1's
+ * 100-bound-parameter cap are split by chunkStatements (d1StatementLimits.ts),
+ * then sent in batches of 50.
+ */
+async function writeStatements(env: Env, stmts: { sql: string; params?: any[] }[]) {
+  const prepared: D1PreparedStatement[] = [];
+  for (const chunk of chunkStatements(stmts)) {
+    prepared.push(env.DB.prepare(chunk.sql).bind(...chunk.params));
+  }
+  for (let offset = 0; offset < prepared.length; offset += 50) {
+    await env.DB.batch(prepared.slice(offset, offset + 50));
+  }
+}
+
+/**
+ * Repair a UNIQUE constraint collision by freeing the value from the OTHER row
+ * that holds it. Only `sales.receipt_no` is handled: it is the one unique
+ * business value the client generates per record, so a duplicate invoice number
+ * (a reused number, an import, a second till) would otherwise reject that sale
+ * on every sync and never reach the store.
+ *
+ * The colliding row keeps its own identity (id, receipt number in its document)
+ * and gets a unique placeholder, so the incoming sale can keep the real number.
+ * Returns false when nothing could be freed — the caller then reports the
+ * original failure instead of silently dropping the write.
+ */
+/** The `receipt_no` values and sale ids this batch is about to write. */
+function saleReceiptKeys(upserts: any[]): string[] {
+  const keys: string[] = [];
+  for (const item of upserts) {
+    if (String(item?.collection || '') !== 'sales') continue;
+    const document = item?.document;
+    if (!document || typeof document !== 'object') continue;
+    const id = String(document.id || '');
+    const receipt = String(document.invoiceNo || '').trim();
+    if (!receipt || !id) continue;
+    if (receipt === '-' || /^n\/?a$/i.test(receipt)) continue;
+    keys.push(receipt, `${id}\u0000${receipt}`);
+  }
+  return keys;
+}
+
+async function resolveUniqueCollisions(env: Env, message: string, incoming: string[]): Promise<boolean> {
+  const match = /UNIQUE constraint failed: (\w+)\.(\w+)/i.exec(message);
+  if (!match || match[1] !== 'sales' || match[2] !== 'receipt_no') return false;
+  const receipts = [...new Set(incoming.filter(Boolean))];
+  if (!receipts.length) return false;
+  // A value already in the table is only reported if it is a REPEAT of a value
+  // this batch is already writing, so we must free it from the OTHER row. Rows
+  // being written by this batch itself keep their number.
+  const holders = await makeD1QueryAll(env)(
+    `SELECT id, receipt_no FROM sales WHERE receipt_no IN (${receipts.map(() => '?').join(', ')})`,
+    receipts,
+  ).catch((error) => {
+    console.warn('Unique receipt lookup failed:', error instanceof Error ? error.message : error);
+    return [];
+  }) as { id: string; receipt_no: string }[];
+  // Rows this very batch is writing are not the obstacle: they are being
+  // updated in place. Only a DIFFERENT row holding the number must be freed.
+  const writers = new Set(incoming);
+  const obstacleRows = holders.filter((row) => !writers.has(`${row.id}\u0000${row.receipt_no}`));
+  if (!obstacleRows.length) return false;
+  const stmts = obstacleRows.map((row) => ({
+    sql: 'UPDATE sales SET receipt_no = ? WHERE id = ? AND receipt_no = ?',
+    params: [`${String(row.receipt_no)}#dup-${String(row.id)}`.slice(0, 190), row.id, row.receipt_no],
+  }));
+  try {
+    await writeStatements(env, stmts);
+  } catch (error) {
+    console.warn('Unique receipt repair failed:', error instanceof Error ? error.message : error);
+    return false;
+  }
+  return true;
+}
+
+/**
  * Snapshot revalidation. The Dashboard read the whole store (1,592 documents /
  * ~554 KB) on every boot even when nothing had changed since its last read.
  * The revision already bumps on every snapshot write, so it is a sound
@@ -954,7 +1031,7 @@ function snapshotResponse(body: Record<string, unknown>, revision: number, backe
 async function readSnapshot(request: Request, env: Env) {
   await ensureSchema(env);
   // 100% relational: the snapshot is built from the relational tables only. The
-  // legacy `app_documents` fallback is REMOVED — there is no document mirror.
+  // legacy `app_documents` fallback is REMOVED â€” there is no document mirror.
   const revision = await currentWatermark(env);
   if (snapshotNotModified(request, revision, 'relational')) return snapshotUnchanged(revision, 'relational');
   const { stores, capped } = await buildSnapshot(makeD1QueryAll(env));
@@ -984,7 +1061,7 @@ async function patchRecords(request: Request, env: Env) {
   const nowIso = new Date(now).toISOString();
   // Mirror-less PATCH (option B): a staff edit writes ONLY the relational rows
   // it changes. The app_documents mirror no longer receives per-edit upserts or
-  // deletes — snapshot PUTs keep it current — so a PATCH stops paying the mirror
+  // deletes â€” snapshot PUTs keep it current â€” so a PATCH stops paying the mirror
   // rewrite on every index entry it touches plus the 50-row probe pages that
   // pre-read every candidate from the mirror. The unchanged re-push guard went
   // with the probe: it compared against mirror payloads that PATCHes no longer
@@ -1010,18 +1087,38 @@ async function patchRecords(request: Request, env: Env) {
   // Write the relational rows FIRST and only bump the watermark when they are
   // actually in place. Bumping first meant a failed relational batch still
   // answered ok:true with a moved revision: the client acked its keys and never
-  // retried, while the revision-guarded full read 304'd the pre-write world — the
+  // retried, while the revision-guarded full read 304'd the pre-write world â€” the
   // record was lost on every device. A failure now leaves the revision untouched
   // and answers 5xx, so the client keeps its dirty keys and retries.
   try {
-    await runStatements(env, toD1Statements(env, relationalStmts));
+    await writeStatements(env, relationalStmts);
   } catch (error) {
     const relationalError = error instanceof Error ? error.message : String(error);
-    console.warn('Relational record write failed:', relationalError);
-    return json({
-      error: 'The live catalog update failed; no records were written and the revision is unchanged. Retry the sync.',
-      relationalError,
-    }, 500);
+    // A UNIQUE collision is a property of the STORED data, not of this batch:
+    // a duplicate invoice number must not lock that sale out of the device
+    // forever. Resolve it against the row that actually holds the value and
+    // retry ONCE; any other failure is reported as before.
+    const repaired = /UNIQUE constraint failed/.test(relationalError)
+      ? await resolveUniqueCollisions(env, relationalError, saleReceiptKeys(upserts))
+      : false;
+    if (repaired) {
+      try {
+        await writeStatements(env, relationalStmts);
+      } catch (retryError) {
+        const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+        console.warn('Relational record write failed after a unique repair:', retryMessage);
+        return json({
+          error: 'The live catalog update failed; no records were written and the revision is unchanged. Retry the sync.',
+          relationalError: retryMessage,
+        }, 500);
+      }
+    } else {
+      console.warn('Relational record write failed:', relationalError);
+      return json({
+        error: 'The live catalog update failed; no records were written and the revision is unchanged. Retry the sync.',
+        relationalError,
+      }, 500);
+    }
   }
   const revision = Math.max(now, (await currentWatermark(env)) + 1);
   await bumpWorkerWatermark(env, revision);
@@ -1236,7 +1333,7 @@ export default {
         // Cloudflare Access identity: after Access signs the caller in at the
         // edge, the SPA shell must load so /api/auth/session can mint the app
         // session the API handlers below require. APIs still need an entrance
-        // or a session — a JWT alone authorizes nothing, exactly like the edge
+        // or a session â€” a JWT alone authorizes nothing, exactly like the edge
         // contract.
         let entrance = login ? true : await hasEntrance(cookie, query);
         if (!entrance && staffPage && env.CF_ACCESS_SSO === 'true') {
@@ -1260,7 +1357,7 @@ export default {
       if (url.pathname === '/api/health') return json({ status: 'ok', app: 'IdoferaLabs API', timestamp: new Date().toISOString() });
       if (url.pathname === '/api/money-engine/health') {
         // Public proof of which implementation answers money checks. Reports
-        // names and versions only — never the URL, token, or fallback reasons.
+        // names and versions only â€” never the URL, token, or fallback reasons.
         const config = getRemoteMoneyEngineConfig();
         const identity = await probeRemoteEngine(config);
         if (identity) markRemoteEngineReachable();
@@ -1313,7 +1410,7 @@ export default {
           // Server-measured, reported so the client can grade on it. Without
           // this key the client's `data.latencyMs` was always undefined and it
           // silently fell back to round-trip time, which getLatencyBadge()
-          // classifies into its sub-150ms bands — so a healthy connection was
+          // classifies into its sub-150ms bands â€” so a healthy connection was
           // drawn as 'Normal' or 'High Latency' by the badge.
           latencyMs: Math.max(1, Math.round(performance.now() - healthStart)),
           endpoint: 'Cloudflare D1 Edge Worker',
@@ -1379,7 +1476,7 @@ export default {
           },
         }, { id: actor.id, displayName: actor.display_name, role: actor.role });
       }
-      // #18 — email notification webhook receiver (public, HMAC-signed).
+      // #18 â€” email notification webhook receiver (public, HMAC-signed).
       if (request.method === 'POST' && url.pathname === '/api/mall-webhook') {
         await ensureSchema(env);
         return await handleMallWebhook(request, env);
@@ -1399,7 +1496,7 @@ export default {
         });
       }
       if (url.pathname.startsWith('/api/')) return json({ error: 'Not found' }, 404);
-      // #14 — public, immutable product images (served from R2, never the asset bucket).
+      // #14 â€” public, immutable product images (served from R2, never the asset bucket).
       if (url.pathname.startsWith('/mall-images/')) {
         return await handlePublicImageRequest(request, makeR2ImageStore(env), decodeURIComponent(url.pathname.slice('/mall-images/'.length)));
       }

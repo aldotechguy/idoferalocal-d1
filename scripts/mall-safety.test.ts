@@ -1349,6 +1349,49 @@ test('PATCH re-push bumps the watermark and writes only the relational row', asy
     'PATCHes write the relational catalogue row');
 });
 
+test('a sale whose duplicate invoice number collides on UNIQUE receipt_no still syncs', async (t) => {
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };
+  await worker.fetch(new Request('http://test/api/mall/health'), env);
+  const token = 'dup-receipt-session';
+  const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))]
+    .map((b) => b.toString(16).padStart(2, '0')).join('');
+  db.prepare(`INSERT INTO app_users(id,email,display_name,role,status,password_hash,password_salt,created_at)
+    VALUES ('dup-staff','dup@test.invalid','Manager','Administrator','Active','x','y','now')`).run();
+  db.prepare('INSERT INTO app_sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)')
+    .run(hash, 'dup-staff', Date.now(), Date.now() + 60000);
+  db.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES ('sync_watermark', ?, ?)`)
+    .run(JSON.stringify(50), Date.now());
+  const cookie = { cookie: `idofera_session=${token}` };
+  const sale = (id: string, invoiceNo: string) => ({
+    id, invoiceNo, totalAmount: 10, createdAt: '2026-01-01T00:00:00.000Z',
+    items: [{ productId: 'p', productName: 'P', quantity: 1, unitPrice: 10, total: 10 }],
+  });
+  const patch = (document: unknown) => worker.fetch(new Request('http://test/api/storage/records', {
+    method: 'PATCH',
+    headers: { ...cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ upserts: [{ collection: 'sales', document }], deletes: [] }),
+  }), env);
+
+  // A sale already holds INV-SHARED, then a second sale arrives with the same
+  // number (the reported sale-1793649193224 style id) and must still be stored.
+  const first = sale('sale-original', 'INV-SHARED');
+  const second = sale('sale-1793649193224-687848-ww1fi', 'INV-SHARED');
+  assert.equal((await patch(first)).status, 200, 'the first sale stores its invoice');
+  const secondResponse = await patch(second);
+  assert.equal(secondResponse.status, 200, 'the duplicate invoice no longer rejects the sync');
+
+  const rows = db.prepare('SELECT id, receipt_no FROM sales ORDER BY id').all() as any[];
+  assert.equal(rows.length, 2, 'both sales are stored');
+  const stored = rows.find((row) => row.id === 'sale-1793649193224-687848-ww1fi');
+  assert.equal(stored?.receipt_no, 'INV-SHARED', 'the incoming sale keeps the real invoice number');
+  const original = rows.find((row) => row.id === 'sale-original');
+  assert.notEqual(original?.receipt_no, 'INV-SHARED', 'the row that held the number is freed to a unique placeholder');
+  assert.match(original?.receipt_no, /^INV-SHARED#dup-sale-original/, 'the freed number stays traceable');
+  const receiptIndex = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='sales_receipt_no_unique'").get();
+  assert.ok(receiptIndex, 'the unique index the repair must satisfy still exists');
+});
+
 test('incremental relational upsert keeps orphans out without rewriting unchanged lines', async (t) => {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   const env: any = { DB: new SqliteD1(db), ASSETS: { fetch: async () => new Response('asset') } };

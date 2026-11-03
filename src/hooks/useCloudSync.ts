@@ -24,6 +24,7 @@ import { useToast } from '../context/ToastContext';
 import { ALL_STORES, getAllItems, getItem, type StoreName } from '../db/indexedDB';
 import {
   syncLocalRecordsToD1,
+  pushStoreOrIsolate,
   checkD1Health,
   autoSyncChangedRecords,
   registerAutoSyncFlush,
@@ -207,7 +208,17 @@ export function useCloudSync() {
       }
       const versions = captureUnsyncedItemVersions(keys);
       const result = await autoSyncChangedRecords(changes, deps);
-      if (result.pushed || result.skipped === 'not-newer') acknowledgeUnsyncedItemKeys(versions);
+      if (result.pushed || result.skipped === 'not-newer') {
+        acknowledgeUnsyncedItemKeys(versions);
+      } else {
+        // A batch-level retry only acked the records D1 actually accepted; the
+        // rejected one must stay pending so the next flush (and the manual sync)
+        // keeps reporting it instead of silently dropping an edit.
+        const accepted = new Set(result.accepted || []);
+        if (accepted.size) acknowledgeUnsyncedItemKeys(Object.fromEntries(
+          Object.entries(versions).filter(([key]) => accepted.has(key)),
+        ));
+      }
     } catch (error) {
       console.warn('Automatic save failed:', error);
     }
@@ -283,11 +294,22 @@ export function useCloudSync() {
           }
           return [store, records.filter((record) => changedKeys.has(`${store}:${record.id}`))] as const;
         }));
-        await syncLocalRecordsToD1(Object.fromEntries(entries) as D1Snapshot);
+        const accepted = await pushStoreOrIsolate(Object.fromEntries(entries) as D1Snapshot);
         if (forceFull && changedKeys.size === 0) {
-          clearUnsyncedLocalChanges();
+          // A full push that had to isolate a rejected record is NOT a clean
+          // sync: keep the pending queue so the failure stays visible.
+          if (accepted === null) clearUnsyncedLocalChanges();
         } else {
-          acknowledgeUnsyncedItemKeys(submittedVersions);
+          acknowledgeUnsyncedItemKeys(accepted === null
+            ? submittedVersions
+            : Object.fromEntries(Object.entries(submittedVersions).filter(([key]) => accepted.has(key))));
+        }
+        if (accepted !== null) {
+          showToast({
+            title: 'Some Changes Did Not Sync',
+            message: `${accepted.size === 0 ? 'No record' : `${accepted.size} record${accepted.size === 1 ? '' : 's'}`} saved, but at least one was rejected by the database. Those edits are still pending — retry after fixing them, or contact support with the reason shown in the console.`,
+            type: 'warning',
+          });
         }
       }
 
