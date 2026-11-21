@@ -27,6 +27,8 @@ import {
   ArrowLeftRight,
   SlidersHorizontal,
   Link2,
+  Play,
+  Zap,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -47,15 +49,73 @@ import {
   RepaymentStructure,
   ReturnModel,
   SavedSimulation,
+  ActiveInvestmentCampaign,
+  InvestmentSimulationResult,
 } from '../../types/investment';
-import { simulateInvestment, calculateSalesVelocity } from '../../utils/investmentEngine';
+import { simulateInvestment, calculateSalesVelocity, startCampaignFromSimulation } from '../../utils/investmentEngine';
 import { InvestorProposalModal } from '../modals/InvestorProposalModal';
 import { SwapProductModal } from '../modals/SwapProductModal';
+import { StartCampaignModal } from '../modals/StartCampaignModal';
+import { ActiveCampaignTrackerView } from './ActiveCampaignTrackerView';
 
 export const InvestmentPlannerView: React.FC = () => {
   const { products, sales, settings } = useApp();
   const { isPrivacyMode } = useAuth();
   const cs = settings.currencySymbol || '₦';
+
+  // --- Main View Mode (Simulator vs Live Tracker) ---
+  const [activeMainTab, setActiveMainTab] = useState<'simulator' | 'tracker'>('simulator');
+  const [isStartCampaignModalOpen, setIsStartCampaignModalOpen] = useState<boolean>(false);
+  const [campaignModalSourceSimulation, setCampaignModalSourceSimulation] = useState<{
+    simulation: InvestmentSimulationResult;
+    scenarioName?: string;
+    scenarioId?: string;
+  } | null>(null);
+
+  // Active campaigns in localStorage
+  const [activeCampaigns, setActiveCampaigns] = useState<ActiveInvestmentCampaign[]>(() => {
+    try {
+      const stored = localStorage.getItem('idofera_active_investment_campaigns');
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const handleUpdateCampaign = (updated: ActiveInvestmentCampaign) => {
+    setActiveCampaigns((prev) => {
+      const next = prev.map((c) => (c.id === updated.id ? updated : c));
+      try {
+        localStorage.setItem('idofera_active_investment_campaigns', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const handleLaunchCampaign = (
+    campaignName: string,
+    investorName: string,
+    investorContact: string,
+    startDate: string
+  ) => {
+    const targetSim = campaignModalSourceSimulation?.simulation || simulation;
+    const newCamp = startCampaignFromSimulation(targetSim, campaignName, {
+      investorName,
+      investorContact,
+      startDate,
+      strategy,
+      scenarioId: campaignModalSourceSimulation?.scenarioId,
+    });
+
+    const next = [newCamp, ...activeCampaigns];
+    setActiveCampaigns(next);
+    try {
+      localStorage.setItem('idofera_active_investment_campaigns', JSON.stringify(next));
+    } catch {}
+    setIsStartCampaignModalOpen(false);
+    setCampaignModalSourceSimulation(null);
+    setActiveMainTab('tracker');
+  };
 
   // --- Input Parameters State ---
   const [investmentAmount, setInvestmentAmount] = useState<number>(5000000);
@@ -312,114 +372,199 @@ export const InvestmentPlannerView: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Top Banner & Header */}
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xs">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="flex items-start sm:items-center gap-3.5">
-            <div className="p-3 bg-gradient-to-br from-emerald-500/10 to-teal-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 rounded-2xl shrink-0">
-              <TrendingUp className="w-6 h-6" />
-            </div>
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <h1 className="text-xl font-black text-slate-900 dark:text-white tracking-tight">
-                  Capital Investment & Inventory Planner
-                </h1>
-                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                  Data-Backed Simulator
-                </span>
-              </div>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-2xl">
-                Simulate capital injections, allocate funds across fast-turnover stock, project investor payout milestones, and produce executive term sheets.
-              </p>
-            </div>
-          </div>
+      {/* Mode Switcher Tabs (Simulator vs Live Tracker) */}
+      <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-3">
+        <button
+          onClick={() => setActiveMainTab('simulator')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+            activeMainTab === 'simulator'
+              ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900 shadow-sm'
+              : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+          }`}
+        >
+          <SlidersHorizontal className="w-4 h-4" />
+          <span>Simulator & Strategy Planner</span>
+        </button>
 
-          <div className="flex flex-wrap items-center gap-2.5">
-            {/* Save scenario trigger */}
-            {!isSavingScenario ? (
-              <button
-                onClick={() => setIsSavingScenario(true)}
-                className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-semibold transition-all cursor-pointer"
-              >
-                <Bookmark className="w-3.5 h-3.5 text-slate-500" />
-                <span>Save Scenario</span>
-              </button>
-            ) : (
-              <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl border border-slate-300 dark:border-slate-700">
-                <input
-                  type="text"
-                  placeholder="Scenario name (e.g. 5M Growth)..."
-                  value={scenarioNameInput}
-                  onChange={(e) => setScenarioNameInput(e.target.value)}
-                  className="px-2 py-1 text-xs bg-transparent focus:outline-none text-slate-900 dark:text-white w-44"
-                  autoFocus
-                />
-                <button
-                  onClick={handleSaveScenario}
-                  disabled={!scenarioNameInput.trim()}
-                  className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold disabled:opacity-50 cursor-pointer"
-                >
-                  Save
-                </button>
-                <button
-                  onClick={() => setIsSavingScenario(false)}
-                  className="px-2 py-1 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 text-xs"
-                >
-                  Cancel
-                </button>
-              </div>
-            )}
+        <button
+          onClick={() => setActiveMainTab('tracker')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+            activeMainTab === 'tracker'
+              ? 'bg-emerald-600 text-white shadow-sm'
+              : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+          }`}
+        >
+          <Zap className="w-4 h-4" />
+          <span>Live Campaign Tracker</span>
+          {activeCampaigns.length > 0 && (
+            <span className="px-1.5 py-0.5 rounded-full text-[10px] font-black bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+              {activeCampaigns.filter((c) => c.status === 'active').length}
+            </span>
+          )}
+        </button>
+      </div>
 
-            {/* Saved Scenarios Picker */}
-            {savedScenarios.length > 0 && (
-              <div className="relative group">
-                <button className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-semibold transition-all cursor-pointer">
-                  <BookmarkCheck className="w-3.5 h-3.5 text-blue-500" />
-                  <span>Saved ({savedScenarios.length})</span>
-                  <ChevronDown className="w-3 h-3 text-slate-400" />
-                </button>
-                <div className="absolute right-0 top-full mt-1.5 w-64 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl p-2 hidden group-hover:block z-30 space-y-1">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 px-2 py-1">
-                    Load Saved Scenario
+      {activeMainTab === 'tracker' ? (
+        <ActiveCampaignTrackerView
+          campaigns={activeCampaigns}
+          onUpdateCampaign={handleUpdateCampaign}
+          sales={sales}
+          products={products}
+          currencySymbol={cs}
+          onNavigateToSimulator={() => setActiveMainTab('simulator')}
+        />
+      ) : (
+        <>
+          {/* Top Banner & Header */}
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xs">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              <div className="flex items-start sm:items-center gap-3.5">
+                <div className="p-3 bg-gradient-to-br from-emerald-500/10 to-teal-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 rounded-2xl shrink-0">
+                  <TrendingUp className="w-6 h-6" />
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h1 className="text-xl font-black text-slate-900 dark:text-white tracking-tight">
+                      Capital Investment & Inventory Planner
+                    </h1>
+                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                      Data-Backed Simulator
+                    </span>
                   </div>
-                  {savedScenarios.map((scen) => (
-                    <div
-                      key={scen.id}
-                      className="flex items-center justify-between p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700/60 text-xs"
-                    >
-                      <button
-                        onClick={() => handleLoadScenario(scen)}
-                        className="text-left flex-1 font-medium text-slate-800 dark:text-slate-200 hover:text-blue-600 truncate"
-                      >
-                        <div className="truncate">{scen.name}</div>
-                        <div className="text-[10px] text-slate-400 font-mono">
-                          {cs}{scen.investmentAmount.toLocaleString()} • {scen.tenureMonths}mo
-                        </div>
-                      </button>
-                      <button
-                        onClick={() => handleDeleteScenario(scen.id)}
-                        className="text-slate-400 hover:text-rose-500 p-1"
-                        title="Delete"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  ))}
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-2xl">
+                    Simulate capital injections, allocate funds across fast-turnover stock, project investor payout milestones, and produce executive term sheets.
+                  </p>
                 </div>
               </div>
-            )}
 
-            {/* Export Proposal Button */}
-            <button
-              onClick={() => setIsProposalModalOpen(true)}
-              className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-xl text-xs font-bold shadow-md shadow-blue-500/20 transition-all cursor-pointer"
-            >
-              <FileText className="w-4 h-4" />
-              <span>Generate Investor Proposal</span>
-            </button>
+              <div className="flex flex-wrap items-center gap-2.5">
+                {/* Save scenario trigger */}
+                {!isSavingScenario ? (
+                  <button
+                    onClick={() => setIsSavingScenario(true)}
+                    className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-semibold transition-all cursor-pointer"
+                  >
+                    <Bookmark className="w-3.5 h-3.5 text-slate-500" />
+                    <span>Save Scenario</span>
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl border border-slate-300 dark:border-slate-700">
+                    <input
+                      type="text"
+                      placeholder="Scenario name (e.g. 5M Growth)..."
+                      value={scenarioNameInput}
+                      onChange={(e) => setScenarioNameInput(e.target.value)}
+                      className="px-2 py-1 text-xs bg-transparent focus:outline-none text-slate-900 dark:text-white w-44"
+                      autoFocus
+                    />
+                    <button
+                      onClick={handleSaveScenario}
+                      disabled={!scenarioNameInput.trim()}
+                      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold disabled:opacity-50 cursor-pointer"
+                    >
+                      Save
+                    </button>
+                    <button
+                      onClick={() => setIsSavingScenario(false)}
+                      className="px-2 py-1 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 text-xs"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+
+                {/* Saved Scenarios Picker */}
+                {savedScenarios.length > 0 && (
+                  <div className="relative group">
+                    <button className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-semibold transition-all cursor-pointer">
+                      <BookmarkCheck className="w-3.5 h-3.5 text-blue-500" />
+                      <span>Saved ({savedScenarios.length})</span>
+                      <ChevronDown className="w-3 h-3 text-slate-400" />
+                    </button>
+                    <div className="absolute right-0 top-full mt-1.5 w-72 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl p-2 hidden group-hover:block z-30 space-y-1">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 px-2 py-1">
+                        Load or Start Saved Scenario
+                      </div>
+                      {savedScenarios.map((scen) => (
+                        <div
+                          key={scen.id}
+                          className="flex items-center justify-between p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700/60 text-xs gap-2"
+                        >
+                          <button
+                            onClick={() => handleLoadScenario(scen)}
+                            className="text-left flex-1 font-medium text-slate-800 dark:text-slate-200 hover:text-blue-600 truncate"
+                          >
+                            <div className="truncate">{scen.name}</div>
+                            <div className="text-[10px] text-slate-400 font-mono">
+                              {cs}{scen.investmentAmount.toLocaleString()} • {scen.tenureMonths}mo
+                            </div>
+                          </button>
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const sim = simulateInvestment(products, sales, {
+                                  investmentAmount: scen.investmentAmount,
+                                  tenureMonths: scen.tenureMonths,
+                                  payoutFrequency: scen.payoutFrequency,
+                                  returnModel: scen.returnModel,
+                                  repaymentStructure: scen.repaymentStructure,
+                                  yieldRate: scen.yieldRate,
+                                  strategy: scen.strategy,
+                                  lookbackDays: scen.lookbackDays,
+                                });
+                                setCampaignModalSourceSimulation({
+                                  simulation: sim,
+                                  scenarioName: scen.name,
+                                  scenarioId: scen.id,
+                                });
+                                setIsStartCampaignModalOpen(true);
+                              }}
+                              className="p-1 hover:bg-emerald-100 dark:hover:bg-emerald-950 text-emerald-600 dark:text-emerald-400 rounded-md"
+                              title="Start Live Campaign from this scenario"
+                            >
+                              <Play className="w-3.5 h-3.5 fill-current" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteScenario(scen.id)}
+                              className="text-slate-400 hover:text-rose-500 p-1"
+                              title="Delete"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Export Proposal Button */}
+                <button
+                  onClick={() => setIsProposalModalOpen(true)}
+                  className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                >
+                  <FileText className="w-4 h-4 text-blue-500" />
+                  <span>Proposal</span>
+                </button>
+
+                {/* Start Live Campaign Button */}
+                <button
+                  onClick={() => {
+                    setCampaignModalSourceSimulation({
+                      simulation,
+                      scenarioName: scenarioNameInput.trim() || undefined,
+                    });
+                    setIsStartCampaignModalOpen(true);
+                  }}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition-all cursor-pointer"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>Start Campaign</span>
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
-      </div>
 
       {/* Main Grid: Control Panel (Left/Top) & KPI Summary (Right/Top) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -1281,6 +1426,23 @@ export const InvestmentPlannerView: React.FC = () => {
           </div>
         </div>
       </div>
+        </>
+      )}
+
+      {/* Start Live Campaign Modal */}
+      <StartCampaignModal
+        isOpen={isStartCampaignModalOpen}
+        onClose={() => {
+          setIsStartCampaignModalOpen(false);
+          setCampaignModalSourceSimulation(null);
+        }}
+        simulation={campaignModalSourceSimulation?.simulation || simulation}
+        strategy={strategy}
+        scenarioName={campaignModalSourceSimulation?.scenarioName}
+        scenarioId={campaignModalSourceSimulation?.scenarioId}
+        onConfirmLaunch={handleLaunchCampaign}
+        currencySymbol={cs}
+      />
 
       {/* Printable Investor Proposal Modal */}
       <InvestorProposalModal

@@ -8,6 +8,14 @@ import {
   ReturnModel,
   ReturnModelComparisonItem,
   InvestmentSimulationResult,
+  ActiveCampaignProduct,
+  ActiveInvestmentCampaign,
+  CampaignAttributedSale,
+  CampaignLiveProgress,
+  CampaignMilestone,
+  CampaignSkuSubstitution,
+  ProductLiveTracking,
+  SkuReplacementCandidate,
 } from '../types/investment';
 
 export interface CalculationParams {
@@ -502,5 +510,624 @@ export function simulateInvestment(
     allocatedProducts: allocated,
     schedule,
     comparison,
+  };
+}
+
+/**
+ * Initializes a live, active investment campaign from a simulation result
+ */
+export function startCampaignFromSimulation(
+  simulation: InvestmentSimulationResult,
+  campaignName: string,
+  options?: {
+    investorName?: string;
+    investorContact?: string;
+    startDate?: string;
+    strategy?: AllocationStrategy;
+    notes?: string;
+    scenarioId?: string;
+  }
+): ActiveInvestmentCampaign {
+  const startedAt = options?.startDate || new Date().toISOString();
+  const startTime = new Date(startedAt).getTime();
+  const tenureDays = simulation.tenureMonths * 30;
+  const targetMaturityDate = new Date(startTime + tenureDays * 24 * 60 * 60 * 1000).toISOString();
+
+  const allocatedProducts: ActiveCampaignProduct[] = simulation.allocatedProducts.map((p) => ({
+    productId: p.productId,
+    productName: p.productName,
+    sku: p.sku,
+    category: p.category,
+    costPrice: p.costPrice,
+    retailPrice: p.retailPrice,
+    marginPerUnit: p.marginPerUnit,
+    marginPct: p.marginPct,
+    initialTargetQty: p.recommendedQty,
+    currentTargetQty: p.recommendedQty,
+    projectedDailyVelocity: p.dailyVelocity,
+    initialAllocatedCapital: p.allocatedCapital,
+    currentAllocatedCapital: p.allocatedCapital,
+    isSubstitutedOut: false,
+  }));
+
+  const milestones: CampaignMilestone[] = simulation.schedule.map((s) => ({
+    periodIndex: s.periodIndex,
+    periodLabel: s.periodLabel,
+    dueDate: s.dueDate,
+    principalDue: s.principalDue,
+    returnDue: s.returnDue,
+    totalDue: s.totalPayout,
+    cumulativePayoutDue: s.cumulativePayout,
+    status: 'pending',
+  }));
+
+  return {
+    id: `camp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    scenarioId: options?.scenarioId,
+    name: campaignName.trim() || `Campaign ${new Date().toLocaleDateString()}`,
+    investorName: options?.investorName?.trim(),
+    investorContact: options?.investorContact?.trim(),
+    status: 'active',
+    createdAt: new Date().toISOString(),
+    startedAt,
+    tenureMonths: simulation.tenureMonths,
+    targetMaturityDate,
+    investmentAmount: simulation.investmentAmount,
+    payoutFrequency: simulation.payoutFrequency,
+    returnModel: simulation.returnModel,
+    repaymentStructure: simulation.repaymentStructure,
+    yieldRate: simulation.yieldRate,
+    strategy: options?.strategy || 'balanced',
+    allocatedProducts,
+    milestones,
+    substitutionHistory: [],
+    notes: options?.notes,
+  };
+}
+
+/**
+ * Finds top-performing candidate products from catalog to replace a slow or underperforming SKU
+ */
+export function findReplacementCandidates(
+  trappedCapital: number,
+  remainingTenureDays: number,
+  allProducts: Product[],
+  currentCampaignProductIds: string[],
+  salesVelocityMap: Record<string, { unitsSold: number; dailyVelocity: number; revenue: number }>,
+  outgoingVelocity: number,
+  outgoingRemainingProfit: number,
+  outgoingRemainingDays = 60
+): SkuReplacementCandidate[] {
+  const currentSet = new Set(currentCampaignProductIds);
+
+  const candidates: SkuReplacementCandidate[] = [];
+
+  allProducts.forEach((p) => {
+    // Exclude current portfolio and non-salable items
+    if (currentSet.has(p.id)) return;
+    if (p.status === 'Archived') return;
+    if (p.costPrice <= 0 || p.retailPrice <= p.costPrice) return;
+
+    const stats = salesVelocityMap[p.id] || { unitsSold: 0, dailyVelocity: 0, revenue: 0 };
+    const velocity = stats.dailyVelocity > 0 ? stats.dailyVelocity : 0.15;
+    const marginPerUnit = p.retailPrice - p.costPrice;
+    const marginPct = Number(((marginPerUnit / p.retailPrice) * 100).toFixed(1));
+
+    // Calculate purchasing power and runout fit
+    const affordableUnits = Math.max(1, Math.floor(trappedCapital / p.costPrice));
+    const demandCeiling = Math.max(5, Math.ceil(velocity * Math.max(14, remainingTenureDays) * 1.2));
+    const recommendedUnits = Math.min(affordableUnits, demandCeiling);
+
+    if (recommendedUnits <= 0) return;
+
+    const projectedBatchCost = recommendedUnits * p.costPrice;
+    const projectedBatchRevenue = recommendedUnits * p.retailPrice;
+    const projectedBatchProfit = projectedBatchRevenue - projectedBatchCost;
+    const runOutDays = Math.max(1, Math.round(recommendedUnits / Math.max(0.05, velocity)));
+
+    const velocityMultiplier = Number((velocity / Math.max(0.05, outgoingVelocity)).toFixed(1));
+    const profitBoostDelta = Math.round(projectedBatchProfit - outgoingRemainingProfit);
+    const turnoverDaysSaved = Math.max(0, outgoingRemainingDays - runOutDays);
+
+    // Composite Replacement Score: Weighted by velocity, margin, and profit boost
+    const compositeScore = Number(
+      (
+        velocity * 30 +
+        marginPct * 0.4 +
+        (projectedBatchProfit / Math.max(1, trappedCapital)) * 40
+      ).toFixed(1)
+    );
+
+    const confidenceRating: 'High' | 'Moderate' =
+      velocity >= 0.5 && marginPct >= 20 ? 'High' : 'Moderate';
+
+    candidates.push({
+      productId: p.id,
+      productName: p.name,
+      sku: p.sku,
+      category: p.category || 'General',
+      costPrice: p.costPrice,
+      retailPrice: p.retailPrice,
+      marginPerUnit,
+      marginPct,
+      dailyVelocity: Number(velocity.toFixed(2)),
+      affordableUnits,
+      recommendedUnits,
+      projectedBatchCost,
+      projectedBatchRevenue,
+      projectedBatchProfit,
+      runOutDays,
+      compositeScore,
+      velocityMultiplier,
+      profitBoostDelta,
+      turnoverDaysSaved,
+      confidenceRating,
+    });
+  });
+
+  // Sort descending by composite score
+  candidates.sort((a, b) => b.compositeScore - a.compositeScore);
+
+  return candidates.slice(0, 5);
+}
+
+/**
+ * Derives real-time campaign progress, capital recovery, velocity pacing, and alerts from sales
+ */
+export function calculateCampaignLiveProgress(
+  campaign: ActiveInvestmentCampaign,
+  sales: Sale[],
+  allProducts: Product[],
+  now = new Date()
+): CampaignLiveProgress {
+  const startTime = new Date(campaign.startedAt).getTime();
+  const currentTime = now.getTime();
+  const tenureDays = campaign.tenureMonths * 30;
+  const daysElapsed = Math.max(1, Math.round((currentTime - startTime) / (24 * 60 * 60 * 1000)));
+  const daysRemaining = Math.max(0, tenureDays - daysElapsed);
+  const progressPct = Math.min(100, Number(((daysElapsed / tenureDays) * 100).toFixed(1)));
+
+  // Fast product lookup map
+  const campaignProductMap = new Map<string, ActiveCampaignProduct>();
+  campaign.allocatedProducts.forEach((p) => {
+    campaignProductMap.set(p.productId, p);
+  });
+
+  // Map to track allocated units depleted per product (to enforce lot ceiling)
+  const productDepletedMap = new Map<
+    string,
+    {
+      unitsSold: number;
+      grossRevenue: number;
+      cogsRecovered: number;
+      realizedGrossProfit: number;
+      salesCount: number;
+    }
+  >();
+
+  campaign.allocatedProducts.forEach((p) => {
+    productDepletedMap.set(p.productId, {
+      unitsSold: 0,
+      grossRevenue: 0,
+      cogsRecovered: 0,
+      realizedGrossProfit: 0,
+      salesCount: 0,
+    });
+  });
+
+  // Filter and sort sales chronologically ascending for precise lot accounting & break-even detection
+  const relevantSales = sales
+    .filter((s) => {
+      const saleTime = new Date(s.createdAt).getTime();
+      return (
+        !isNaN(saleTime) &&
+        saleTime >= startTime &&
+        saleTime <= currentTime &&
+        s.status !== 'Refunded' &&
+        s.status !== 'Held'
+      );
+    })
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+  const attributedSales: CampaignAttributedSale[] = [];
+  let runningPrincipalRecovered = 0;
+  let principalBreakEvenDate: string | undefined = undefined;
+
+  relevantSales.forEach((s) => {
+    (s.items || []).forEach((item) => {
+      if (!item.productId) return;
+      const campProd = campaignProductMap.get(item.productId);
+      if (!campProd) return;
+
+      const tracking = productDepletedMap.get(item.productId);
+      if (!tracking) return;
+
+      // Net quantity factoring in returns
+      const netItemQty = Math.max(0, (Number(item.quantity) || 1) - (Number(item.returnedQuantity) || 0));
+      if (netItemQty <= 0) return;
+
+      // Lot ceiling: attribute up to currentTargetQty
+      const availableCap = Math.max(0, campProd.currentTargetQty - tracking.unitsSold);
+      const attributedQty = Math.min(netItemQty, availableCap);
+
+      if (attributedQty <= 0) return;
+
+      const unitSellingPrice = Number(item.unitPrice) || campProd.retailPrice;
+      const unitCost = campProd.costPrice;
+      const rev = attributedQty * unitSellingPrice;
+      const cogs = attributedQty * unitCost;
+      const profit = rev - cogs;
+
+      tracking.unitsSold += attributedQty;
+      tracking.grossRevenue += rev;
+      tracking.cogsRecovered += cogs;
+      tracking.realizedGrossProfit += profit;
+      tracking.salesCount++;
+
+      // Return accrual for this sale item
+      let investorCut = 0;
+      if (campaign.returnModel === 'profit_share') {
+        investorCut = profit * (campaign.yieldRate / 100);
+      }
+
+      runningPrincipalRecovered += cogs;
+      if (!principalBreakEvenDate && runningPrincipalRecovered >= campaign.investmentAmount) {
+        principalBreakEvenDate = s.createdAt;
+      }
+
+      attributedSales.push({
+        saleId: s.id,
+        invoiceNo: s.invoiceNo,
+        saleDate: s.createdAt,
+        customerName: s.customerName || 'Walk-in Customer',
+        productId: item.productId,
+        productName: item.productName || campProd.productName,
+        sku: item.sku || campProd.sku,
+        quantity: attributedQty,
+        unitPrice: unitSellingPrice,
+        costPrice: unitCost,
+        totalRevenue: Math.round(rev),
+        totalCogs: Math.round(cogs),
+        realizedProfit: Math.round(profit),
+        investorAccruedCut: Math.round(investorCut),
+      });
+    });
+  });
+
+  // Reverse attributed sales for recent-first UI display
+  attributedSales.reverse();
+
+  // Compute live velocity map across general catalog (lookback 60 days) for substitution recommendations
+  const { velocityMap: catalogVelocityMap } = calculateSalesVelocity(sales, allProducts, 60);
+
+  // Compile individual product trackings
+  const productTrackings: ProductLiveTracking[] = [];
+  const flaggedDragProducts: { tracking: ProductLiveTracking; reason: string }[] = [];
+  const replacementRecommendations: Record<string, SkuReplacementCandidate[]> = {};
+
+  let totalRevenueGenerated = 0;
+  let totalPrincipalRecovered = 0;
+  let totalRealizedGrossProfit = 0;
+
+  campaign.allocatedProducts.forEach((prod) => {
+    const stats = productDepletedMap.get(prod.productId) || {
+      unitsSold: 0,
+      grossRevenue: 0,
+      cogsRecovered: 0,
+      realizedGrossProfit: 0,
+      salesCount: 0,
+    };
+
+    totalRevenueGenerated += stats.grossRevenue;
+    totalPrincipalRecovered += stats.cogsRecovered;
+    totalRealizedGrossProfit += stats.realizedGrossProfit;
+
+    const remainingUnits = Math.max(0, prod.currentTargetQty - stats.unitsSold);
+    const sellThroughPct = Number(
+      ((stats.unitsSold / Math.max(1, prod.currentTargetQty)) * 100).toFixed(1)
+    );
+    const actualDailyVelocity = Number((stats.unitsSold / daysElapsed).toFixed(2));
+    const velocityRealizationRatio = Number(
+      (actualDailyVelocity / Math.max(0.01, prod.projectedDailyVelocity)).toFixed(2)
+    );
+
+    const effectiveVelocityForRunout = actualDailyVelocity > 0 ? actualDailyVelocity : 0.05;
+    const estimatedDaysToDeplete = Math.max(
+      1,
+      Math.round(remainingUnits / effectiveVelocityForRunout)
+    );
+    const depletionTimestamp = currentTime + estimatedDaysToDeplete * 24 * 60 * 60 * 1000;
+    const estimatedDepletionDate = new Date(depletionTimestamp).toISOString().split('T')[0];
+
+    const isTenureOverrun = estimatedDaysToDeplete > daysRemaining && remainingUnits > 0;
+
+    // Diagnose underperformance:
+    // If not substituted out, after 7 days warmup:
+    // 1) Velocity realization < 40% with remaining units
+    // 2) Tenure overrun with less than 70% sell-through
+    let isUnderperforming = false;
+    let underperformanceReason: string | undefined = undefined;
+
+    if (!prod.isSubstitutedOut && daysElapsed >= 7 && remainingUnits > 0) {
+      if (velocityRealizationRatio < 0.4) {
+        isUnderperforming = true;
+        underperformanceReason = `Slow velocity drag: selling at ${(velocityRealizationRatio * 100).toFixed(0)}% of target pace (${actualDailyVelocity}/day vs ${prod.projectedDailyVelocity}/day projected).`;
+      } else if (isTenureOverrun && sellThroughPct < 70) {
+        isUnderperforming = true;
+        underperformanceReason = `Tenure overrun: remaining ${remainingUnits} units projected to take ${estimatedDaysToDeplete} days, exceeding remaining campaign tenure by ${estimatedDaysToDeplete - daysRemaining} days.`;
+      }
+    }
+
+    const tracking: ProductLiveTracking = {
+      product: prod,
+      unitsSold: stats.unitsSold,
+      remainingUnits,
+      sellThroughPct,
+      grossRevenue: Math.round(stats.grossRevenue),
+      cogsRecovered: Math.round(stats.cogsRecovered),
+      realizedGrossProfit: Math.round(stats.realizedGrossProfit),
+      actualDailyVelocity,
+      velocityRealizationRatio,
+      daysElapsed,
+      estimatedDaysToDeplete,
+      estimatedDepletionDate,
+      isTenureOverrun,
+      isUnderperforming,
+      underperformanceReason,
+    };
+
+    productTrackings.push(tracking);
+
+    if (isUnderperforming) {
+      flaggedDragProducts.push({ tracking, reason: underperformanceReason || 'Capital Drag' });
+
+      // Calculate trapped capital
+      const trappedCapital = remainingUnits * prod.costPrice;
+      const outgoingRemainingProfit = remainingUnits * (prod.retailPrice - prod.costPrice);
+      const currentCampaignIds = campaign.allocatedProducts
+        .filter((p) => !p.isSubstitutedOut)
+        .map((p) => p.productId);
+
+      const recommendations = findReplacementCandidates(
+        trappedCapital,
+        daysRemaining,
+        allProducts,
+        currentCampaignIds,
+        catalogVelocityMap,
+        actualDailyVelocity,
+        outgoingRemainingProfit,
+        estimatedDaysToDeplete
+      );
+
+      replacementRecommendations[prod.productId] = recommendations;
+    }
+  });
+
+  // Calculate Investor Accrued Return based on agreed model
+  let investorAccruedReturn = 0;
+  if (campaign.returnModel === 'profit_share') {
+    investorAccruedReturn = Math.round(totalRealizedGrossProfit * (campaign.yieldRate / 100));
+  } else if (campaign.returnModel === 'fixed_yield') {
+    // Pro-rata monthly yield accrued over time elapsed
+    const monthlyRate = campaign.yieldRate / 100;
+    investorAccruedReturn = Math.round(
+      campaign.investmentAmount * monthlyRate * (daysElapsed / 30)
+    );
+  } else {
+    // Flat ROI amortized over tenure
+    const totalFlatRate = Math.max(10, campaign.yieldRate * 4) / 100;
+    investorAccruedReturn = Math.round(
+      campaign.investmentAmount * totalFlatRate * (daysElapsed / tenureDays)
+    );
+  }
+
+  const businessRetainedProfit = Math.round(
+    Math.max(0, totalRealizedGrossProfit - investorAccruedReturn)
+  );
+
+  // Milestone dues and settlements
+  let totalSettledPayouts = 0;
+  let accruedMilestoneDueToDate = 0;
+
+  campaign.milestones.forEach((m) => {
+    if (m.status === 'settled') {
+      totalSettledPayouts += m.settledAmount || m.totalDue;
+    }
+    const dueTime = new Date(m.dueDate).getTime();
+    if (dueTime <= currentTime) {
+      accruedMilestoneDueToDate += m.returnDue;
+    }
+  });
+
+  const principalPaybackPct = Number(
+    ((totalPrincipalRecovered / Math.max(1, campaign.investmentAmount)) * 100).toFixed(1)
+  );
+  const isPrincipalRecovered = totalPrincipalRecovered >= campaign.investmentAmount;
+
+  // Debt Service Coverage Ratio (DSCR): realized profit vs obligation due
+  const pendingObligation = Math.max(
+    0,
+    accruedMilestoneDueToDate - totalSettledPayouts
+  );
+  const dscrDivisor = accruedMilestoneDueToDate > 0 ? accruedMilestoneDueToDate : Math.max(1, investorAccruedReturn);
+  const debtServiceCoverageRatio = Number(
+    (totalRealizedGrossProfit / Math.max(1, dscrDivisor)).toFixed(2)
+  );
+
+  const coverageRating: 'Safe' | 'Healthy' | 'Caution' =
+    debtServiceCoverageRatio >= 1.5 ? 'Safe' : debtServiceCoverageRatio >= 1.0 ? 'Healthy' : 'Caution';
+
+  // Overall Campaign Health Status
+  let healthStatus: 'Ahead of Pace' | 'On Track' | 'At Risk' = 'On Track';
+  let healthReason = 'Campaign pacing in line with projected inventory velocity.';
+
+  if (flaggedDragProducts.length > 0) {
+    healthStatus = 'At Risk';
+    healthReason = `${flaggedDragProducts.length} SKU(s) experiencing capital drag. Rebalance advised.`;
+  } else if (principalPaybackPct >= (daysElapsed / tenureDays) * 100 * 1.25) {
+    healthStatus = 'Ahead of Pace';
+    healthReason = `Strong sales velocity: capital recovery is 25% ahead of timeline.`;
+  }
+
+  return {
+    campaign,
+    daysElapsed,
+    totalTenureDays: tenureDays,
+    daysRemaining,
+    progressPct,
+    totalRevenueGenerated: Math.round(totalRevenueGenerated),
+    totalPrincipalRecovered: Math.round(totalPrincipalRecovered),
+    principalPaybackPct,
+    isPrincipalRecovered,
+    principalBreakEvenDate,
+    totalRealizedGrossProfit: Math.round(totalRealizedGrossProfit),
+    investorAccruedReturn,
+    businessRetainedProfit,
+    totalSettledPayouts: Math.round(totalSettledPayouts),
+    pendingObligation: Math.round(pendingObligation),
+    debtServiceCoverageRatio,
+    coverageRating,
+    healthStatus,
+    healthReason,
+    productTrackings,
+    attributedSales,
+    flaggedDragProducts,
+    replacementRecommendations,
+  };
+}
+
+/**
+ * Executes a mid-flight substitution of a slow SKU with a recommended high-performing SKU
+ */
+export function applySkuSubstitution(
+  campaign: ActiveInvestmentCampaign,
+  outgoingProductId: string,
+  incomingProduct: Product,
+  newUnits: number,
+  reason: 'slow_velocity' | 'tenure_overrun' | 'manual_optimization' = 'slow_velocity',
+  currentSales: Sale[] = []
+): ActiveInvestmentCampaign {
+  const outgoingIndex = campaign.allocatedProducts.findIndex(
+    (p) => p.productId === outgoingProductId
+  );
+  if (outgoingIndex === -1) return campaign;
+
+  const outgoing = campaign.allocatedProducts[outgoingIndex];
+
+  // Calculate realized sold units for outgoing up to this point
+  const startTime = new Date(campaign.startedAt).getTime();
+  let outgoingSold = 0;
+  currentSales.forEach((s) => {
+    const saleTime = new Date(s.createdAt).getTime();
+    if (saleTime >= startTime && s.status !== 'Refunded' && s.status !== 'Held') {
+      (s.items || []).forEach((item) => {
+        if (item.productId === outgoingProductId) {
+          const qty = Math.max(0, (Number(item.quantity) || 1) - (Number(item.returnedQuantity) || 0));
+          outgoingSold += qty;
+        }
+      });
+    }
+  });
+
+  const realizedSold = Math.min(outgoingSold, outgoing.currentTargetQty);
+  const unsoldUnits = Math.max(0, outgoing.currentTargetQty - realizedSold);
+  const capitalFreed = unsoldUnits * outgoing.costPrice;
+  const realizedProfit = realizedSold * (outgoing.retailPrice - outgoing.costPrice);
+
+  // Incoming calculations
+  const incomingUnits = Math.max(1, newUnits);
+  const incomingAllocatedCapital = incomingUnits * incomingProduct.costPrice;
+  const incomingMarginPerUnit = incomingProduct.retailPrice - incomingProduct.costPrice;
+  const incomingMarginPct = Number(((incomingMarginPerUnit / incomingProduct.retailPrice) * 100).toFixed(1));
+  const projectedAdditionalProfit = incomingUnits * incomingMarginPerUnit;
+
+  // Freeze outgoing product target quantity to actual sold
+  const updatedOutgoing: ActiveCampaignProduct = {
+    ...outgoing,
+    currentTargetQty: realizedSold,
+    currentAllocatedCapital: realizedSold * outgoing.costPrice,
+    isSubstitutedOut: true,
+    substitutedAt: new Date().toISOString(),
+    replacementProductId: incomingProduct.id,
+  };
+
+  // Add new incoming product
+  const newActiveProduct: ActiveCampaignProduct = {
+    productId: incomingProduct.id,
+    productName: incomingProduct.name,
+    sku: incomingProduct.sku,
+    category: incomingProduct.category || 'General',
+    costPrice: incomingProduct.costPrice,
+    retailPrice: incomingProduct.retailPrice,
+    marginPerUnit: incomingMarginPerUnit,
+    marginPct: incomingMarginPct,
+    initialTargetQty: incomingUnits,
+    currentTargetQty: incomingUnits,
+    projectedDailyVelocity: 0.5,
+    initialAllocatedCapital: incomingAllocatedCapital,
+    currentAllocatedCapital: incomingAllocatedCapital,
+    isSubstitutedOut: false,
+  };
+
+  const substitutionRecord: CampaignSkuSubstitution = {
+    id: `sub_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    substitutedAt: new Date().toISOString(),
+    reason,
+    outgoingProductId: outgoing.productId,
+    outgoingProductName: outgoing.productName,
+    outgoingOriginalTargetQty: outgoing.currentTargetQty,
+    outgoingRealizedUnitsSold: realizedSold,
+    outgoingCapitalFreed: capitalFreed,
+    outgoingRealizedGrossProfit: realizedProfit,
+    incomingProductId: incomingProduct.id,
+    incomingProductName: incomingProduct.name,
+    incomingTargetQty: incomingUnits,
+    incomingCostPrice: incomingProduct.costPrice,
+    incomingRetailPrice: incomingProduct.retailPrice,
+    incomingProjectedVelocity: 0.5,
+    projectedAdditionalProfit,
+  };
+
+  const updatedAllocated = [...campaign.allocatedProducts];
+  updatedAllocated[outgoingIndex] = updatedOutgoing;
+  updatedAllocated.push(newActiveProduct);
+
+  return {
+    ...campaign,
+    allocatedProducts: updatedAllocated,
+    substitutionHistory: [substitutionRecord, ...campaign.substitutionHistory],
+  };
+}
+
+/**
+ * Records settlement / disbursement of a campaign milestone payout
+ */
+export function settleCampaignMilestone(
+  campaign: ActiveInvestmentCampaign,
+  periodIndex: number,
+  settledAmount?: number,
+  notes?: string
+): ActiveInvestmentCampaign {
+  const updatedMilestones = campaign.milestones.map((m) => {
+    if (m.periodIndex === periodIndex) {
+      return {
+        ...m,
+        status: 'settled' as const,
+        settledAt: new Date().toISOString(),
+        settledAmount: settledAmount !== undefined ? settledAmount : m.totalDue,
+        settledNotes: notes,
+      };
+    }
+    return m;
+  });
+
+  // Check if all milestones are settled
+  const allSettled = updatedMilestones.every((m) => m.status === 'settled');
+
+  return {
+    ...campaign,
+    status: allSettled ? 'completed' : campaign.status,
+    completedAt: allSettled ? new Date().toISOString() : undefined,
+    milestones: updatedMilestones,
   };
 }

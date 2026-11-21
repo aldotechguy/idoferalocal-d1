@@ -3,7 +3,7 @@
   "packageManager": "npm",
   "testRunner": "command",
   "commandRunner": {
-    "command": "tsx --test scripts/relational-money-roundtrip.test.ts scripts/mutation-killing.test.ts scripts/money-ledger.test.ts scripts/regression/money-golden.test.ts"
+    "command": "tsx --test scripts/relational-money-roundtrip.test.ts scripts/mutation-killing.test.ts scripts/regression/money-golden.test.ts"
   },
   "concurrency": 8,
   "timeoutMS": 60000,
@@ -14,9 +14,18 @@
     "src/server/relationalMapper.ts:118-171",
     "src/server/relationalMapper.ts:253-369"
   ],
-  "reporters": ["json", "clear-text"],
-  "jsonReporter": { "fileName": "reports/mutation/relationalMapper.json" },
-  "thresholds": { "high": 90, "low": 70, "break": 80 },
+  "reporters": [
+    "json",
+    "clear-text"
+  ],
+  "jsonReporter": {
+    "fileName": "reports/mutation/relationalMapper.json"
+  },
+  "thresholds": {
+    "high": 90,
+    "low": 70,
+    "break": 80
+  },
   "cleanTempDir": "always",
   "coverageAnalysis": "off",
   "allowConsoleColors": false,

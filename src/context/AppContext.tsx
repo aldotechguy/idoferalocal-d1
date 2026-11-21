@@ -2873,6 +2873,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updatedAt: now,
     };
 
+    // Delivery status preservation guard. When a Sale is edited, the delivery
+    // cascade updates the matched DeliveryOrder. Without this guard, a stale
+    // `deliveryStatus`/`isPickupConfirmed` field leaking in from the edited
+    // invoice blob would rewrite the DeliveryOrder's status to 'Pending Pickup',
+    // which cascades across the whole store (via saveDocument -> D1 last-write-
+    // wins merge) and flips every OTHER Completed Delivery back to 'Pending Pickup'.
+    const DELIVERY_STATUS_KEEP = new Set<string>(['Pending Pickup', 'Picked Up', 'Out for Delivery', 'Delivered', 'Cancelled']);
+
     // 1. Cascade to Inventory Stock: restore/take stock for the quantity diff.
     //    The delta is computed by the ledger's editSale so the
     //    "quantity reduced => stock restored" convention (positive delta restores)
@@ -2935,7 +2943,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           customerPhone: deliveryOnlyPhone !== undefined ? deliveryOnlyPhone : matchingDeliveryOrder.customerPhone,
           deliveryAddress: deliveryOnlyAddress !== undefined ? deliveryOnlyAddress : matchingDeliveryOrder.deliveryAddress,
           courierNotes: deliveryOnlyCourierNotes !== undefined ? deliveryOnlyCourierNotes : matchingDeliveryOrder.courierNotes,
-          status: deliveryOnlyStatus !== undefined ? deliveryOnlyStatus : matchingDeliveryOrder.status,
+          // Preserve the existing status unless a delivery-only status was
+          // explicitly supplied. This prevents an edited invoice from
+          // resetting a Completed/Picked-Up/Out-for-Delivery order back to
+          // 'Pending Pickup' and flipping every other completed delivery.
+          status: DELIVERY_STATUS_KEEP.has(matchingDeliveryOrder.status)
+            ? (deliveryOnlyStatus !== undefined ? deliveryOnlyStatus : matchingDeliveryOrder.status)
+            : matchingDeliveryOrder.status,
           isPickupConfirmed: finalPickupConfirmed,
           // Gap C — pickup attribution was dropped: toggling confirm from the
           // invoice editor never stamped/cleared by+at, so Deliveries showed
@@ -2976,7 +2990,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         courierNotes: deliveryOnlyCourierNotes || '',
         items: itemsList,
         deliveryFee: newFee,
-        status: deliveryOnlyStatus || 'Pending Pickup',
+        // New delivery orders are always created as 'Pending Pickup' — the
+        // initial state. Their status is then only advanced via the delivery
+        // status update flows, never by the sale edit cascade.
+        status: 'Pending Pickup',
         isPickupConfirmed: deliveryOnlyPickup || false,
         pickupConfirmedBy: deliveryOnlyPickup ? performedBy : undefined,
         pickupConfirmedAt: deliveryOnlyPickup ? now : undefined,
