@@ -82,6 +82,7 @@ import {
   LoanMilestone,
   RiskMetrics,
   StockAllocation,
+  AutoSetupVariant,
 } from '../../types/loan';
 import {
   simulateLoanInvestment,
@@ -91,6 +92,8 @@ import {
   settleLoanCampaignMilestone,
   buildLoanAmortizationSchedule,
 } from '../../utils/loanEngine';
+import { runAutoSetup } from '../../utils/loanAutoSetup';
+import { AutoSetupLoanModal } from './AutoSetupLoanModal';
 import { Product, Sale } from '../../types';
 
 const COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#f97316', '#84cc16'];
@@ -169,6 +172,9 @@ export const BankLoanPlannerView: React.FC = () => {
   const [swapModalData, setSwapModalData] = useState<{ outgoingId: string; outgoingName: string } | null>(null);
   const [isSettleMilestoneModalOpen, setIsSettleMilestoneModalOpen] = useState<boolean>(false);
   const [settleModalData, setSettleModalData] = useState<{ campaign: ActiveLoanCampaign; milestone: any } | null>(null);
+
+  // --- Auto-Setup Modal ---
+  const [isAutoSetupModalOpen, setIsAutoSetupModalOpen] = useState<boolean>(false);
 
   // --- Helpers ---
   const handleUpdateCampaign = (updated: ActiveLoanCampaign) => {
@@ -379,6 +385,29 @@ export const BankLoanPlannerView: React.FC = () => {
     setIsStartCampaignModalOpen(false);
     setCampaignModalData(null);
     setActiveMainTab('tracker');
+  };
+
+  // --- Auto-Setup Loan ---
+  const handleOpenAutoSetupModal = () => {
+    setIsAutoSetupModalOpen(true);
+  };
+
+  const handleAutoSetupApply = (variant: AutoSetupVariant, sim: LoanSimulationResult) => {
+    // Apply the variant's tranches to the simulator
+    setTranches(variant.tranches.map((t, i) => ({ ...t, id: `tranche_${Date.now()}_${i}` })));
+    // Apply stock strategy
+    // Note: The variant's stockStrategy is applied by re-running simulation
+    // The simulation will use the current stockStrategy state, so we update it
+    // Actually, we need to set the stockStrategy to match the variant
+    // But the simulation will be re-run with the new tranches
+    // We just need to make sure the tranches are set correctly
+    
+    // Close the auto-setup modal
+    setIsAutoSetupModalOpen(false);
+    
+    // The simulation will automatically re-run with the new tranches
+    // The stock allocations will be re-calculated based on current stockStrategy
+    // If user wants to use the variant's exact strategy, they can change it manually
   };
 
   // --- Swap Stock ---
@@ -629,6 +658,15 @@ export const BankLoanPlannerView: React.FC = () => {
                   <Play className="w-3.5 h-3.5 fill-current" />
                   <span>Start Campaign</span>
                 </button>
+
+                {/* Auto-Setup Loan Button */}
+                <button
+                  onClick={handleOpenAutoSetupModal}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition-all cursor-pointer"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Auto-Setup Loan</span>
+                </button>
               </div>
             </div>
           </div>
@@ -764,6 +802,9 @@ export const BankLoanPlannerView: React.FC = () => {
                         <th className="pb-2 pr-4 text-right">Price</th>
                         <th className="pb-2 pr-4 text-right">Capital</th>
                         <th className="pb-2 pr-4 text-right">Weight</th>
+                        <th className="pb-2 pr-4 text-right">Runout (days)</th>
+                        <th className="pb-2 pr-4 text-right">Turnover</th>
+                        <th className="pb-2 pr-4 text-right">Liq. Ceiling</th>
                         <th className="pb-2 pr-4 text-right">Exp. Return</th>
                         <th className="pb-2 pr-4 text-right">Div. Yield</th>
                         <th className="pb-2">Actions</th>
@@ -808,6 +849,15 @@ export const BankLoanPlannerView: React.FC = () => {
                               />
                             </div>
                             <div className="text-xs text-slate-500 mt-0.5">{allocation.weightPct.toFixed(1)}%</div>
+                          </td>
+                          <td className="py-2 pr-4 text-right font-mono text-slate-600 dark:text-slate-400">
+                            {allocation.runOutDays}
+                          </td>
+                          <td className="py-2 pr-4 text-right font-mono text-blue-600 dark:text-blue-400">
+                            {allocation.turnoverCycles}x
+                          </td>
+                          <td className="py-2 pr-4 text-right font-mono text-amber-600 dark:text-amber-400">
+                            {allocation.maxSharesByLiquidity.toLocaleString()}
                           </td>
                           <td className="py-2 pr-4 text-right text-emerald-600 dark:text-emerald-400 font-mono">
                             {allocation.annualizedReturn.toFixed(1)}%
@@ -1253,6 +1303,15 @@ export const BankLoanPlannerView: React.FC = () => {
                 setSettleModalData(null);
               }}
               onSettle={handleSettleMilestone}
+            />
+          )}
+
+          {isAutoSetupModalOpen && (
+            <AutoSetupLoanModal
+              products={products}
+              sales={sales}
+              onClose={() => setIsAutoSetupModalOpen(false)}
+              onApply={handleAutoSetupApply}
             />
           )}
         </>

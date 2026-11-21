@@ -19,6 +19,8 @@ import {
   StockSubstitutionCandidate,
   CampaignAttributedDividend,
   CampaignAttributedSale,
+  AllocationConfig,
+  DEFAULT_ALLOCATION_CONFIG,
 } from '../types/loan';
 
 export interface LoanCalculationParams {
@@ -58,8 +60,11 @@ function getSectorFromCategory(category: string): string {
 export function calculateStockMetrics(
   products: Product[],
   sales: Sale[],
-  lookbackDays = 60
+  lookbackDays = 60,
+  maxTenureMonths = 12,
+  config: Partial<AllocationConfig> = {}
 ): StockMetrics[] {
+  const cfg = { ...DEFAULT_ALLOCATION_CONFIG, ...config };
   const isAllTime = !lookbackDays || lookbackDays <= 0 || lookbackDays >= 9999;
   let effectiveLookbackDays = lookbackDays;
   let cutoffTime = 0;
@@ -118,9 +123,11 @@ export function calculateStockMetrics(
     velocityMap[id].dailyVelocity = units / Math.max(1, effectiveLookbackDays);
   });
 
+  const tenureDays = maxTenureMonths * 30;
+
   const metrics: StockMetrics[] = products.map((p) => {
     const stats = velocityMap[p.id] || { unitsSold: 0, dailyVelocity: 0, revenue: 0, prices: [] };
-    const velocity = stats.dailyVelocity > 0 ? stats.dailyVelocity : 0.1;
+    const velocity = stats.dailyVelocity > 0 ? stats.dailyVelocity : cfg.minDailyVelocity;
     const marginPerUnit = p.retailPrice - p.costPrice;
     const marginPct = p.retailPrice > 0 ? (marginPerUnit / p.retailPrice) * 100 : 0;
 
@@ -139,6 +146,12 @@ export function calculateStockMetrics(
     const maxAllocationPct = Math.min(25, Math.max(5, 20 / Math.max(0.5, beta)));
     const liquidityScore = Math.min(100, Math.max(10, velocity * 100));
 
+    // Allocation engine fields
+    const maxSharesByLiquidity = Math.max(1, Math.floor(velocity * tenureDays * cfg.liquidityFactor));
+    const maxSharesByTenure = Math.max(1, Math.ceil(velocity * tenureDays * cfg.tenureBufferPct));
+    const runOutDays = maxSharesByTenure > 0 ? Math.max(1, Math.round(maxSharesByTenure / Math.max(cfg.minDailyVelocity, velocity))) : tenureDays;
+    const turnoverCycles = runOutDays > 0 ? Number((tenureDays / runOutDays).toFixed(1)) : 1;
+
     return {
       productId: p.id,
       symbol: deriveSymbol(p.name, p.sku),
@@ -155,6 +168,10 @@ export function calculateStockMetrics(
       liquidityScore,
       historicalVolatility,
       avgDailyVolume: velocity,
+      maxSharesByLiquidity,
+      maxSharesByTenure,
+      runOutDays,
+      turnoverCycles,
     };
   }).filter(m => m.purchasePrice > 0 && m.currentPrice > m.purchasePrice);
 
@@ -297,16 +314,35 @@ export function allocateLoanToStocks(
   stockMetrics: StockMetrics[],
   strategy: StockAllocationStrategy,
   customAllocations?: Record<string, number>,
-  totalCapital?: number
+  totalCapital?: number,
+  config: Partial<AllocationConfig> = {}
 ): { allocations: StockAllocation[]; totalAllocated: number; unallocated: number } {
+  const cfg = { ...DEFAULT_ALLOCATION_CONFIG, ...config };
   const capital = totalCapital || tranches.reduce((sum, t) => sum + t.principal, 0);
-  const activeStocks = stockMetrics.filter(s => s.currentPrice > s.purchasePrice);
+  const activeStocks = stockMetrics.filter(s => s.currentPrice > s.purchasePrice && s.avgDailyVolume >= cfg.minDailyVelocity);
 
+  // Handle custom allocations - merge with auto allocation baseline like Investment Planner
   if (customAllocations && Object.keys(customAllocations).length > 0) {
     const allocations: StockAllocation[] = [];
     let totalAllocated = 0;
 
+    // First, build baseline from auto allocation (without custom overrides)
+    const baselineResult = allocateLoanToStocks(tranches, stockMetrics, strategy, undefined, totalCapital, config);
+    const baselineMap: Record<string, number> = {};
+    baselineResult.allocations.forEach(a => { baselineMap[a.productId] = a.shares; });
+
+    // Merge custom with baseline
+    const mergedAllocations: Record<string, number> = { ...baselineMap };
     Object.entries(customAllocations).forEach(([productId, shares]) => {
+      if (shares > 0) {
+        mergedAllocations[productId] = shares;
+      } else {
+        delete mergedAllocations[productId];
+      }
+    });
+
+    // Build allocations from merged map
+    Object.entries(mergedAllocations).forEach(([productId, shares]) => {
       const stock = activeStocks.find(s => s.productId === productId);
       if (!stock || shares <= 0) return;
 
@@ -332,6 +368,10 @@ export function allocateLoanToStocks(
         volatilityContribution: stock.volatilityProxy * (allocatedCapital / capital),
         annualizedReturn: stock.expectedReturnPct,
         sharpeRatio: stock.expectedReturnPct / Math.max(0.1, stock.volatilityProxy * 100),
+        runOutDays: stock.runOutDays,
+        turnoverCycles: stock.turnoverCycles,
+        maxSharesByLiquidity: stock.maxSharesByLiquidity,
+        maxSharesByTenure: stock.maxSharesByTenure,
       });
     });
 
@@ -342,17 +382,18 @@ export function allocateLoanToStocks(
     return { allocations, totalAllocated, unallocated: Math.max(0, capital - totalAllocated) };
   }
 
+  // Score each stock based on strategy
   let scoredStocks = activeStocks.map(stock => {
     let score = 0;
     switch (strategy) {
       case 'dividend_focus':
-        score = stock.dividendYield * 10 + stock.liquidityScore * 0.5;
+        score = stock.dividendYield * 10 + stock.liquidityScore * 0.5 + (stock.avgDailyVolume > 0.5 ? 5 : 0);
         break;
       case 'growth_focus':
-        score = stock.priceAppreciation * 10 - stock.volatilityProxy * 5;
+        score = stock.priceAppreciation * 10 - stock.volatilityProxy * 5 + (stock.avgDailyVolume > 0.3 ? 3 : 0);
         break;
       case 'low_volatility':
-        score = (100 - stock.volatilityProxy * 100) * 2 + stock.dividendYield;
+        score = (100 - stock.volatilityProxy * 100) * 2 + stock.dividendYield + (stock.avgDailyVolume > 0.2 ? 2 : 0);
         break;
       case 'high_conviction':
         score = stock.expectedReturnPct * 5 - stock.volatilityProxy * 10 + stock.liquidityScore * 0.3;
@@ -362,27 +403,90 @@ export function allocateLoanToStocks(
         score = (stock.expectedReturnPct / Math.max(0.1, stock.volatilityProxy * 100)) * 100 + stock.liquidityScore * 0.5;
         break;
     }
+    // Sector diversity bonus - slight boost for underrepresented sectors (will be applied during selection)
     return { ...stock, score };
   });
 
   scoredStocks.sort((a, b) => b.score - a.score);
 
-  const targetStockCount = Math.min(8, Math.max(3, scoredStocks.length));
-  const candidates = scoredStocks.slice(0, targetStockCount);
+  // Select candidates with sector diversification
+  const sectorAllocations: Record<string, number> = {};
+  const candidates: typeof scoredStocks = [];
+  
+  for (const stock of scoredStocks) {
+    if (candidates.length >= cfg.maxStocks) break;
+    
+    const currentSectorPct = sectorAllocations[stock.sector] || 0;
+    const estimatedCapital = Math.min(
+      stock.maxSharesByLiquidity,
+      stock.maxSharesByTenure
+    ) * stock.currentPrice;
+    const estimatedWeight = capital > 0 ? (estimatedCapital / capital) * 100 : 0;
+    
+    // Skip if adding would exceed sector limit
+    if (currentSectorPct + estimatedWeight > cfg.maxSectorPct) {
+      continue;
+    }
+    
+    candidates.push(stock);
+    sectorAllocations[stock.sector] = currentSectorPct + estimatedWeight;
+  }
 
+  // Ensure minimum stock count
+  if (candidates.length < cfg.minStocks && scoredStocks.length >= cfg.minStocks) {
+    // Add more stocks even if they push sector limits slightly
+    for (const stock of scoredStocks) {
+      if (candidates.length >= cfg.minStocks) break;
+      if (candidates.some(c => c.productId === stock.productId)) continue;
+      candidates.push(stock);
+    }
+  }
+
+  // Two-pass allocation
+  const targetStockCount = candidates.length;
   let remainingBudget = capital;
   const allocationMap: Record<string, number> = {};
 
+  // Pass 1: Proportional base allocation (weighted by score rank)
+  const totalScore = candidates.reduce((sum, s) => sum + s.score, 0);
+  
   candidates.forEach((stock, index) => {
-    const maxPositionCapital = capital * (stock.maxAllocationPct / 100);
-    const targetCapital = Math.min(maxPositionCapital, capital / targetStockCount * (1 + (targetStockCount - index) * 0.1));
+    const rankWeight = 1.2 - (index / Math.max(1, targetStockCount - 1)) * 0.4; // 1.2 to 0.8
+    const scoreWeight = totalScore > 0 ? stock.score / totalScore : 1 / targetStockCount;
+    const combinedWeight = (rankWeight + scoreWeight) / 2;
+    
+    const maxShares = Math.min(stock.maxSharesByLiquidity, stock.maxSharesByTenure);
+    const maxCapital = maxShares * stock.currentPrice;
+    const targetCapital = Math.min(maxCapital, capital * combinedWeight);
     const shares = Math.floor(Math.min(targetCapital, remainingBudget) / stock.currentPrice);
+    
     if (shares > 0) {
       allocationMap[stock.productId] = shares;
       remainingBudget -= shares * stock.currentPrice;
     }
   });
 
+  // Pass 2: Distribute remaining budget to top-scoring candidates up to their ceilings
+  for (const stock of candidates) {
+    if (remainingBudget < stock.currentPrice) break;
+    
+    const currentShares = allocationMap[stock.productId] || 0;
+    const maxShares = Math.min(stock.maxSharesByLiquidity, stock.maxSharesByTenure);
+    const remainingHeadroom = Math.max(0, maxShares - currentShares);
+    
+    if (remainingHeadroom > 0) {
+      const affordableShares = Math.min(
+        remainingHeadroom,
+        Math.floor(remainingBudget / stock.currentPrice)
+      );
+      if (affordableShares > 0) {
+        allocationMap[stock.productId] = currentShares + affordableShares;
+        remainingBudget -= affordableShares * stock.currentPrice;
+      }
+    }
+  }
+
+  // Build final allocations
   const allocations: StockAllocation[] = [];
   let totalAllocated = 0;
 
@@ -412,6 +516,10 @@ export function allocateLoanToStocks(
       volatilityContribution: stock.volatilityProxy * (allocatedCapital / capital),
       annualizedReturn: stock.expectedReturnPct,
       sharpeRatio: stock.expectedReturnPct / Math.max(0.1, stock.volatilityProxy * 100),
+      runOutDays: stock.runOutDays,
+      turnoverCycles: stock.turnoverCycles,
+      maxSharesByLiquidity: stock.maxSharesByLiquidity,
+      maxSharesByTenure: stock.maxSharesByTenure,
     });
   });
 
@@ -567,7 +675,7 @@ export function simulateLoanInvestment(
   const weightedRate = tranches.reduce((sum, t) => sum + t.principal * t.interestRate, 0) / totalPrincipal;
   const maxTenure = Math.max(...tranches.map(t => t.tenureMonths));
 
-  const stockMetrics = calculateStockMetrics(products, sales, lookbackDays);
+  const stockMetrics = calculateStockMetrics(products, sales, lookbackDays, maxTenure);
   const { allocations, totalAllocated, unallocated } = allocateLoanToStocks(
     tranches,
     stockMetrics,

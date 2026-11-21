@@ -4,6 +4,24 @@ export type LoanRepaymentStructure = 'bullet' | 'amortized' | 'interest_only_the
 export type LoanRepaymentFrequency = 'monthly' | 'quarterly' | 'semi_annual';
 export type StockAllocationStrategy = 'dividend_focus' | 'growth_focus' | 'balanced' | 'low_volatility' | 'high_conviction';
 
+export interface AllocationConfig {
+  maxStocks: number;
+  minStocks: number;
+  maxSectorPct: number;
+  liquidityFactor: number;
+  tenureBufferPct: number;
+  minDailyVelocity: number;
+}
+
+export const DEFAULT_ALLOCATION_CONFIG: AllocationConfig = {
+  maxStocks: 15,
+  minStocks: 5,
+  maxSectorPct: 35,
+  liquidityFactor: 1.0,
+  tenureBufferPct: 1.2,
+  minDailyVelocity: 0.05,
+};
+
 export interface LoanTranche {
   id: string;
   name: string;
@@ -51,6 +69,11 @@ export interface StockMetrics {
   liquidityScore: number;
   historicalVolatility: number;
   avgDailyVolume: number;
+  // Allocation engine fields
+  maxSharesByLiquidity: number;
+  maxSharesByTenure: number;
+  runOutDays: number;
+  turnoverCycles: number;
 }
 
 export interface StockAllocation {
@@ -68,6 +91,11 @@ export interface StockAllocation {
   volatilityContribution: number;
   annualizedReturn: number;
   sharpeRatio: number;
+  // Allocation engine fields
+  runOutDays: number;
+  turnoverCycles: number;
+  maxSharesByLiquidity: number;
+  maxSharesByTenure: number;
 }
 
 export interface LoanMilestone {
@@ -299,4 +327,86 @@ export interface CampaignAttributedSale {
   realizedGain: number;
   appliedToLoanPayment: boolean;
   loanPaymentPeriod?: number;
+}
+
+// ============================================
+// AUTO-SETUP LOAN TYPES
+// ============================================
+
+export type AutoSetupMode = 'quick' | 'objective' | 'bounded';
+export type AutoSetupObjective = 'max_profit' | 'max_safety' | 'balanced' | 'custom';
+
+export interface BankLoanOffer {
+  bankName: string;
+  annualRate: number;
+  rateType: 'fixed' | 'floating';
+  referenceRate?: string;
+  spreadBps?: number;
+  originationFeeBps: number;
+  commitmentFeeBps?: number;
+  availableStructures: LoanRepaymentStructure[];
+  availableFrequencies: LoanRepaymentFrequency[];
+  maxTenureMonths: number;
+  minTenureMonths: number;
+  covenantDscrMin?: number;
+  covenantLtvMax?: number;
+}
+
+export interface AutoSetupConstraints {
+  maxPrincipal?: number;
+  minPrincipal?: number;
+  maxTenureMonths?: number;
+  maxAnnualRate?: number;
+  minDscr?: number;
+  maxLtv?: number;
+  maxSectorConcentrationPct?: number;
+}
+
+export interface AutoSetupParams {
+  mode: AutoSetupMode;
+  objective: AutoSetupObjective;
+  bankOffer: BankLoanOffer;
+  constraints?: AutoSetupConstraints;
+  principalMode: 'auto' | 'manual';
+  manualPrincipal?: number;
+  lookbackDays: number;
+  customWeights?: {
+    profitWeight: number;
+    safetyWeight: number;
+    liquidityWeight: number;
+  };
+}
+
+export interface AutoSetupResult {
+  success: boolean;
+  variants: AutoSetupVariant[];
+  explanation: string;
+  relaxedFromConstraints?: boolean;
+  analysis: SalesOpportunityAnalysis;
+}
+
+export interface AutoSetupVariant {
+  label: 'Conservative' | 'Balanced' | 'Aggressive';
+  description: string;
+  tranches: LoanTranche[];
+  stockStrategy: StockAllocationStrategy;
+  principal: number;
+  tenureMonths: number;
+  projectedNetProfit: number;
+  projectedDscr: number;
+  projectedLtv: number;
+  riskRating: 'Low' | 'Medium' | 'High';
+  score: number;
+  simulation: LoanSimulationResult;
+}
+
+export interface SalesOpportunityAnalysis {
+  totalDeployableCapital: number;
+  topSectors: { sector: string; opportunity: number }[];
+  avgStockReturn: number;
+  avgStockVolatility: number;
+  liquidityScore: number;
+  recommendedMaxPrincipal: number;
+  recommendedTenureMonths: number;
+  warnings: string[];
 }
