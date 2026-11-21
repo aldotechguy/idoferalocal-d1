@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { Receipt, ArrowRightLeft, Wallet, Building, Banknote, TrendingUp } from 'lucide-react';
+import { Receipt, ArrowRightLeft, Wallet, Building, Banknote, TrendingUp, Landmark } from 'lucide-react';
 import { ExpensesView } from '../expenses/ExpensesView';
 import { MoneyMovementView } from '../treasury/MoneyMovementView';
 import { InvestmentPlannerView } from './InvestmentPlannerView';
+import { BankLoanPlannerView } from './BankLoanPlannerView';
 import { useApp } from '../../context/AppContext';
 import { NairaSign } from '../common/NairaSign';
 
-export type FinanceTab = 'expenses' | 'money-movement' | 'investment-planner';
+export type FinanceTab = 'expenses' | 'money-movement' | 'investment-planner' | 'bank-loan-planner';
 
 interface FinanceHubViewProps {
   initialTab?: FinanceTab;
@@ -112,6 +113,21 @@ export const FinanceHubView: React.FC<FinanceHubViewProps> = ({ initialTab = 'ex
               Growth
             </span>
           </button>
+
+          <button
+            onClick={() => setActiveTab('bank-loan-planner')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
+              activeTab === 'bank-loan-planner'
+                ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
+                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+          >
+            <Landmark className="w-3.5 h-3.5 text-blue-400" />
+            <span>Bank Loan Planner</span>
+            <span className="px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 border border-blue-200/50">
+              Loans
+            </span>
+          </button>
         </div>
       </div>
 
@@ -121,8 +137,10 @@ export const FinanceHubView: React.FC<FinanceHubViewProps> = ({ initialTab = 'ex
           <ExpensesView />
         ) : activeTab === 'money-movement' ? (
           <MoneyMovementView />
-        ) : (
+        ) : activeTab === 'investment-planner' ? (
           <InvestmentPlannerView />
+        ) : (
+          <BankLoanPlannerView />
         )}
       </div>
     </div>
