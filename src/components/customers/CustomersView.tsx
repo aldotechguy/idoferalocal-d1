@@ -18,6 +18,8 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { NairaSign } from '../common/NairaSign';
+import Papa from 'papaparse';
+import { List, type RowComponentProps } from 'react-window';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -117,6 +119,38 @@ export const CustomersView: React.FC = () => {
       (c.email && c.email.toLowerCase().includes(q))
     );
   });
+
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 100;
+  const totalPages = Math.max(1, Math.ceil(filteredCustomers.length / itemsPerPage));
+  const safePage = Math.min(currentPage, totalPages);
+  const paginatedCustomers = filteredCustomers.slice((safePage - 1) * itemsPerPage, safePage * itemsPerPage);
+  const useVirtualList = filteredCustomers.length > 100;
+
+  const exportCsv = () => {
+    const data = filteredCustomers.map((c) => ({
+      id: c.id,
+      name: c.name,
+      phone: c.phone,
+      email: c.email,
+      address: c.address,
+      outstandingBalance: c.outstandingBalance,
+      loyaltyPoints: c.loyaltyPoints,
+      lifetimeValue: c.lifetimeValue,
+    }));
+    const csv = Papa.unparse(data);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    const now = new Date();
+    const timestamp = now.toISOString().replace(/[:.]/g, '-');
+    link.setAttribute('download', `customers-export-${timestamp}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   const selectedCustomer = useMemo(
     () => (selectedCustomerId ? augmentedCustomers.find((c) => c.id === selectedCustomerId) || null : null),
@@ -299,17 +333,27 @@ export const CustomersView: React.FC = () => {
           </p>
         </div>
 
-        <button
-          onClick={() => {
-            setAllowFuzzyCreate(false);
-            setFormData({ name: '', phone: '', email: '', address: '' });
-            setShowAddModal(true);
-          }}
-          className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs shadow-xs transition-colors"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Add New Customer</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => {
+              setAllowFuzzyCreate(false);
+              setFormData({ name: '', phone: '', email: '', address: '' });
+              setShowAddModal(true);
+            }}
+            className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs shadow-xs transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Add New Customer</span>
+          </button>
+          {isAdmin && (
+            <button
+              onClick={exportCsv}
+              className="flex items-center gap-1.5 px-4 py-2 bg-green-600 hover:bg-green-700 text-white font-bold rounded-xl text-xs shadow-xs transition-colors"
+            >
+              Export CSV
+            </button>
+          )}
+        </div>
       </div>
 
       {/* KPI Summary Cards */}
@@ -401,12 +445,18 @@ export const CustomersView: React.FC = () => {
             type="text"
             placeholder="Search customer by name, phone, or email..."
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              setCurrentPage(1);
+            }}
             className="w-full pl-10 pr-9 py-2 bg-slate-100 dark:bg-slate-800 border border-transparent focus:border-blue-500 text-slate-900 dark:text-slate-100 text-xs rounded-xl focus:outline-none"
           />
           {searchQuery && (
             <button
-              onClick={() => setSearchQuery('')}
+              onClick={() => {
+                setSearchQuery('');
+                setCurrentPage(1);
+              }}
               className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
               title="Clear search"
             >
@@ -417,6 +467,111 @@ export const CustomersView: React.FC = () => {
       </div>
 
       <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-xs overflow-hidden">
+        {useVirtualList ? (
+          <div className="overflow-x-auto">
+            <div className="min-w-[820px]">
+              <div className="grid grid-cols-12 items-center bg-slate-50 dark:bg-slate-800/50 border-b border-slate-100 dark:border-slate-800 text-slate-400 uppercase text-[10px] tracking-wider font-bold py-3 px-4">
+                <div className="col-span-2">Customer Name</div>
+                <div className="col-span-3">Contact Details</div>
+                <div className="col-span-1">Orders</div>
+                <div className="col-span-1">Loyalty</div>
+                <div className="col-span-1">Lifetime</div>
+                <div className="col-span-2">Outstanding</div>
+                <div className="col-span-2 text-right">Actions</div>
+              </div>
+              <List
+                style={{ height: Math.min(paginatedCustomers.length * 64, 600), width: '100%' }}
+                rowCount={paginatedCustomers.length}
+                rowHeight={64}
+                rowProps={{ items: paginatedCustomers }}
+                rowComponent={({ index, style, items }: RowComponentProps<{ items: typeof paginatedCustomers }>) => {
+                  const cust = items[index];
+                  if (!cust) return null;
+                  return (
+                    <div
+                      style={style}
+                      className="grid grid-cols-12 items-center px-4 text-xs border-b border-slate-100 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
+                    >
+                      <div className="col-span-2 font-bold text-slate-900 dark:text-white truncate pr-2">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedCustomerId(cust.id)}
+                          className="text-left hover:text-blue-600 dark:hover:text-blue-400 hover:underline transition-colors font-bold truncate max-w-full"
+                          title="Open Customer Profile"
+                        >
+                          {cust.name}
+                        </button>
+                      </div>
+                      <div className="col-span-3 pr-2 min-w-0">
+                        <p className="flex items-center gap-1 text-[11px] truncate"><Phone className="w-3 h-3 text-slate-400 shrink-0" /> {isPrivacyMode ? '••••••' : (cust.phone || 'N/A')}</p>
+                        <p className="flex items-center gap-1 text-[10px] text-slate-400 truncate"><Mail className="w-3 h-3 text-slate-400 shrink-0" /> {isPrivacyMode ? '••••••' : (cust.email || 'N/A')}</p>
+                      </div>
+                      <div className="col-span-1 font-bold">{(cust.purchaseHistoryCount || 0).toLocaleString()}</div>
+                      <div className="col-span-1 font-bold text-amber-600 dark:text-amber-400 flex items-center gap-1">
+                        <Award className="w-3.5 h-3.5 shrink-0" />
+                        <span>{(cust.loyaltyPoints || 0).toLocaleString()}</span>
+                      </div>
+                      <div className="col-span-1 font-bold text-emerald-600 dark:text-emerald-400 truncate">
+                        {isPrivacyMode ? '••••••' : `${settings.currencySymbol}${(cust.lifetimeValue || 0).toFixed(2)}`}
+                      </div>
+                      <div className="col-span-2 pr-2">
+                        {isPrivacyMode ? (
+                          <span className="font-mono font-bold text-slate-400">••••••</span>
+                        ) : (cust.overageBalance || 0) > 0 ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 font-bold text-[11px]">
+                            Store Credit: +{settings.currencySymbol}{(cust.overageBalance || 0).toFixed(2)}
+                          </span>
+                        ) : (
+                          <span className={`font-bold ${(cust.outstandingBalance || 0) > 0 ? 'text-rose-600' : 'text-slate-500'}`}>
+                            {settings.currencySymbol}{(cust.outstandingBalance || 0).toFixed(2)}
+                          </span>
+                        )}
+                      </div>
+                      <div className="col-span-2 text-right">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedCustomerId(cust.id)}
+                            className="px-2.5 py-1 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold rounded-lg hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-950/60 dark:hover:text-blue-400 transition-colors"
+                          >
+                            View
+                          </button>
+                          {cust.outstandingBalance > 0 && (
+                            <button
+                              onClick={() => handleOpenSettle(cust)}
+                              className="px-2.5 py-1 bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400 text-[10px] font-bold rounded-lg hover:bg-emerald-200 transition-colors flex items-center gap-1"
+                            >
+                              <NairaSign className="w-3 h-3" />
+                              <span>Settle</span>
+                            </button>
+                          )}
+                          {!isSalesStaff && (
+                            <>
+                              <button
+                                onClick={() => handleOpenEdit(cust)}
+                                className="p-1.5 text-slate-400 hover:text-blue-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                title="Edit Customer Details"
+                              >
+                                <Edit className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => setCustomerToDelete(cust)}
+                                className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                title="Delete Customer"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }}
+              />
+            </div>
+          </div>
+        ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-100 dark:border-slate-800 text-slate-400 uppercase text-[10px] tracking-wider font-bold">
@@ -431,7 +586,7 @@ export const CustomersView: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-slate-700 dark:text-slate-300">
-              {filteredCustomers.length === 0 ? (
+              {paginatedCustomers.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="py-12 text-center text-slate-400">
                     <div className="max-w-xs mx-auto space-y-2">
@@ -444,7 +599,7 @@ export const CustomersView: React.FC = () => {
                   </td>
                 </tr>
               ) : (
-                filteredCustomers.map((cust) => (
+                paginatedCustomers.map((cust) => (
                   <tr key={cust.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors">
                     <td className="py-3 px-4 font-bold text-slate-900 dark:text-white">
                       <button
@@ -524,6 +679,27 @@ export const CustomersView: React.FC = () => {
             )}
             </tbody>
           </table>
+        </div>
+        )}
+        {/* Pagination Controls */}
+        <div className="flex justify-between items-center px-4 py-3 border-t border-slate-100 dark:border-slate-800">
+          <span className="text-xs font-medium text-slate-600 dark:text-slate-400">Page {safePage} of {totalPages}</span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setCurrentPage((p) => Math.max(p - 1, 1))}
+              disabled={safePage === 1}
+              className="px-3 py-1 text-xs font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-lg disabled:opacity-50"
+            >
+              Prev
+            </button>
+            <button
+              onClick={() => setCurrentPage((p) => Math.min(p + 1, totalPages))}
+              disabled={safePage === totalPages}
+              className="px-3 py-1 text-xs font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-lg disabled:opacity-50"
+            >
+              Next
+            </button>
+          </div>
         </div>
       </div>
         </div>
