@@ -19,7 +19,6 @@ import {
   Wallet,
 } from 'lucide-react';
 import { Customer, MoneyMovement, Sale, StoreSettings } from '../../types';
-import { Link } from 'react-router-dom';
 import { NairaSign } from '../common/NairaSign';
 import { loyaltyPointsForAmount, round2, unpaidOf } from '../../shared/customerLedger';
 
@@ -462,7 +461,7 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
                     return (
                       <tr key={s.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
                         <td className="py-3 px-4 font-mono font-bold text-slate-900 dark:text-white">
-                          <Link to={`/invoice/${s.id}`} className="text-blue-600 hover:underline" onClick={(e) => { if (isPrivacyMode) e.preventDefault(); }}>{s.invoiceNo || s.id}</Link>
+                          <span className="font-mono font-bold">{s.invoiceNo || s.id}</span>
                         </td>
                         <td className="py-3 px-3 text-slate-500">{formatDate(s.createdAt)}</td>
                         <td className="py-3 px-3">{s.type}</td>
@@ -539,7 +538,7 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
                     unpaidSales.map((s) => (
                       <tr key={s.id}>
                         <td className="py-3 px-4 font-mono font-bold text-slate-900 dark:text-white">
-                          <Link to={`/invoice/${s.id}`} className="text-blue-600 hover:underline" onClick={(e) => { if (isPrivacyMode) e.preventDefault(); }}>{s.invoiceNo || s.id}</Link>
+                          <span className="font-mono font-bold">{s.invoiceNo || s.id}</span>
                         </td>
                         <td className="py-3 px-3 text-slate-500">{formatDate(s.createdAt)}</td>
                         <td className="py-3 px-3 font-bold">{formatMoney(s.totalAmount)}</td>
@@ -641,7 +640,7 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
                   activeSales.map((s) => (
                     <tr key={s.id}>
                       <td className="py-3 px-4 font-mono font-bold text-slate-900 dark:text-white">
-                        <Link to={`/invoice/${s.id}`} className="text-blue-600 hover:underline" onClick={(e) => { if (isPrivacyMode) e.preventDefault(); }}>{s.invoiceNo || s.id}</Link>
+                        <span className="font-mono font-bold">{s.invoiceNo || s.id}</span>
                       </td>
                       <td className="py-3 px-3 text-slate-500">{formatDate(s.createdAt)}</td>
                       <td className="py-3 px-3 font-bold">{formatMoney(s.totalAmount)}</td>
