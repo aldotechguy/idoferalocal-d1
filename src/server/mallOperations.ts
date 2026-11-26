@@ -87,6 +87,9 @@ export const RELATIONAL_FINANCE_COLUMNS: ReadonlyArray<{ name: string; ddl: stri
   // the client stamps updatedAt on every sale edit, this mapper drops it, and the
   // snapshot read-back has none — so a D1 pull can silently revert the edit.
   { name: 'sales.updated_at', ddl: 'ALTER TABLE sales ADD COLUMN updated_at TEXT' },
+  // Customer Hub Sprint 1: customer notes & edit timestamp synced to D1.
+  { name: 'customers.notes', ddl: 'ALTER TABLE customers ADD COLUMN notes TEXT' },
+  { name: 'customers.updated_at', ddl: 'ALTER TABLE customers ADD COLUMN updated_at TEXT' },
 ];
 
 export function isDuplicateColumnError(error: unknown) {

@@ -24,16 +24,20 @@ import { useToast } from '../../context/ToastContext';
 import { Customer } from '../../types';
 import { ConfirmModal } from '../common/ConfirmModal';
 import { computeCustomerMetrics, settleCustomerBalance, round2 } from '../../shared/customerLedger';
+import { findPotentialDuplicates } from '../../shared/customerDedup';
+import { CustomerDetailView } from './CustomerDetailView';
 
 export const CustomersView: React.FC = () => {
-  const { customers, sales, addCustomer, updateCustomer, updateCustomerBalance, deleteCustomer, settings } = useApp();
+  const { customers, sales, moneyMovements, addCustomer, updateCustomer, updateCustomerBalance, deleteCustomer, settings } = useApp();
   const { currentUser, isPrivacyMode } = useAuth();
   const { showToast } = useToast();
   const isAdmin = currentUser?.role === 'Administrator';
   const isSalesStaff = currentUser?.role === 'Sales Staff';
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [allowFuzzyCreate, setAllowFuzzyCreate] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [customerToDelete, setCustomerToDelete] = useState<Customer | null>(null);
   const [settleCustomer, setSettleCustomer] = useState<Customer | null>(null);
@@ -114,37 +118,54 @@ export const CustomersView: React.FC = () => {
     );
   });
 
+  const selectedCustomer = useMemo(
+    () => (selectedCustomerId ? augmentedCustomers.find((c) => c.id === selectedCustomerId) || null : null),
+    [augmentedCustomers, selectedCustomerId]
+  );
+
+  const duplicateMatches = useMemo(() => {
+    if (!showAddModal && !editingCustomer) return [];
+    return findPotentialDuplicates(augmentedCustomers, formData, editingCustomer?.id);
+  }, [showAddModal, editingCustomer, augmentedCustomers, formData]);
+
+  const exactDuplicate = duplicateMatches.find((m) => m.confidence === 'exact');
+  const possibleDuplicates = duplicateMatches.filter((m) => m.confidence === 'possible');
+
   const handleAddSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const name = formData.name.trim();
     if (!name) return;
 
-    // Duplicate detection (audit M1): a second identical customer splits debt
-    // and loyalty across two records. Match on normalised phone, then name.
-    const phoneKey = formData.phone.replace(/\D/g, '');
-    const duplicate = customers.find(
-      (c) =>
-        (phoneKey && c.phone && c.phone.replace(/\D/g, '') === phoneKey) ||
-        (c.name && c.name.trim().toLowerCase() === name.toLowerCase())
-    );
-    if (duplicate) {
+    // Duplicate detection (audit M1 + Sprint 1 P2): a second identical customer
+    // splits debt and loyalty across two records. Block exact phone/email/name
+    // matches; prompt for confirmation on fuzzy name matches.
+    if (exactDuplicate) {
       showToast({
         title: 'Customer Already Exists',
-        message: `"${duplicate.name}" is already in the directory${
-          duplicate.phone ? ` (${duplicate.phone})` : ''
-        }. Open their profile to add a sale instead of creating a duplicate.`,
+        message: `"${exactDuplicate.customer.name}" matches (${exactDuplicate.reason}). Open their profile instead of creating a duplicate.`,
         type: 'error',
+      });
+      return;
+    }
+
+    if (possibleDuplicates.length > 0 && !allowFuzzyCreate) {
+      showToast({
+        title: 'Possible Duplicate Found',
+        message: `Similar to "${possibleDuplicates[0].customer.name}". Review the match or click "Create Anyway" to confirm.`,
+        type: 'info',
       });
       return;
     }
 
     addCustomer({ ...formData, name });
     setShowAddModal(false);
+    setAllowFuzzyCreate(false);
     setFormData({ name: '', phone: '', email: '', address: '' });
   };
 
   const handleOpenEdit = (cust: Customer) => {
     setEditingCustomer(cust);
+    setAllowFuzzyCreate(false);
     setFormData({
       name: cust.name || '',
       phone: cust.phone || '',
@@ -156,8 +177,16 @@ export const CustomersView: React.FC = () => {
   const handleEditSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingCustomer || !formData.name) return;
+    if (exactDuplicate) {
+      showToast({
+        title: 'Duplicate Contact Details',
+        message: `Another customer "${exactDuplicate.customer.name}" already uses that ${exactDuplicate.matchType}.`,
+        type: 'error',
+      });
+      return;
+    }
     updateCustomer(editingCustomer.id, {
-      name: formData.name,
+      name: formData.name.trim(),
       phone: formData.phone,
       email: formData.email,
       address: formData.address,
@@ -243,7 +272,23 @@ export const CustomersView: React.FC = () => {
   };
 
   return (
-    <div className="space-y-6 pb-12">
+    <>
+      {selectedCustomer ? (
+        <CustomerDetailView
+          customer={selectedCustomer}
+          sales={sales}
+          moneyMovements={moneyMovements}
+          settings={settings}
+          isPrivacyMode={isPrivacyMode}
+          isSalesStaff={isSalesStaff}
+          onBack={() => setSelectedCustomerId(null)}
+          onEdit={handleOpenEdit}
+          onDelete={(cust) => setCustomerToDelete(cust)}
+          onSettleDebt={handleOpenSettle}
+          onSaveNotes={(customerId, notes) => updateCustomer(customerId, { notes })}
+        />
+      ) : (
+        <div className="space-y-6 pb-12">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">
@@ -255,7 +300,11 @@ export const CustomersView: React.FC = () => {
         </div>
 
         <button
-          onClick={() => setShowAddModal(true)}
+          onClick={() => {
+            setAllowFuzzyCreate(false);
+            setFormData({ name: '', phone: '', email: '', address: '' });
+            setShowAddModal(true);
+          }}
           className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs shadow-xs transition-colors"
         >
           <Plus className="w-4 h-4" />
@@ -398,7 +447,14 @@ export const CustomersView: React.FC = () => {
                 filteredCustomers.map((cust) => (
                   <tr key={cust.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors">
                     <td className="py-3 px-4 font-bold text-slate-900 dark:text-white">
-                      {cust.name}
+                      <button
+                        type="button"
+                        onClick={() => setSelectedCustomerId(cust.id)}
+                        className="text-left hover:text-blue-600 dark:hover:text-blue-400 hover:underline transition-colors font-bold"
+                        title="Open Customer Profile"
+                      >
+                        {cust.name}
+                      </button>
                     </td>
                     <td className="py-3 px-3">
                       <p className="flex items-center gap-1 text-[11px]"><Phone className="w-3 h-3 text-slate-400" /> {isPrivacyMode ? '••••••' : (cust.phone || 'N/A')}</p>
@@ -427,6 +483,13 @@ export const CustomersView: React.FC = () => {
                     </td>
                   <td className="py-3 px-4 text-right">
                     <div className="flex items-center justify-end gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedCustomerId(cust.id)}
+                        className="px-2.5 py-1 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold rounded-lg hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-950/60 dark:hover:text-blue-400 transition-colors"
+                      >
+                        View
+                      </button>
                       {cust.outstandingBalance > 0 && (
                         <button
                           onClick={() => handleOpenSettle(cust)}
@@ -463,6 +526,8 @@ export const CustomersView: React.FC = () => {
           </table>
         </div>
       </div>
+        </div>
+      )}
 
       {showAddModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
@@ -474,23 +539,76 @@ export const CustomersView: React.FC = () => {
             <form onSubmit={handleAddSubmit} className="space-y-3 text-xs">
               <div>
                 <label className="block font-bold mb-1">Customer Full Name *</label>
-                <input type="text" required value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl" />
+                <input type="text" required value={formData.name} onChange={(e) => { setAllowFuzzyCreate(false); setFormData({ ...formData, name: e.target.value }); }} className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl" />
               </div>
               <div>
                 <label className="block font-bold mb-1">Phone Number</label>
-                <input type="text" value={formData.phone} onChange={(e) => setFormData({ ...formData, phone: e.target.value })} className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl" />
+                <input type="text" value={formData.phone} onChange={(e) => { setAllowFuzzyCreate(false); setFormData({ ...formData, phone: e.target.value }); }} className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl" />
               </div>
               <div>
                 <label className="block font-bold mb-1">Email Address</label>
-                <input type="email" value={formData.email} onChange={(e) => setFormData({ ...formData, email: e.target.value })} className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl" />
+                <input type="email" value={formData.email} onChange={(e) => { setAllowFuzzyCreate(false); setFormData({ ...formData, email: e.target.value }); }} className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl" />
               </div>
               <div>
                 <label className="block font-bold mb-1">Street Address</label>
                 <input type="text" value={formData.address} onChange={(e) => setFormData({ ...formData, address: e.target.value })} className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl" />
               </div>
+
+              {duplicateMatches.length > 0 && (
+                <div className={`p-3 rounded-2xl border space-y-2 ${
+                  exactDuplicate
+                    ? 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-900/60'
+                    : 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900/60'
+                }`}>
+                  <div className="flex items-center gap-1.5 font-extrabold text-[11px] text-slate-900 dark:text-white">
+                    <AlertCircle className={`w-4 h-4 shrink-0 ${exactDuplicate ? 'text-rose-600' : 'text-amber-600'}`} />
+                    <span>{exactDuplicate ? 'Duplicate Customer Detected' : 'Possible Duplicate Match'}</span>
+                  </div>
+                  <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                    {duplicateMatches.slice(0, 3).map((match) => (
+                      <div key={match.customer.id} className="flex items-center justify-between gap-2 bg-white/80 dark:bg-slate-900/70 p-2 rounded-xl text-[11px]">
+                        <div className="min-w-0">
+                          <p className="font-bold text-slate-900 dark:text-white truncate">{match.customer.name}</p>
+                          <p className="text-[10px] text-slate-500 truncate">
+                            {match.reason} • {(match.customer.purchaseHistoryCount || 0)} orders
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowAddModal(false);
+                            setSelectedCustomerId(match.customer.id);
+                          }}
+                          className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg text-[10px] shrink-0"
+                        >
+                          Open Profile
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  {!exactDuplicate && possibleDuplicates.length > 0 && (
+                    <label className="flex items-center gap-2 pt-1 text-[11px] font-semibold text-amber-800 dark:text-amber-200 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={allowFuzzyCreate}
+                        onChange={(e) => setAllowFuzzyCreate(e.target.checked)}
+                        className="rounded"
+                      />
+                      <span>Confirm this is a different customer (create anyway)</span>
+                    </label>
+                  )}
+                </div>
+              )}
+
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setShowAddModal(false)} className="px-4 py-2 font-semibold">Cancel</button>
-                <button type="submit" className="px-4 py-2 bg-blue-600 text-white font-bold rounded-xl">Save Customer</button>
+                <button
+                  type="submit"
+                  disabled={!!exactDuplicate || (possibleDuplicates.length > 0 && !allowFuzzyCreate)}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold rounded-xl"
+                >
+                  Save Customer
+                </button>
               </div>
             </form>
           </div>
@@ -525,9 +643,15 @@ export const CustomersView: React.FC = () => {
                 <label className="block font-bold mb-1">Street Address</label>
                 <input type="text" value={formData.address} onChange={(e) => setFormData({ ...formData, address: e.target.value })} className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white font-medium" />
               </div>
+              {exactDuplicate && (
+                <div className="p-3 rounded-2xl border bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-900/60 text-[11px] text-rose-700 dark:text-rose-300 font-bold flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>Conflicts with existing customer "{exactDuplicate.customer.name}" ({exactDuplicate.reason}).</span>
+                </div>
+              )}
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setEditingCustomer(null)} className="px-4 py-2 font-semibold text-slate-600 dark:text-slate-400">Cancel</button>
-                <button type="submit" className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-xs transition-colors">Update Customer</button>
+                <button type="submit" disabled={!!exactDuplicate} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold rounded-xl shadow-xs transition-colors">Update Customer</button>
               </div>
             </form>
           </div>
@@ -739,11 +863,15 @@ export const CustomersView: React.FC = () => {
         onClose={() => setCustomerToDelete(null)}
         onConfirm={() => {
           if (customerToDelete) {
-            deleteCustomer(customerToDelete.id);
+            const deletedId = customerToDelete.id;
+            deleteCustomer(deletedId);
+            if (selectedCustomerId === deletedId) {
+              setSelectedCustomerId(null);
+            }
             setCustomerToDelete(null);
           }
         }}
       />
-    </div>
+    </>
   );
 };

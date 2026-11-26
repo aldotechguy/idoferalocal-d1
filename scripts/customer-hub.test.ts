@@ -9,6 +9,10 @@ import {
   refundCustomerMetrics,
   isGuestCustomerName,
 } from '../src/shared/customerLedger.ts';
+import {
+  findPotentialDuplicates,
+  phoneMatchKeys,
+} from '../src/shared/customerDedup.ts';
 
 /**
  * Customer's Hub regression suite (docs: audit of 2026-10-09).
@@ -236,4 +240,64 @@ test('a walk-in / guest sale never accrues loyalty or debt against the directory
   assert.equal(isGuestCustomerName('cash customer'), true);
   assert.equal(isGuestCustomerName(''), true);
   assert.equal(isGuestCustomerName('Apex Ltd'), false);
+});
+
+// ---------------------------------------------------------------------------
+// Sprint 1 (P2) — improved duplicate detection.
+// ---------------------------------------------------------------------------
+
+test('P2: phoneMatchKeys normalizes formatting and +234 vs local 0 prefixes', () => {
+  const intl = phoneMatchKeys('+234 803 123 4567');
+  const local = phoneMatchKeys('0803-123-4567');
+  assert.ok(intl.some((k) => local.includes(k)), 'last 10 digits should match across +234 and 0 prefixes');
+});
+
+test('P2: findPotentialDuplicates catches exact phone, email, and name matches', () => {
+  const existing = [
+    customer({ id: 'c1', name: 'Adaeze Okafor', phone: '08031234567', email: 'ada@example.com' }),
+    customer({ id: 'c2', name: 'Chidi Obi', phone: '08099998888', email: 'chidi@example.com' }),
+  ];
+
+  const byPhone = findPotentialDuplicates(existing, { name: 'Different Name', phone: '+234 803 123 4567' });
+  assert.equal(byPhone.length, 1);
+  assert.equal(byPhone[0].matchType, 'phone');
+  assert.equal(byPhone[0].confidence, 'exact');
+
+  const byEmail = findPotentialDuplicates(existing, { name: 'Other', email: ' ADA@EXAMPLE.COM ' });
+  assert.equal(byEmail.length, 1);
+  assert.equal(byEmail[0].matchType, 'email');
+  assert.equal(byEmail[0].confidence, 'exact');
+
+  const byName = findPotentialDuplicates(existing, { name: '  chidi   obi  ' });
+  assert.equal(byName.length, 1);
+  assert.equal(byName[0].matchType, 'name');
+  assert.equal(byName[0].confidence, 'exact');
+});
+
+test('P2: findPotentialDuplicates flags fuzzy typos and swapped word order as possible matches', () => {
+  const existing = [
+    customer({ id: 'c1', name: 'Adewale Johnson', phone: '08031112222' }),
+  ];
+
+  const typo = findPotentialDuplicates(existing, { name: 'Adewal Johnson' });
+  assert.equal(typo.length, 1);
+  assert.equal(typo[0].matchType, 'fuzzy_name');
+  assert.equal(typo[0].confidence, 'possible');
+
+  const swapped = findPotentialDuplicates(existing, { name: 'Johnson Adewale' });
+  assert.equal(swapped.length, 1);
+  assert.equal(swapped[0].matchType, 'fuzzy_name');
+  assert.equal(swapped[0].confidence, 'possible');
+
+  const excluded = findPotentialDuplicates(existing, { name: 'Adewale Johnson', phone: '08031112222' }, 'c1');
+  assert.equal(excluded.length, 0, 'editing the same customer must exclude itself');
+});
+
+test('P1 & P2: CustomersView wires CustomerDetailView and findPotentialDuplicates', () => {
+  const hubSource = fs.readFileSync('src/components/customers/CustomersView.tsx', 'utf8');
+  assert.match(hubSource, /CustomerDetailView/, 'CustomersView must render CustomerDetailView');
+  assert.match(hubSource, /findPotentialDuplicates/, 'CustomersView must use findPotentialDuplicates');
+
+  const detailSource = fs.readFileSync('src/components/customers/CustomerDetailView.tsx', 'utf8');
+  assert.match(detailSource, /onSaveNotes/, 'CustomerDetailView must support saving customer notes');
 });

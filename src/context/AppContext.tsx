@@ -3734,7 +3734,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const existing = customers.find((c) => c.id === id);
     if (!existing) return;
 
-    const updatedCust: Customer = { ...existing, ...updates };
+    const updatedCust: Customer = { ...existing, ...updates, updatedAt: new Date().toISOString() };
 
     setCustomers((prev) =>
       prev.map((c) => (c.id === id ? updatedCust : c))

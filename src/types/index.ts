@@ -199,12 +199,14 @@ export interface Customer {
   phone: string;
   email: string;
   address?: string;
+  notes?: string;
   purchaseHistoryCount: number;
   outstandingBalance: number;
   overageBalance?: number;
   loyaltyPoints: number;
   lifetimeValue: number;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface Supplier {

@@ -110,12 +110,14 @@ export function productRow(r: any) {
 export function customerRow(r: any) {
   return {
     id: r.id, name: r.name, phone: r.phone || '', email: r.email || '', address: r.address || undefined,
+    notes: r.notes || undefined,
     purchaseHistoryCount: n(r.purchase_history_count), outstandingBalance: KoboToNaira(r.outstanding_balance_kobo),
     loyaltyPoints: n(r.loyalty_points), lifetimeValue: KoboToNaira(r.lifetime_value_kobo),
     // Store credit (main c75f81e). Emitted only when non-zero so a snapshot with
     // no credit yet serializes byte-identically to its pre-v10 shape.
     overageBalance: KoboToNaira(r.overage_balance_kobo) || undefined,
     createdAt: r.created_at,
+    updatedAt: r.updated_at || undefined,
   };
 }
 export function supplierRow(r: any) {
@@ -258,10 +260,12 @@ export function productToRow(p: any, now: string) {
 export function customerToRow(c: any, now: string) {
   return {
     id: s(c.id), name: s(c.name, 'Walk-in Customer'), phone: s(c.phone), email: s(c.email),
-    address: c.address ? s(c.address) : null, purchase_history_count: n(c.purchaseHistoryCount),
+    address: c.address ? s(c.address) : null, notes: c.notes ? s(c.notes) : null,
+    purchase_history_count: n(c.purchaseHistoryCount),
     outstanding_balance_kobo: NairaToKobo(c.outstandingBalance), loyalty_points: n(c.loyaltyPoints),
     lifetime_value_kobo: NairaToKobo(c.lifetimeValue),
     overage_balance_kobo: NairaToKobo(c.overageBalance), created_at: s(c.createdAt, now),
+    updated_at: c.updatedAt ? s(c.updatedAt) : null,
   };
 }
 export function supplierToRow(sp: any, now: string) {
