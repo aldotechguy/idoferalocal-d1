@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { AuditLog, Customer, MoneyMovement, Sale, StoreSettings } from '../../types';
 import { NairaSign } from '../common/NairaSign';
+import { ReceiptModal } from '../common/ReceiptModal';
 import { loyaltyPointsForAmount, round2, unpaidOf } from '../../shared/customerLedger';
 
 export type CustomerDetailTab = 'overview' | 'purchases' | 'payments' | 'loyalty' | 'history';
@@ -65,6 +66,7 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
   const [notesDraft, setNotesDraft] = useState<string>(customer.notes || '');
   const [notesSaved, setNotesSaved] = useState(false);
   const [tagInput, setTagInput] = useState('');
+  const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
 
   useEffect(() => {
     setNotesDraft(customer.notes || '');
@@ -604,7 +606,14 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
                     return (
                       <tr key={s.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
                         <td className="py-3 px-4 font-mono font-bold text-slate-900 dark:text-white">
-                          <span className="font-mono font-bold">{s.invoiceNo || s.id}</span>
+                          <button
+                          type="button"
+                          onClick={() => setSelectedSale(s)}
+                          className="font-mono font-bold text-blue-600 dark:text-blue-400 hover:underline text-left"
+                          title="View Invoice"
+                        >
+                          {s.invoiceNo || s.id}
+                        </button>
                         </td>
                         <td className="py-3 px-3 text-slate-500">{formatDate(s.createdAt)}</td>
                         <td className="py-3 px-3">{s.type}</td>
@@ -681,7 +690,14 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
                     unpaidSales.map((s) => (
                       <tr key={s.id}>
                         <td className="py-3 px-4 font-mono font-bold text-slate-900 dark:text-white">
-                          <span className="font-mono font-bold">{s.invoiceNo || s.id}</span>
+                          <button
+                          type="button"
+                          onClick={() => setSelectedSale(s)}
+                          className="font-mono font-bold text-blue-600 dark:text-blue-400 hover:underline text-left"
+                          title="View Invoice"
+                        >
+                          {s.invoiceNo || s.id}
+                        </button>
                         </td>
                         <td className="py-3 px-3 text-slate-500">{formatDate(s.createdAt)}</td>
                         <td className="py-3 px-3 font-bold">{formatMoney(s.totalAmount)}</td>
@@ -783,7 +799,14 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
                   activeSales.map((s) => (
                     <tr key={s.id}>
                       <td className="py-3 px-4 font-mono font-bold text-slate-900 dark:text-white">
-                        <span className="font-mono font-bold">{s.invoiceNo || s.id}</span>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedSale(s)}
+                          className="font-mono font-bold text-blue-600 dark:text-blue-400 hover:underline text-left"
+                          title="View Invoice"
+                        >
+                          {s.invoiceNo || s.id}
+                        </button>
                       </td>
                       <td className="py-3 px-3 text-slate-500">{formatDate(s.createdAt)}</td>
                       <td className="py-3 px-3 font-bold">{formatMoney(s.totalAmount)}</td>
@@ -835,6 +858,13 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
             </div>
           )}
         </div>
+      )}
+
+      {selectedSale && (
+        <ReceiptModal
+          sale={selectedSale}
+          onClose={() => setSelectedSale(null)}
+        />
       )}
     </div>
   );
