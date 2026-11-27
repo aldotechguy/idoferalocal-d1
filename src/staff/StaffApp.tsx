@@ -130,7 +130,7 @@ export const StaffApp: React.FC = () => {
     archive: ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
     pricing: ['Administrator', 'Store Manager', 'Accountant'],
     inventory: ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
-    customers: ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant'],
+    customers: ['Administrator', 'Store Manager', 'Sales Staff', 'Accountant', 'Customer Support'],
     suppliers: ['Administrator', 'Store Manager', 'Accountant'],
     purchases: ['Administrator', 'Store Manager', 'Accountant'],
     'purchases-suppliers': ['Administrator', 'Store Manager', 'Accountant'],

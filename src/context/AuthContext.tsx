@@ -132,6 +132,7 @@ export const DEMO_USERS: Record<UserRole, UserProfile> = {
   'Store Manager': STANDARD_ADMIN_USER,
   'Sales Staff': STANDARD_ADMIN_USER,
   Accountant: STANDARD_ADMIN_USER,
+  'Customer Support': STANDARD_ADMIN_USER,
 };
 
 const DUMMY_USER_IDS = new Set(['usr-sales-1', 'usr-accountant-1']);

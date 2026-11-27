@@ -179,4 +179,77 @@ describe('CustomersView UI', () => {
 
     expect(updateCustomer).toHaveBeenCalledWith('c-2', { tags: ['Retail', 'Wholesale'] });
   });
+
+  it('grants Customer Support role read & write CRM access without delete/export', () => {
+    mockUseAuth.mockReturnValue({
+      currentUser: { role: 'Customer Support', displayName: 'Support Agent' },
+      isPrivacyMode: false,
+    });
+
+    render(<CustomersView />);
+    expect(screen.getByText('Add New Customer')).toBeInTheDocument();
+    expect(screen.getAllByTitle('Edit Customer Details').length).toBeGreaterThan(0);
+    expect(screen.queryByTitle('Delete Customer')).not.toBeInTheDocument();
+    expect(screen.queryByText('Export CSV')).not.toBeInTheDocument();
+  });
+
+  it('supports expanded payment methods and transaction reference in Settle Balance modal', () => {
+    const updateCustomerBalance = vi.fn();
+    mockUseApp.mockReturnValue({
+      customers: [makeCustomer(1)],
+      sales: [],
+      moneyMovements: [],
+      auditLogs: [],
+      addCustomer: vi.fn(),
+      updateCustomer: vi.fn(),
+      updateCustomerBalance,
+      deleteCustomer: vi.fn(),
+      settings: { currencySymbol: '₦', pointsPerDollar: 1 },
+    });
+
+    render(<CustomersView />);
+    fireEvent.click(screen.getByText('Settle Balance'));
+    fireEvent.change(screen.getByLabelText('Payment Method'), { target: { value: 'Mobile Transfer' } });
+    fireEvent.change(screen.getByPlaceholderText('e.g., TRX-849201'), { target: { value: 'TRX-999' } });
+    fireEvent.click(screen.getByText(/Record Payment/));
+
+    expect(updateCustomerBalance).toHaveBeenCalledWith(
+      'c-1',
+      -500,
+      expect.objectContaining({
+        paymentMethod: 'Mobile Transfer',
+        paymentNote: 'Ref: TRX-999',
+      })
+    );
+  });
+
+  it('renders Support Dashboard tab and logs a support ticket to customer record', () => {
+    const updateCustomer = vi.fn();
+    mockUseApp.mockReturnValue({
+      customers: [makeCustomer(1)],
+      sales: [],
+      moneyMovements: [],
+      auditLogs: [],
+      addCustomer: vi.fn(),
+      updateCustomer,
+      updateCustomerBalance: vi.fn(),
+      deleteCustomer: vi.fn(),
+      settings: { currencySymbol: '₦', pointsPerDollar: 1 },
+    });
+
+    render(<CustomersView />);
+    fireEvent.click(screen.getByText('Support Dashboard'));
+    fireEvent.change(screen.getByLabelText('Select customer for ticket'), { target: { value: 'c-1' } });
+    fireEvent.change(screen.getByPlaceholderText('Ticket subject...'), { target: { value: 'Missing item in order' } });
+    fireEvent.click(screen.getByText('Create Ticket'));
+
+    expect(updateCustomer).toHaveBeenCalledWith(
+      'c-1',
+      expect.objectContaining({
+        supportTickets: expect.arrayContaining([
+          expect.objectContaining({ subject: 'Missing item in order', status: 'Open' }),
+        ]),
+      })
+    );
+  });
 });

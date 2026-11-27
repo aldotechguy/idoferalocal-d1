@@ -21,13 +21,25 @@ import {
   History,
   Plus,
   X,
+  LifeBuoy,
+  Flag,
 } from 'lucide-react';
-import { AuditLog, Customer, MoneyMovement, Sale, StoreSettings } from '../../types';
+import {
+  AuditLog,
+  Customer,
+  MoneyMovement,
+  Sale,
+  StoreSettings,
+  SupportTicket,
+  SupportTicketPriority,
+  SupportTicketStatus,
+} from '../../types';
 import { NairaSign } from '../common/NairaSign';
 import { ReceiptModal } from '../common/ReceiptModal';
 import { loyaltyPointsForAmount, round2, unpaidOf } from '../../shared/customerLedger';
+import { CustomerPermissions } from '../../shared/customerPermissions';
 
-export type CustomerDetailTab = 'overview' | 'purchases' | 'payments' | 'loyalty' | 'history';
+export type CustomerDetailTab = 'overview' | 'purchases' | 'payments' | 'loyalty' | 'history' | 'support';
 
 const PRESET_CUSTOMER_TAGS = ['VIP', 'Wholesale', 'Retail', 'Credit-Approved', 'Follow-Up'];
 
@@ -39,12 +51,15 @@ interface CustomerDetailViewProps {
   settings: StoreSettings;
   isPrivacyMode: boolean;
   isSalesStaff: boolean;
+  permissions?: CustomerPermissions;
+  currentUserName?: string;
   onBack: () => void;
   onEdit: (customer: Customer) => void;
   onDelete: (customer: Customer) => void;
   onSettleDebt: (customer: Customer) => void;
   onSaveNotes: (customerId: string, notes: string) => void;
   onSaveTags?: (customerId: string, tags: string[]) => void;
+  onSaveSupportTickets?: (customerId: string, tickets: SupportTicket[]) => void;
 }
 
 export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
@@ -55,18 +70,35 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
   settings,
   isPrivacyMode,
   isSalesStaff,
+  permissions,
+  currentUserName = 'Staff',
   onBack,
   onEdit,
   onDelete,
   onSettleDebt,
   onSaveNotes,
   onSaveTags,
+  onSaveSupportTickets,
 }) => {
+  const effectivePermissions = permissions || {
+    canCreate: !isSalesStaff,
+    canEdit: !isSalesStaff,
+    canDelete: !isSalesStaff,
+    canSettleDebt: true,
+    canExport: !isSalesStaff,
+    canEditNotes: true,
+    canEditTags: true,
+    canBulkTag: !isSalesStaff,
+    canManageSupport: true,
+  };
   const [activeTab, setActiveTab] = useState<CustomerDetailTab>('overview');
   const [notesDraft, setNotesDraft] = useState<string>(customer.notes || '');
   const [notesSaved, setNotesSaved] = useState(false);
   const [tagInput, setTagInput] = useState('');
   const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
+  const [ticketSubject, setTicketSubject] = useState('');
+  const [ticketDesc, setTicketDesc] = useState('');
+  const [ticketPriority, setTicketPriority] = useState<SupportTicketPriority>('Medium');
 
   useEffect(() => {
     setNotesDraft(customer.notes || '');
@@ -137,6 +169,37 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
 
   const notesDirty = notesDraft.trim() !== (customer.notes || '').trim();
   const customerTags = customer.tags || [];
+  const customerTickets = customer.supportTickets || [];
+
+  const handleCreateTicket = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onSaveSupportTickets || !ticketSubject.trim()) return;
+    const now = new Date().toISOString();
+    const newTicket: SupportTicket = {
+      id: `tkt_${Date.now()}`,
+      subject: ticketSubject.trim(),
+      description: ticketDesc.trim(),
+      status: 'Open',
+      priority: ticketPriority,
+      flagged: false,
+      createdBy: currentUserName,
+      createdAt: now,
+      updatedAt: now,
+    };
+    onSaveSupportTickets(customer.id, [newTicket, ...customerTickets]);
+    setTicketSubject('');
+    setTicketDesc('');
+    setTicketPriority('Medium');
+  };
+
+  const handleUpdateTicket = (ticketId: string, patch: Partial<SupportTicket>) => {
+    if (!onSaveSupportTickets) return;
+    const now = new Date().toISOString();
+    onSaveSupportTickets(
+      customer.id,
+      customerTickets.map((t) => (t.id === ticketId ? { ...t, ...patch, updatedAt: now } : t))
+    );
+  };
 
   const customerAuditLogs = useMemo(() => {
     return [...auditLogs]
@@ -231,7 +294,7 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {(customer.outstandingBalance || 0) > 0 && (
+            {(customer.outstandingBalance || 0) > 0 && effectivePermissions.canSettleDebt && (
               <button
                 type="button"
                 onClick={() => onSettleDebt(customer)}
@@ -241,26 +304,26 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
                 <span>Settle Balance</span>
               </button>
             )}
-            {!isSalesStaff && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => onEdit(customer)}
-                  className="px-3.5 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold rounded-xl text-xs transition-colors flex items-center gap-1.5"
-                >
-                  <Edit className="w-3.5 h-3.5" />
-                  <span>Edit</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onDelete(customer)}
-                  className="px-3 py-2 bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-600 dark:text-rose-400 font-bold rounded-xl text-xs transition-colors flex items-center gap-1.5"
-                  title="Delete Customer"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  <span>Delete</span>
-                </button>
-              </>
+            {effectivePermissions.canEdit && (
+              <button
+                type="button"
+                onClick={() => onEdit(customer)}
+                className="px-3.5 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold rounded-xl text-xs transition-colors flex items-center gap-1.5"
+              >
+                <Edit className="w-3.5 h-3.5" />
+                <span>Edit</span>
+              </button>
+            )}
+            {effectivePermissions.canDelete && (
+              <button
+                type="button"
+                onClick={() => onDelete(customer)}
+                className="px-3 py-2 bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-600 dark:text-rose-400 font-bold rounded-xl text-xs transition-colors flex items-center gap-1.5"
+                title="Delete Customer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete</span>
+              </button>
             )}
           </div>
         </div>
@@ -340,6 +403,22 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
             <span>Activity Log</span>
             <span className="px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-slate-200/80 dark:bg-slate-700 text-slate-700 dark:text-slate-200">
               {customerAuditLogs.length}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('support')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
+              activeTab === 'support'
+                ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
+                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+          >
+            <LifeBuoy className="w-3.5 h-3.5" />
+            <span>Support Tickets</span>
+            <span className="px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-slate-200/80 dark:bg-slate-700 text-slate-700 dark:text-slate-200">
+              {customerTickets.length}
             </span>
           </button>
         </div>
@@ -857,6 +936,126 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {activeTab === 'support' && (
+        <div className="space-y-4">
+          {onSaveSupportTickets && effectivePermissions.canManageSupport && (
+            <form
+              onSubmit={handleCreateTicket}
+              className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 p-4 space-y-3 shadow-xs"
+            >
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-black text-slate-900 dark:text-white flex items-center gap-2">
+                  <LifeBuoy className="w-4 h-4 text-blue-600" />
+                  <span>Log Support Ticket</span>
+                </h2>
+                <span className="text-[11px] text-slate-400">Synced with D1</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                <input
+                  type="text"
+                  required
+                  placeholder="Ticket subject (e.g., Damaged delivery item)..."
+                  value={ticketSubject}
+                  onChange={(e) => setTicketSubject(e.target.value)}
+                  className="sm:col-span-2 px-3 py-2 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white focus:outline-none"
+                />
+                <select
+                  aria-label="Ticket priority"
+                  value={ticketPriority}
+                  onChange={(e) => setTicketPriority(e.target.value as SupportTicketPriority)}
+                  className="px-3 py-2 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white font-bold focus:outline-none"
+                >
+                  <option value="Low">Low Priority</option>
+                  <option value="Medium">Medium Priority</option>
+                  <option value="High">High Priority</option>
+                  <option value="Urgent">Urgent</option>
+                </select>
+              </div>
+              <textarea
+                rows={2}
+                placeholder="Describe the issue or follow-up steps..."
+                value={ticketDesc}
+                onChange={(e) => setTicketDesc(e.target.value)}
+                className="w-full px-3 py-2 bg-slate-100 dark:bg-slate-800 rounded-xl text-xs text-slate-900 dark:text-white focus:outline-none"
+              />
+              <div className="flex justify-end">
+                <button
+                  type="submit"
+                  disabled={!ticketSubject.trim()}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold rounded-xl text-xs"
+                >
+                  Create Ticket
+                </button>
+              </div>
+            </form>
+          )}
+
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-xs overflow-hidden">
+            <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+              <h3 className="text-sm font-black text-slate-900 dark:text-white">
+                Tickets ({customerTickets.length})
+              </h3>
+            </div>
+            {customerTickets.length === 0 ? (
+              <div className="py-10 text-center text-xs text-slate-400">
+                No support tickets logged for this customer yet.
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                {customerTickets.map((t) => (
+                  <div key={t.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-bold text-xs text-slate-900 dark:text-white">{t.subject}</span>
+                        <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                          {t.priority}
+                        </span>
+                        {t.flagged && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300">
+                            <Flag className="w-2.5 h-2.5" /> Flagged
+                          </span>
+                        )}
+                      </div>
+                      {t.description && <p className="text-xs text-slate-600 dark:text-slate-400">{t.description}</p>}
+                      <p className="text-[10px] text-slate-400">
+                        Opened by {t.createdBy} • {formatDate(t.createdAt)}
+                      </p>
+                    </div>
+                    {onSaveSupportTickets && effectivePermissions.canManageSupport && (
+                      <div className="flex items-center gap-2 shrink-0">
+                        <select
+                          aria-label={`Status for ${t.subject}`}
+                          value={t.status}
+                          onChange={(e) => handleUpdateTicket(t.id, { status: e.target.value as SupportTicketStatus })}
+                          className="px-2.5 py-1 bg-slate-100 dark:bg-slate-800 rounded-lg text-[11px] font-bold text-slate-800 dark:text-slate-200"
+                        >
+                          <option value="Open">Open</option>
+                          <option value="In Progress">In Progress</option>
+                          <option value="Flagged">Flagged</option>
+                          <option value="Resolved">Resolved</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => handleUpdateTicket(t.id, { flagged: !t.flagged })}
+                          className={`p-1.5 rounded-lg border text-xs ${
+                            t.flagged
+                              ? 'bg-amber-50 border-amber-300 text-amber-600'
+                              : 'bg-slate-100 dark:bg-slate-800 border-transparent text-slate-500'
+                          }`}
+                          title={t.flagged ? 'Unflag ticket' : 'Flag ticket'}
+                        >
+                          <Flag className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

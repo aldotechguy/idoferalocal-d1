@@ -115,10 +115,18 @@ export function customerRow(r: any) {
       if (Array.isArray(parsed) && parsed.length > 0) tags = parsed.map((t: any) => String(t)).filter(Boolean);
     } catch {}
   }
+  let supportTickets: any[] | undefined;
+  if (r.support_tickets_json) {
+    try {
+      const parsed = JSON.parse(r.support_tickets_json);
+      if (Array.isArray(parsed) && parsed.length > 0) supportTickets = parsed;
+    } catch {}
+  }
   return {
     id: r.id, name: r.name, phone: r.phone || '', email: r.email || '', address: r.address || undefined,
     notes: r.notes || undefined,
     tags,
+    supportTickets,
     purchaseHistoryCount: n(r.purchase_history_count), outstandingBalance: KoboToNaira(r.outstanding_balance_kobo),
     loyaltyPoints: n(r.loyalty_points), lifetimeValue: KoboToNaira(r.lifetime_value_kobo),
     // Store credit (main c75f81e). Emitted only when non-zero so a snapshot with
@@ -270,6 +278,7 @@ export function customerToRow(c: any, now: string) {
     id: s(c.id), name: s(c.name, 'Walk-in Customer'), phone: s(c.phone), email: s(c.email),
     address: c.address ? s(c.address) : null, notes: c.notes ? s(c.notes) : null,
     tags_json: Array.isArray(c.tags) && c.tags.length > 0 ? JSON.stringify(c.tags) : null,
+    support_tickets_json: Array.isArray(c.supportTickets) && c.supportTickets.length > 0 ? JSON.stringify(c.supportTickets) : null,
     purchase_history_count: n(c.purchaseHistoryCount),
     outstanding_balance_kobo: NairaToKobo(c.outstandingBalance), loyalty_points: n(c.loyaltyPoints),
     lifetime_value_kobo: NairaToKobo(c.lifetimeValue),

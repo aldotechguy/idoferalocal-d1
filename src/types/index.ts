@@ -1,4 +1,4 @@
-export type UserRole = 'Administrator' | 'Sales Staff' | 'Accountant' | 'Store Manager';
+export type UserRole = 'Administrator' | 'Sales Staff' | 'Accountant' | 'Store Manager' | 'Customer Support';
 
 export interface UserProfile {
   id: string;
@@ -193,6 +193,22 @@ export interface Sale {
   expenseId?: string;
 }
 
+export type SupportTicketStatus = 'Open' | 'In Progress' | 'Resolved' | 'Flagged';
+export type SupportTicketPriority = 'Low' | 'Medium' | 'High' | 'Urgent';
+
+export interface SupportTicket {
+  id: string;
+  subject: string;
+  description: string;
+  status: SupportTicketStatus;
+  priority: SupportTicketPriority;
+  flagged?: boolean;
+  resolutionNote?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
 export interface Customer {
   id: string;
   name: string;
@@ -201,6 +217,7 @@ export interface Customer {
   address?: string;
   notes?: string;
   tags?: string[];
+  supportTickets?: SupportTicket[];
   purchaseHistoryCount: number;
   outstandingBalance: number;
   overageBalance?: number;

@@ -17,6 +17,8 @@ import {
   ShoppingBag,
   AlertCircle,
   Tag,
+  LifeBuoy,
+  Flag,
 } from 'lucide-react';
 import { NairaSign } from '../common/NairaSign';
 import Papa from 'papaparse';
@@ -24,18 +26,26 @@ import { List, type RowComponentProps } from 'react-window';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { Customer } from '../../types';
+import { Customer, SupportTicket, SupportTicketPriority, SupportTicketStatus } from '../../types';
 import { ConfirmModal } from '../common/ConfirmModal';
 import { computeCustomerMetrics, settleCustomerBalance, round2 } from '../../shared/customerLedger';
 import { findPotentialDuplicates } from '../../shared/customerDedup';
+import { getCustomerPermissions } from '../../shared/customerPermissions';
 import { CustomerDetailView } from './CustomerDetailView';
 
 export const CustomersView: React.FC = () => {
   const { customers, sales, moneyMovements, auditLogs, addCustomer, updateCustomer, updateCustomerBalance, deleteCustomer, settings } = useApp();
   const { currentUser, isPrivacyMode } = useAuth();
   const { showToast } = useToast();
-  const isAdmin = currentUser?.role === 'Administrator';
+  const permissions = useMemo(() => getCustomerPermissions(currentUser?.role), [currentUser?.role]);
   const isSalesStaff = currentUser?.role === 'Sales Staff';
+
+  const [hubTab, setHubTab] = useState<'directory' | 'support'>('directory');
+  const [supportStatusFilter, setSupportStatusFilter] = useState<'ALL' | SupportTicketStatus>('ALL');
+  const [newTicketCustomerId, setNewTicketCustomerId] = useState('');
+  const [newTicketSubject, setNewTicketSubject] = useState('');
+  const [newTicketDesc, setNewTicketDesc] = useState('');
+  const [newTicketPriority, setNewTicketPriority] = useState<SupportTicketPriority>('Medium');
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTag, setSelectedTag] = useState<string>('ALL');
@@ -49,6 +59,7 @@ export const CustomersView: React.FC = () => {
   const [settleCustomer, setSettleCustomer] = useState<Customer | null>(null);
   const [settleAmount, setSettleAmount] = useState<string>('');
   const [paymentMethod, setPaymentMethod] = useState<string>('Cash');
+  const [paymentReference, setPaymentReference] = useState<string>('');
   const [paymentNote, setPaymentNote] = useState<string>('');
 
   const [formData, setFormData] = useState({ name: '', phone: '', email: '', address: '' });
@@ -271,6 +282,7 @@ export const CustomersView: React.FC = () => {
     const bal = Number(cust.outstandingBalance) || 0;
     setSettleAmount(bal.toFixed(2));
     setPaymentMethod('Cash');
+    setPaymentReference('');
     setPaymentNote('');
   };
 
@@ -319,13 +331,18 @@ export const CustomersView: React.FC = () => {
       return;
     }
 
+    const combinedNote = [paymentReference.trim() ? `Ref: ${paymentReference.trim()}` : '', paymentNote.trim()]
+      .filter(Boolean)
+      .join(' | ');
+
     updateCustomerBalance(settleCustomer.id, -payVal, {
       paymentMethod: paymentMethod as any,
-      paymentNote: paymentNote.trim() || undefined,
+      paymentNote: combinedNote || undefined,
       performedBy: currentUser?.displayName || currentUser?.username || 'Admin',
     });
     setSettleCustomer(null);
     setSettleAmount('');
+    setPaymentReference('');
     setPaymentNote('');
   };
 
@@ -333,13 +350,77 @@ export const CustomersView: React.FC = () => {
     if (!settleCustomer) return;
     const bal = Number(settleCustomer.outstandingBalance) || 0;
     if (bal <= 0) return;
+    const combinedNote = [paymentReference.trim() ? `Ref: ${paymentReference.trim()}` : '', paymentNote.trim()]
+      .filter(Boolean)
+      .join(' | ');
     updateCustomerBalance(settleCustomer.id, -bal, {
       paymentMethod: paymentMethod as any,
-      paymentNote: paymentNote.trim() || undefined,
+      paymentNote: combinedNote || undefined,
       performedBy: currentUser?.displayName || currentUser?.username || 'Admin',
     });
     setSettleCustomer(null);
+    setPaymentReference('');
     setPaymentNote('');
+  };
+
+  const allSupportTickets = useMemo(() => {
+    const list: Array<{ customer: Customer; ticket: SupportTicket }> = [];
+    augmentedCustomers.forEach((cust) => {
+      (cust.supportTickets || []).forEach((ticket) => {
+        list.push({ customer: cust, ticket });
+      });
+    });
+    return list.sort((a, b) => String(b.ticket.createdAt || '').localeCompare(String(a.ticket.createdAt || '')));
+  }, [augmentedCustomers]);
+
+  const openSupportCount = allSupportTickets.filter((x) => x.ticket.status !== 'Resolved').length;
+
+  const filteredSupportTickets = useMemo(() => {
+    return allSupportTickets.filter(({ customer, ticket }) => {
+      if (supportStatusFilter !== 'ALL' && ticket.status !== supportStatusFilter) return false;
+      const q = (searchQuery || '').toLowerCase();
+      if (!q) return true;
+      return (
+        ticket.subject.toLowerCase().includes(q) ||
+        (ticket.description || '').toLowerCase().includes(q) ||
+        (customer.name || '').toLowerCase().includes(q)
+      );
+    });
+  }, [allSupportTickets, supportStatusFilter, searchQuery]);
+
+  const handleCreateHubTicket = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cust = customers.find((c) => c.id === newTicketCustomerId);
+    if (!cust || !newTicketSubject.trim()) return;
+    const now = new Date().toISOString();
+    const ticket: SupportTicket = {
+      id: `tkt_${Date.now()}`,
+      subject: newTicketSubject.trim(),
+      description: newTicketDesc.trim(),
+      status: 'Open',
+      priority: newTicketPriority,
+      flagged: false,
+      createdBy: currentUser?.displayName || currentUser?.username || 'Staff',
+      createdAt: now,
+      updatedAt: now,
+    };
+    updateCustomer(cust.id, { supportTickets: [ticket, ...(cust.supportTickets || [])] });
+    showToast({ title: 'Support Ticket Logged', message: `Ticket opened for ${cust.name}.`, type: 'success' });
+    setNewTicketCustomerId('');
+    setNewTicketSubject('');
+    setNewTicketDesc('');
+    setNewTicketPriority('Medium');
+  };
+
+  const handleUpdateHubTicket = (customerId: string, ticketId: string, patch: Partial<SupportTicket>) => {
+    const cust = customers.find((c) => c.id === customerId);
+    if (!cust) return;
+    const now = new Date().toISOString();
+    updateCustomer(customerId, {
+      supportTickets: (cust.supportTickets || []).map((t) =>
+        t.id === ticketId ? { ...t, ...patch, updatedAt: now } : t
+      ),
+    });
   };
 
   return (
@@ -353,12 +434,15 @@ export const CustomersView: React.FC = () => {
           settings={settings}
           isPrivacyMode={isPrivacyMode}
           isSalesStaff={isSalesStaff}
+          permissions={permissions}
+          currentUserName={currentUser?.displayName || currentUser?.username || 'Staff'}
           onBack={() => setSelectedCustomerId(null)}
           onEdit={handleOpenEdit}
           onDelete={(cust) => setCustomerToDelete(cust)}
           onSettleDebt={handleOpenSettle}
           onSaveNotes={(customerId, notes) => updateCustomer(customerId, { notes })}
           onSaveTags={(customerId, tags) => updateCustomer(customerId, { tags })}
+          onSaveSupportTickets={(customerId, supportTickets) => updateCustomer(customerId, { supportTickets })}
         />
       ) : (
         <div className="space-y-6 pb-12">
@@ -372,19 +456,51 @@ export const CustomersView: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => {
-              setAllowFuzzyCreate(false);
-              setFormData({ name: '', phone: '', email: '', address: '' });
-              setShowAddModal(true);
-            }}
-            className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs shadow-xs transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Add New Customer</span>
-          </button>
-          {isAdmin && (
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
+            <button
+              type="button"
+              onClick={() => setHubTab('directory')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                hubTab === 'directory'
+                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-200'
+              }`}
+            >
+              Customer Directory
+            </button>
+            <button
+              type="button"
+              onClick={() => setHubTab('support')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 ${
+                hubTab === 'support'
+                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-200'
+              }`}
+            >
+              <LifeBuoy className="w-3.5 h-3.5" />
+              <span>Support Dashboard</span>
+              {openSupportCount > 0 && (
+                <span className="px-1.5 py-0.5 rounded-md text-[10px] font-extrabold bg-rose-500 text-white">
+                  {openSupportCount}
+                </span>
+              )}
+            </button>
+          </div>
+          {permissions.canCreate && (
+            <button
+              onClick={() => {
+                setAllowFuzzyCreate(false);
+                setFormData({ name: '', phone: '', email: '', address: '' });
+                setShowAddModal(true);
+              }}
+              className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs shadow-xs transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add New Customer</span>
+            </button>
+          )}
+          {permissions.canExport && (
             <button
               onClick={exportCsv}
               className="flex items-center gap-1.5 px-4 py-2 bg-green-600 hover:bg-green-700 text-white font-bold rounded-xl text-xs shadow-xs transition-colors"
@@ -395,6 +511,8 @@ export const CustomersView: React.FC = () => {
         </div>
       </div>
 
+      {hubTab === 'directory' ? (
+      <>
       {/* KPI Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Total Customers */}
@@ -646,7 +764,7 @@ export const CustomersView: React.FC = () => {
                           >
                             View
                           </button>
-                          {cust.outstandingBalance > 0 && (
+                          {cust.outstandingBalance > 0 && permissions.canSettleDebt && (
                             <button
                               onClick={() => handleOpenSettle(cust)}
                               className="px-2.5 py-1 bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400 text-[10px] font-bold rounded-lg hover:bg-emerald-200 transition-colors flex items-center gap-1"
@@ -655,23 +773,23 @@ export const CustomersView: React.FC = () => {
                               <span>Settle</span>
                             </button>
                           )}
-                          {!isSalesStaff && (
-                            <>
-                              <button
-                                onClick={() => handleOpenEdit(cust)}
-                                className="p-1.5 text-slate-400 hover:text-blue-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-                                title="Edit Customer Details"
-                              >
-                                <Edit className="w-4 h-4" />
-                              </button>
-                              <button
-                                onClick={() => setCustomerToDelete(cust)}
-                                className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-                                title="Delete Customer"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </>
+                          {permissions.canEdit && (
+                            <button
+                              onClick={() => handleOpenEdit(cust)}
+                              className="p-1.5 text-slate-400 hover:text-blue-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                              title="Edit Customer Details"
+                            >
+                              <Edit className="w-4 h-4" />
+                            </button>
+                          )}
+                          {permissions.canDelete && (
+                            <button
+                              onClick={() => setCustomerToDelete(cust)}
+                              className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                              title="Delete Customer"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
                           )}
                         </div>
                       </div>
@@ -775,7 +893,7 @@ export const CustomersView: React.FC = () => {
                       >
                         View
                       </button>
-                      {cust.outstandingBalance > 0 && (
+                      {cust.outstandingBalance > 0 && permissions.canSettleDebt && (
                         <button
                           onClick={() => handleOpenSettle(cust)}
                           className="px-2.5 py-1 bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400 text-[10px] font-bold rounded-lg hover:bg-emerald-200 transition-colors flex items-center gap-1"
@@ -784,23 +902,23 @@ export const CustomersView: React.FC = () => {
                           <span>Settle Balance</span>
                         </button>
                       )}
-                      {!isSalesStaff && (
-                        <>
-                          <button
-                            onClick={() => handleOpenEdit(cust)}
-                            className="p-1.5 text-slate-400 hover:text-blue-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-                            title="Edit Customer Details"
-                          >
-                            <Edit className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => setCustomerToDelete(cust)}
-                            className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-                            title="Delete Customer"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </>
+                      {permissions.canEdit && (
+                        <button
+                          onClick={() => handleOpenEdit(cust)}
+                          className="p-1.5 text-slate-400 hover:text-blue-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                          title="Edit Customer Details"
+                        >
+                          <Edit className="w-4 h-4" />
+                        </button>
+                      )}
+                      {permissions.canDelete && (
+                        <button
+                          onClick={() => setCustomerToDelete(cust)}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                          title="Delete Customer"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       )}
                     </div>
                   </td>
@@ -832,6 +950,182 @@ export const CustomersView: React.FC = () => {
           </div>
         </div>
       </div>
+      </>
+      ) : (
+        <div className="space-y-6">
+          {/* Support Dashboard KPIs */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            {(['Open', 'Flagged', 'In Progress', 'Resolved'] as SupportTicketStatus[]).map((st) => {
+              const count = allSupportTickets.filter((x) => x.ticket.status === st || (st === 'Flagged' && x.ticket.flagged)).length;
+              return (
+                <div key={st} className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-xs">
+                  <span className="text-[10px] font-extrabold uppercase text-slate-400 tracking-wider block">{st} Tickets</span>
+                  <p className="text-2xl font-black text-slate-900 dark:text-white mt-1">{count}</p>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* New Support Ticket Form */}
+          {permissions.canManageSupport && (
+            <form
+              onSubmit={handleCreateHubTicket}
+              className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-3"
+            >
+              <h2 className="text-sm font-black text-slate-900 dark:text-white flex items-center gap-2">
+                <LifeBuoy className="w-4 h-4 text-blue-600" />
+                <span>Log New Support Ticket</span>
+              </h2>
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
+                <select
+                  aria-label="Select customer for ticket"
+                  required
+                  value={newTicketCustomerId}
+                  onChange={(e) => setNewTicketCustomerId(e.target.value)}
+                  className="px-3 py-2 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white font-bold focus:outline-none"
+                >
+                  <option value="">Select Customer...</option>
+                  {customers.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ticket subject..."
+                  value={newTicketSubject}
+                  onChange={(e) => setNewTicketSubject(e.target.value)}
+                  className="sm:col-span-2 px-3 py-2 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white focus:outline-none"
+                />
+                <select
+                  aria-label="New ticket priority"
+                  value={newTicketPriority}
+                  onChange={(e) => setNewTicketPriority(e.target.value as SupportTicketPriority)}
+                  className="px-3 py-2 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white font-bold focus:outline-none"
+                >
+                  <option value="Low">Low Priority</option>
+                  <option value="Medium">Medium Priority</option>
+                  <option value="High">High Priority</option>
+                  <option value="Urgent">Urgent</option>
+                </select>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <input
+                  type="text"
+                  placeholder="Issue details or requested action..."
+                  value={newTicketDesc}
+                  onChange={(e) => setNewTicketDesc(e.target.value)}
+                  className="flex-1 px-3 py-2 bg-slate-100 dark:bg-slate-800 rounded-xl text-xs text-slate-900 dark:text-white focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={!newTicketCustomerId || !newTicketSubject.trim()}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold rounded-xl text-xs"
+                >
+                  Create Ticket
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* Ticket Queue */}
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-xs overflow-hidden">
+            <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+              <h3 className="text-sm font-black text-slate-900 dark:text-white">
+                Support Queue ({filteredSupportTickets.length})
+              </h3>
+              <div className="flex items-center gap-2">
+                {(['ALL', 'Open', 'In Progress', 'Flagged', 'Resolved'] as const).map((st) => (
+                  <button
+                    key={st}
+                    type="button"
+                    onClick={() => setSupportStatusFilter(st)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors ${
+                      supportStatusFilter === st
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                    }`}
+                  >
+                    {st}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {filteredSupportTickets.length === 0 ? (
+              <div className="py-12 text-center text-xs text-slate-400">
+                No support tickets match the selected filter.
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                {filteredSupportTickets.map(({ customer, ticket }) => (
+                  <div key={ticket.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-bold text-xs text-slate-900 dark:text-white">{ticket.subject}</span>
+                        <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                          {ticket.priority}
+                        </span>
+                        {ticket.flagged && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300">
+                            <Flag className="w-2.5 h-2.5" /> Flagged
+                          </span>
+                        )}
+                      </div>
+                      {ticket.description && <p className="text-xs text-slate-600 dark:text-slate-400">{ticket.description}</p>}
+                      <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedCustomerId(customer.id)}
+                          className="font-bold text-blue-600 dark:text-blue-400 hover:underline"
+                        >
+                          {customer.name}
+                        </button>
+                        {!isPrivacyMode && customer.phone && (
+                          <a href={`tel:${customer.phone}`} className="hover:underline flex items-center gap-1">
+                            <Phone className="w-3 h-3" /> {customer.phone}
+                          </a>
+                        )}
+                        {!isPrivacyMode && customer.email && (
+                          <a href={`mailto:${customer.email}`} className="hover:underline flex items-center gap-1">
+                            <Mail className="w-3 h-3" /> {customer.email}
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                    {permissions.canManageSupport && (
+                      <div className="flex items-center gap-2 shrink-0">
+                        <select
+                          aria-label={`Hub status for ${ticket.subject}`}
+                          value={ticket.status}
+                          onChange={(e) => handleUpdateHubTicket(customer.id, ticket.id, { status: e.target.value as SupportTicketStatus })}
+                          className="px-2.5 py-1 bg-slate-100 dark:bg-slate-800 rounded-lg text-[11px] font-bold text-slate-800 dark:text-slate-200"
+                        >
+                          <option value="Open">Open</option>
+                          <option value="In Progress">In Progress</option>
+                          <option value="Flagged">Flagged</option>
+                          <option value="Resolved">Resolved</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => handleUpdateHubTicket(customer.id, ticket.id, { flagged: !ticket.flagged })}
+                          className={`p-1.5 rounded-lg border text-xs ${
+                            ticket.flagged
+                              ? 'bg-amber-50 border-amber-300 text-amber-600'
+                              : 'bg-slate-100 dark:bg-slate-800 border-transparent text-slate-500'
+                          }`}
+                          title={ticket.flagged ? 'Unflag ticket' : 'Flag ticket'}
+                        >
+                          <Flag className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
         </div>
       )}
 
@@ -1101,36 +1395,45 @@ export const CustomersView: React.FC = () => {
                 <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
                   Payment Method
                 </label>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {['Cash', 'Card', 'Bank Transfer', 'Mobile'].map((method) => (
-                    <button
-                      key={method}
-                      type="button"
-                      onClick={() => setPaymentMethod(method)}
-                      className={`py-1.5 px-1 rounded-xl text-[10px] font-bold border transition-all text-center ${
-                        paymentMethod === method
-                          ? 'bg-blue-50 dark:bg-blue-950 border-blue-500 text-blue-600 dark:text-blue-400 shadow-xs'
-                          : 'bg-slate-100 dark:bg-slate-800 border-transparent text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
-                      }`}
-                    >
-                      {method}
-                    </button>
-                  ))}
-                </div>
+                <select
+                  aria-label="Payment Method"
+                  value={paymentMethod}
+                  onChange={(e) => setPaymentMethod(e.target.value)}
+                  className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white font-bold text-xs focus:outline-none"
+                >
+                  <option value="Cash">Cash</option>
+                  <option value="Bank Transfer">Bank Transfer</option>
+                  <option value="Mobile Transfer">Mobile Money / Transfer</option>
+                  <option value="Card">Card / POS</option>
+                </select>
               </div>
 
-              {/* Optional Reference / Note */}
-              <div>
-                <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  Payment Reference / Note (Optional)
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g., Transfer ID or Cash receipt"
-                  value={paymentNote}
-                  onChange={(e) => setPaymentNote(e.target.value)}
-                  className="w-full p-2 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white font-medium"
-                />
+              {/* Optional Reference & Note */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Transaction Ref (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g., TRX-849201"
+                    value={paymentReference}
+                    onChange={(e) => setPaymentReference(e.target.value)}
+                    className="w-full p-2 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white font-medium"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Payment Note (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g., Part payment"
+                    value={paymentNote}
+                    onChange={(e) => setPaymentNote(e.target.value)}
+                    className="w-full p-2 bg-slate-100 dark:bg-slate-800 rounded-xl text-slate-900 dark:text-white font-medium"
+                  />
+                </div>
               </div>
 
               <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">

@@ -154,4 +154,38 @@ describe('CustomerDetailView Sprint 3 (Tags & Activity Log)', () => {
     expect(screen.getByTestId('receipt-modal')).toBeInTheDocument();
     expect(screen.getByText('Invoice Modal: INV-1001')).toBeInTheDocument();
   });
+
+  it('allows creating and flagging support tickets in CustomerDetailView', () => {
+    const onSaveSupportTickets = vi.fn();
+    render(
+      <CustomerDetailView
+        customer={baseCustomer}
+        sales={[]}
+        moneyMovements={[]}
+        auditLogs={[]}
+        settings={baseSettings as any}
+        isPrivacyMode={false}
+        isSalesStaff={false}
+        onBack={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onSettleDebt={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onSaveSupportTickets={onSaveSupportTickets}
+      />
+    );
+
+    fireEvent.click(screen.getByText('Support Tickets'));
+    fireEvent.change(screen.getByPlaceholderText('Ticket subject (e.g., Damaged delivery item)...'), {
+      target: { value: 'Late delivery' },
+    });
+    fireEvent.click(screen.getByText('Create Ticket'));
+
+    expect(onSaveSupportTickets).toHaveBeenCalledWith(
+      'cust-1',
+      expect.arrayContaining([
+        expect.objectContaining({ subject: 'Late delivery', status: 'Open' }),
+      ])
+    );
+  });
 });

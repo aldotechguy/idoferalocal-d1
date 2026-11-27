@@ -3756,6 +3756,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (updates.address !== undefined && updates.address !== existing.address) changedParts.push('address');
     if (updates.notes !== undefined && updates.notes !== existing.notes) changedParts.push('notes');
     if (updates.tags !== undefined) changedParts.push(`tags [${(updates.tags || []).join(', ')}]`);
+    if (updates.supportTickets !== undefined) changedParts.push(`support tickets (${(updates.supportTickets || []).length})`);
     logAudit(
       'UPDATE_CUSTOMER',
       'Customer',
