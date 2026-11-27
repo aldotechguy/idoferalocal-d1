@@ -17,17 +17,24 @@ import {
   CheckCircle2,
   Receipt,
   Wallet,
+  Tag,
+  History,
+  Plus,
+  X,
 } from 'lucide-react';
-import { Customer, MoneyMovement, Sale, StoreSettings } from '../../types';
+import { AuditLog, Customer, MoneyMovement, Sale, StoreSettings } from '../../types';
 import { NairaSign } from '../common/NairaSign';
 import { loyaltyPointsForAmount, round2, unpaidOf } from '../../shared/customerLedger';
 
-export type CustomerDetailTab = 'overview' | 'purchases' | 'payments' | 'loyalty';
+export type CustomerDetailTab = 'overview' | 'purchases' | 'payments' | 'loyalty' | 'history';
+
+const PRESET_CUSTOMER_TAGS = ['VIP', 'Wholesale', 'Retail', 'Credit-Approved', 'Follow-Up'];
 
 interface CustomerDetailViewProps {
   customer: Customer;
   sales: Sale[];
   moneyMovements: MoneyMovement[];
+  auditLogs?: AuditLog[];
   settings: StoreSettings;
   isPrivacyMode: boolean;
   isSalesStaff: boolean;
@@ -36,12 +43,14 @@ interface CustomerDetailViewProps {
   onDelete: (customer: Customer) => void;
   onSettleDebt: (customer: Customer) => void;
   onSaveNotes: (customerId: string, notes: string) => void;
+  onSaveTags?: (customerId: string, tags: string[]) => void;
 }
 
 export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
   customer,
   sales,
   moneyMovements,
+  auditLogs = [],
   settings,
   isPrivacyMode,
   isSalesStaff,
@@ -50,10 +59,12 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
   onDelete,
   onSettleDebt,
   onSaveNotes,
+  onSaveTags,
 }) => {
   const [activeTab, setActiveTab] = useState<CustomerDetailTab>('overview');
   const [notesDraft, setNotesDraft] = useState<string>(customer.notes || '');
   const [notesSaved, setNotesSaved] = useState(false);
+  const [tagInput, setTagInput] = useState('');
 
   useEffect(() => {
     setNotesDraft(customer.notes || '');
@@ -123,6 +134,33 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
   };
 
   const notesDirty = notesDraft.trim() !== (customer.notes || '').trim();
+  const customerTags = customer.tags || [];
+
+  const customerAuditLogs = useMemo(() => {
+    return [...auditLogs]
+      .filter((l) => l && l.entity === 'Customer' && l.entityId === customer.id)
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  }, [auditLogs, customer.id]);
+
+  const handleAddTag = (rawTag: string) => {
+    if (!onSaveTags) return;
+    const clean = rawTag.trim();
+    if (!clean) return;
+    if (customerTags.some((t) => t.toLowerCase() === clean.toLowerCase())) {
+      setTagInput('');
+      return;
+    }
+    onSaveTags(customer.id, [...customerTags, clean]);
+    setTagInput('');
+  };
+
+  const handleRemoveTag = (tagToRemove: string) => {
+    if (!onSaveTags) return;
+    onSaveTags(
+      customer.id,
+      customerTags.filter((t) => t !== tagToRemove)
+    );
+  };
 
   return (
     <div className="space-y-6 pb-12 max-w-7xl mx-auto">
@@ -161,6 +199,15 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
                     Store Credit
                   </span>
                 )}
+                {customerTags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200/70 dark:border-indigo-800/60"
+                  >
+                    <Tag className="w-2.5 h-2.5" />
+                    {tag}
+                  </span>
+                ))}
               </div>
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-xs text-slate-500 dark:text-slate-400">
                 <span className="flex items-center gap-1">
@@ -276,6 +323,22 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
           >
             <Award className="w-3.5 h-3.5" />
             <span>Loyalty & Store Credit</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('history')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
+              activeTab === 'history'
+                ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
+                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+          >
+            <History className="w-3.5 h-3.5" />
+            <span>Activity Log</span>
+            <span className="px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-slate-200/80 dark:bg-slate-700 text-slate-700 dark:text-slate-200">
+              {customerAuditLogs.length}
+            </span>
           </button>
         </div>
       </div>
@@ -422,6 +485,86 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
                 </button>
               </div>
             </form>
+
+            {/* CRM Segmentation Tags (synced to D1) */}
+            <div className="pt-4 border-t border-slate-100 dark:border-slate-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-black text-slate-900 dark:text-white flex items-center gap-1.5">
+                  <Tag className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Customer Tags & Segmentation</span>
+                </h3>
+                <span className="text-[11px] text-slate-400">{customerTags.length} assigned</span>
+              </div>
+
+              <div className="flex flex-wrap gap-1.5">
+                {customerTags.length === 0 ? (
+                  <span className="text-xs text-slate-400">No tags assigned yet.</span>
+                ) : (
+                  customerTags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200/70 dark:border-indigo-800/60"
+                    >
+                      <span>{tag}</span>
+                      {onSaveTags && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveTag(tag)}
+                          className="text-indigo-400 hover:text-rose-600 transition-colors"
+                          title={`Remove tag ${tag}`}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </span>
+                  ))
+                )}
+              </div>
+
+              {onSaveTags && (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={tagInput}
+                      onChange={(e) => setTagInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleAddTag(tagInput);
+                        }
+                      }}
+                      placeholder="Add custom tag (e.g., VIP, Wholesale)..."
+                      className="flex-1 px-3 py-1.5 bg-slate-100 dark:bg-slate-800 border border-transparent focus:border-indigo-500 rounded-xl text-xs text-slate-900 dark:text-white focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleAddTag(tagInput)}
+                      disabled={!tagInput.trim()}
+                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center gap-1"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Add Tag</span>
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[10px] font-bold uppercase text-slate-400 mr-1">Quick add:</span>
+                    {PRESET_CUSTOMER_TAGS.filter(
+                      (p) => !customerTags.some((t) => t.toLowerCase() === p.toLowerCase())
+                    ).map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => handleAddTag(preset)}
+                        className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 text-slate-600 dark:text-slate-300 hover:text-indigo-600 transition-colors"
+                      >
+                        + {preset}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -653,6 +796,44 @@ export const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {activeTab === 'history' && (
+        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-xs overflow-hidden">
+          <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+            <h2 className="text-sm font-black text-slate-900 dark:text-white flex items-center gap-2">
+              <History className="w-4 h-4 text-blue-600" />
+              <span>Customer Activity & Audit Log ({customerAuditLogs.length})</span>
+            </h2>
+            <span className="text-[11px] text-slate-400">Synced with D1 audit_logs</span>
+          </div>
+          {customerAuditLogs.length === 0 ? (
+            <div className="py-12 text-center text-slate-400 text-xs">
+              No activity log entries recorded for this customer yet.
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-100 dark:divide-slate-800">
+              {customerAuditLogs.map((log) => (
+                <div key={log.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300">
+                        {log.action}
+                      </span>
+                      <span className="text-[11px] font-bold text-slate-600 dark:text-slate-300">
+                        by {log.performedBy || 'System'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-700 dark:text-slate-300">{log.details}</p>
+                  </div>
+                  <span className="text-[11px] text-slate-400 shrink-0">
+                    {formatDate(log.createdAt)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -108,9 +108,17 @@ export function productRow(r: any) {
   };
 }
 export function customerRow(r: any) {
+  let tags: string[] | undefined;
+  if (r.tags_json) {
+    try {
+      const parsed = JSON.parse(r.tags_json);
+      if (Array.isArray(parsed) && parsed.length > 0) tags = parsed.map((t: any) => String(t)).filter(Boolean);
+    } catch {}
+  }
   return {
     id: r.id, name: r.name, phone: r.phone || '', email: r.email || '', address: r.address || undefined,
     notes: r.notes || undefined,
+    tags,
     purchaseHistoryCount: n(r.purchase_history_count), outstandingBalance: KoboToNaira(r.outstanding_balance_kobo),
     loyaltyPoints: n(r.loyalty_points), lifetimeValue: KoboToNaira(r.lifetime_value_kobo),
     // Store credit (main c75f81e). Emitted only when non-zero so a snapshot with
@@ -261,6 +269,7 @@ export function customerToRow(c: any, now: string) {
   return {
     id: s(c.id), name: s(c.name, 'Walk-in Customer'), phone: s(c.phone), email: s(c.email),
     address: c.address ? s(c.address) : null, notes: c.notes ? s(c.notes) : null,
+    tags_json: Array.isArray(c.tags) && c.tags.length > 0 ? JSON.stringify(c.tags) : null,
     purchase_history_count: n(c.purchaseHistoryCount),
     outstanding_balance_kobo: NairaToKobo(c.outstandingBalance), loyalty_points: n(c.loyaltyPoints),
     lifetime_value_kobo: NairaToKobo(c.lifetimeValue),

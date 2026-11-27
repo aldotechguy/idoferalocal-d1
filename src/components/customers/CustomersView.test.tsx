@@ -59,6 +59,7 @@ const makeCustomer = (i: number) => ({
   loyaltyPoints: i * 10,
   lifetimeValue: i * 100,
   purchaseHistoryCount: i,
+  tags: i === 1 ? ['VIP'] : ['Retail'],
 });
 
 describe('CustomersView UI', () => {
@@ -68,6 +69,7 @@ describe('CustomersView UI', () => {
       customers: [makeCustomer(1), makeCustomer(2)],
       sales: [],
       moneyMovements: [],
+      auditLogs: [],
       addCustomer: vi.fn(),
       updateCustomer: vi.fn(),
       updateCustomerBalance: vi.fn(),
@@ -128,6 +130,7 @@ describe('CustomersView UI', () => {
       customers: manyCustomers,
       sales: [],
       moneyMovements: [],
+      auditLogs: [],
       addCustomer: vi.fn(),
       updateCustomer: vi.fn(),
       updateCustomerBalance: vi.fn(),
@@ -148,4 +151,32 @@ describe('CustomersView UI', () => {
     expect(screen.getByText('Customer 101')).toBeInTheDocument();
     expect(screen.queryByText('Customer 1')).not.toBeInTheDocument();
   }, 15000);
+
+  it('filters customers by tag and supports bulk tagging', () => {
+    const updateCustomer = vi.fn();
+    mockUseApp.mockReturnValue({
+      customers: [makeCustomer(1), makeCustomer(2)],
+      sales: [],
+      moneyMovements: [],
+      auditLogs: [],
+      addCustomer: vi.fn(),
+      updateCustomer,
+      updateCustomerBalance: vi.fn(),
+      deleteCustomer: vi.fn(),
+      settings: { currencySymbol: '₦', pointsPerDollar: 1 },
+    });
+
+    render(<CustomersView />);
+
+    fireEvent.change(screen.getByLabelText('Filter by tag'), { target: { value: 'VIP' } });
+    expect(screen.getByText('Customer 1')).toBeInTheDocument();
+    expect(screen.queryByText('Customer 2')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Filter by tag'), { target: { value: 'ALL' } });
+    fireEvent.click(screen.getByLabelText('Select Customer 2'));
+    fireEvent.change(screen.getByPlaceholderText('Bulk tag (e.g. VIP)...'), { target: { value: 'Wholesale' } });
+    fireEvent.click(screen.getByText('Apply Tag'));
+
+    expect(updateCustomer).toHaveBeenCalledWith('c-2', { tags: ['Retail', 'Wholesale'] });
+  });
 });

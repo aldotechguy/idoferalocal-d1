@@ -200,6 +200,7 @@ export interface Customer {
   email: string;
   address?: string;
   notes?: string;
+  tags?: string[];
   purchaseHistoryCount: number;
   outstandingBalance: number;
   overageBalance?: number;

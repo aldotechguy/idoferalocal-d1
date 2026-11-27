@@ -3726,6 +3726,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCustomers((prev) => [newCust, ...prev]);
     saveDocument('customers', newCust);
     putItem('customers', newCust).catch((e) => console.warn('IndexedDB customer put error:', e));
+    logAudit(
+      'CREATE_CUSTOMER',
+      'Customer',
+      newCust.id,
+      'User',
+      `Registered customer "${newCust.name}"${newCust.phone ? ` (${newCust.phone})` : ''}.`
+    );
     showToast({ title: 'New Customer Added', message: `Customer "${c.name}" registered successfully.`, type: 'success' });
     return newCust;
   };
@@ -3741,6 +3748,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     saveDocument('customers', updatedCust);
     putItem('customers', updatedCust).catch((e) => console.warn('IndexedDB customer put error:', e));
+
+    const changedParts: string[] = [];
+    if (updates.name !== undefined && updates.name !== existing.name) changedParts.push(`name -> "${updates.name}"`);
+    if (updates.phone !== undefined && updates.phone !== existing.phone) changedParts.push('phone');
+    if (updates.email !== undefined && updates.email !== existing.email) changedParts.push('email');
+    if (updates.address !== undefined && updates.address !== existing.address) changedParts.push('address');
+    if (updates.notes !== undefined && updates.notes !== existing.notes) changedParts.push('notes');
+    if (updates.tags !== undefined) changedParts.push(`tags [${(updates.tags || []).join(', ')}]`);
+    logAudit(
+      'UPDATE_CUSTOMER',
+      'Customer',
+      id,
+      'User',
+      `Updated customer "${updatedCust.name}"${changedParts.length > 0 ? `: ${changedParts.join(', ')}` : ''}.`
+    );
 
     // Cascade name/phone/address changes to linked active modules
     if (updates.name || updates.phone || updates.address) {
@@ -3985,6 +4007,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCustomers((prev) => prev.filter((c) => c.id !== id));
     removeDocument('customers', id);
     deleteItem('customers', id).catch((e) => console.warn('IndexedDB customer delete error:', e));
+    logAudit('DELETE_CUSTOMER', 'Customer', id, 'User', `Deleted customer "${target.name}".`);
 
     // Clean up customer balance notifications
     setNotifications((prev) => {

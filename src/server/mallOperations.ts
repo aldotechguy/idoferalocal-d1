@@ -90,6 +90,8 @@ export const RELATIONAL_FINANCE_COLUMNS: ReadonlyArray<{ name: string; ddl: stri
   // Customer Hub Sprint 1: customer notes & edit timestamp synced to D1.
   { name: 'customers.notes', ddl: 'ALTER TABLE customers ADD COLUMN notes TEXT' },
   { name: 'customers.updated_at', ddl: 'ALTER TABLE customers ADD COLUMN updated_at TEXT' },
+  // Customer Hub Sprint 3: customer CRM tags synced to D1.
+  { name: 'customers.tags_json', ddl: 'ALTER TABLE customers ADD COLUMN tags_json TEXT' },
 ];
 
 export function isDuplicateColumnError(error: unknown) {

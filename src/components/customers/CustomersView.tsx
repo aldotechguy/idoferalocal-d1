@@ -16,6 +16,7 @@ import {
   TrendingUp,
   ShoppingBag,
   AlertCircle,
+  Tag,
 } from 'lucide-react';
 import { NairaSign } from '../common/NairaSign';
 import Papa from 'papaparse';
@@ -30,13 +31,16 @@ import { findPotentialDuplicates } from '../../shared/customerDedup';
 import { CustomerDetailView } from './CustomerDetailView';
 
 export const CustomersView: React.FC = () => {
-  const { customers, sales, moneyMovements, addCustomer, updateCustomer, updateCustomerBalance, deleteCustomer, settings } = useApp();
+  const { customers, sales, moneyMovements, auditLogs, addCustomer, updateCustomer, updateCustomerBalance, deleteCustomer, settings } = useApp();
   const { currentUser, isPrivacyMode } = useAuth();
   const { showToast } = useToast();
   const isAdmin = currentUser?.role === 'Administrator';
   const isSalesStaff = currentUser?.role === 'Sales Staff';
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedTag, setSelectedTag] = useState<string>('ALL');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [bulkTagInput, setBulkTagInput] = useState('');
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [allowFuzzyCreate, setAllowFuzzyCreate] = useState(false);
@@ -110,15 +114,47 @@ export const CustomersView: React.FC = () => {
   const totalCustomerOrders = augmentedCustomers.reduce((sum, c) => sum + (c.purchaseHistoryCount || 0), 0);
   const totalLoyaltyPoints = augmentedCustomers.reduce((sum, c) => sum + (c.loyaltyPoints || 0), 0);
 
+  const allTags = useMemo(() => {
+    const set = new Set<string>();
+    augmentedCustomers.forEach((c) => (c.tags || []).forEach((t) => set.add(t)));
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [augmentedCustomers]);
+
   const filteredCustomers = augmentedCustomers.filter((c) => {
     if (!c) return false;
+    if (selectedTag !== 'ALL' && !(c.tags || []).includes(selectedTag)) return false;
     const q = (searchQuery || '').toLowerCase();
     return (
       (c.name || '').toLowerCase().includes(q) ||
       (c.phone && c.phone.includes(searchQuery)) ||
-      (c.email && c.email.toLowerCase().includes(q))
+      (c.email && c.email.toLowerCase().includes(q)) ||
+      (c.tags || []).some((t) => t.toLowerCase().includes(q))
     );
   });
+
+  const handleToggleSelect = (id: string) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const handleBulkApplyTag = (rawTag: string) => {
+    const tag = rawTag.trim();
+    if (!tag || selectedIds.length === 0) return;
+    selectedIds.forEach((id) => {
+      const cust = customers.find((c) => c.id === id);
+      if (!cust) return;
+      const existing = cust.tags || [];
+      if (!existing.some((t) => t.toLowerCase() === tag.toLowerCase())) {
+        updateCustomer(id, { tags: [...existing, tag] });
+      }
+    });
+    showToast({
+      title: 'Tags Applied',
+      message: `Applied "${tag}" to ${selectedIds.length} customer(s).`,
+      type: 'success',
+    });
+    setBulkTagInput('');
+    setSelectedIds([]);
+  };
 
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 100;
@@ -134,6 +170,7 @@ export const CustomersView: React.FC = () => {
       phone: c.phone,
       email: c.email,
       address: c.address,
+      tags: (c.tags || []).join('; '),
       outstandingBalance: c.outstandingBalance,
       loyaltyPoints: c.loyaltyPoints,
       lifetimeValue: c.lifetimeValue,
@@ -312,6 +349,7 @@ export const CustomersView: React.FC = () => {
           customer={selectedCustomer}
           sales={sales}
           moneyMovements={moneyMovements}
+          auditLogs={auditLogs}
           settings={settings}
           isPrivacyMode={isPrivacyMode}
           isSalesStaff={isSalesStaff}
@@ -320,6 +358,7 @@ export const CustomersView: React.FC = () => {
           onDelete={(cust) => setCustomerToDelete(cust)}
           onSettleDebt={handleOpenSettle}
           onSaveNotes={(customerId, notes) => updateCustomer(customerId, { notes })}
+          onSaveTags={(customerId, tags) => updateCustomer(customerId, { tags })}
         />
       ) : (
         <div className="space-y-6 pb-12">
@@ -438,32 +477,85 @@ export const CustomersView: React.FC = () => {
         </div>
       </div>
 
-      <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-xs">
-        <div className="relative w-full">
-          <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Search customer by name, phone, or email..."
-            value={searchQuery}
-            onChange={(e) => {
-              setSearchQuery(e.target.value);
-              setCurrentPage(1);
-            }}
-            className="w-full pl-10 pr-9 py-2 bg-slate-100 dark:bg-slate-800 border border-transparent focus:border-blue-500 text-slate-900 dark:text-slate-100 text-xs rounded-xl focus:outline-none"
-          />
-          {searchQuery && (
-            <button
-              onClick={() => {
-                setSearchQuery('');
+      <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-3">
+        <div className="flex flex-col sm:flex-row gap-3">
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Search customer by name, phone, email, or tag..."
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
                 setCurrentPage(1);
               }}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-              title="Clear search"
+              className="w-full pl-10 pr-9 py-2 bg-slate-100 dark:bg-slate-800 border border-transparent focus:border-blue-500 text-slate-900 dark:text-slate-100 text-xs rounded-xl focus:outline-none"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => {
+                  setSearchQuery('');
+                  setCurrentPage(1);
+                }}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                title="Clear search"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Tag className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+            <select
+              aria-label="Filter by tag"
+              value={selectedTag}
+              onChange={(e) => {
+                setSelectedTag(e.target.value);
+                setCurrentPage(1);
+              }}
+              className="px-3 py-2 bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 text-xs font-bold rounded-xl focus:outline-none"
             >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          )}
+              <option value="ALL">All Tags</option>
+              {allTags.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
+
+        {selectedIds.length > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+            <span className="text-xs font-bold text-indigo-700 dark:text-indigo-300">
+              {selectedIds.length} customer{selectedIds.length === 1 ? '' : 's'} selected
+            </span>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={bulkTagInput}
+                onChange={(e) => setBulkTagInput(e.target.value)}
+                placeholder="Bulk tag (e.g. VIP)..."
+                className="px-3 py-1 bg-slate-100 dark:bg-slate-800 rounded-lg text-xs text-slate-900 dark:text-white focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => handleBulkApplyTag(bulkTagInput)}
+                disabled={!bulkTagInput.trim()}
+                className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold rounded-lg text-xs"
+              >
+                Apply Tag
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedIds([])}
+                className="px-2 py-1 text-xs font-semibold text-slate-500 hover:text-slate-700"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-xs overflow-hidden">
@@ -492,15 +584,33 @@ export const CustomersView: React.FC = () => {
                       style={style}
                       className="grid grid-cols-12 items-center px-4 text-xs border-b border-slate-100 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
                     >
-                      <div className="col-span-2 font-bold text-slate-900 dark:text-white truncate pr-2">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedCustomerId(cust.id)}
-                          className="text-left hover:text-blue-600 dark:hover:text-blue-400 hover:underline transition-colors font-bold truncate max-w-full"
-                          title="Open Customer Profile"
-                        >
-                          {cust.name}
-                        </button>
+                      <div className="col-span-2 font-bold text-slate-900 dark:text-white truncate pr-2 flex items-start gap-2">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${cust.name}`}
+                          checked={selectedIds.includes(cust.id)}
+                          onChange={() => handleToggleSelect(cust.id)}
+                          className="mt-1 rounded shrink-0"
+                        />
+                        <div className="min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedCustomerId(cust.id)}
+                            className="text-left hover:text-blue-600 dark:hover:text-blue-400 hover:underline transition-colors font-bold truncate max-w-full block"
+                            title="Open Customer Profile"
+                          >
+                            {cust.name}
+                          </button>
+                          {(cust.tags || []).length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-0.5">
+                              {(cust.tags || []).slice(0, 2).map((t) => (
+                                <span key={t} className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300">
+                                  {t}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       </div>
                       <div className="col-span-3 pr-2 min-w-0">
                         <p className="flex items-center gap-1 text-[11px] truncate"><Phone className="w-3 h-3 text-slate-400 shrink-0" /> {isPrivacyMode ? '••••••' : (cust.phone || 'N/A')}</p>
@@ -602,14 +712,34 @@ export const CustomersView: React.FC = () => {
                 paginatedCustomers.map((cust) => (
                   <tr key={cust.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors">
                     <td className="py-3 px-4 font-bold text-slate-900 dark:text-white">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedCustomerId(cust.id)}
-                        className="text-left hover:text-blue-600 dark:hover:text-blue-400 hover:underline transition-colors font-bold"
-                        title="Open Customer Profile"
-                      >
-                        {cust.name}
-                      </button>
+                      <div className="flex items-start gap-2">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${cust.name}`}
+                          checked={selectedIds.includes(cust.id)}
+                          onChange={() => handleToggleSelect(cust.id)}
+                          className="mt-0.5 rounded shrink-0"
+                        />
+                        <div>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedCustomerId(cust.id)}
+                            className="text-left hover:text-blue-600 dark:hover:text-blue-400 hover:underline transition-colors font-bold"
+                            title="Open Customer Profile"
+                          >
+                            {cust.name}
+                          </button>
+                          {(cust.tags || []).length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {(cust.tags || []).map((t) => (
+                                <span key={t} className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300">
+                                  {t}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     </td>
                     <td className="py-3 px-3">
                       <p className="flex items-center gap-1 text-[11px]"><Phone className="w-3 h-3 text-slate-400" /> {isPrivacyMode ? '••••••' : (cust.phone || 'N/A')}</p>
